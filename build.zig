@@ -4,11 +4,19 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Sole dependency: zg — Unicode 16 text/width/graphemes.
+    const zg = b.dependency("zg", .{});
+
     // ── notui module ──────────────────────────────────────
     const mod = b.addModule("notui", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zg", .module = zg.module("zg") },
+            .{ .name = "DisplayWidth", .module = zg.module("DisplayWidth") },
+            .{ .name = "Graphemes", .module = zg.module("Graphemes") },
+        },
     });
 
     // ── notui executable ──────────────────────────────────
@@ -38,6 +46,11 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/root.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zg", .module = zg.module("zg") },
+                .{ .name = "DisplayWidth", .module = zg.module("DisplayWidth") },
+                .{ .name = "Graphemes", .module = zg.module("Graphemes") },
+            },
         }),
     });
     const run_unit_tests = b.addRunArtifact(unit_tests);

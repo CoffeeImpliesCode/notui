@@ -6,6 +6,8 @@ conventions as `~/projects/{noapi, nogui, skript, wayland}`.
 ## Stack
 
 - **Language**: Zig 0.16 (module API, `std.Io`, Juicy Main)
+- **Sole dep**: zg (Unicode 16: width, graphemes, text) — vendored elsewhere
+  is hand-copied from zigzag/libvaxis (see notes/research/zig-foundations.md)
 - **VCS**: jj — DO NOT USE GIT COMMANDS
 - **Dev env**: devenv + direnv (`.envrc` → `use devenv`)
 - **Linting**: zlint (`zlint.json` rules) + `zig fmt --check`

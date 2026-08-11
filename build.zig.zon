@@ -3,7 +3,12 @@
     .version = "0.0.0",
     .fingerprint = 0xb6bb4da781f0147a, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0",
-    .dependencies = .{},
+    .dependencies = .{
+        .zg = .{
+            .url = "https://codeberg.org/atman/zg/archive/v0.16.2.tar.gz",
+            .hash = "zg-0.16.2-oGqU3HqftgI6rwFS90ypwfjgToH8Pz829OKuFURlm773",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",
