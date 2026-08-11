@@ -1,0 +1,17 @@
+# devenv / direnv
+.devenv/
+.direnv/
+.envrc
+
+# zig
+.zig-cache/
+zig-out/
+zig-pkg/
+
+# tooling artifacts
+codedb.snapshot
+.codegraph/
+.omo/
+.opencode/
+graphify-out/
+notes/

@@ -1,0 +1,7 @@
+.devenv/
+.direnv/
+.git/
+.jj/
+.zig-cache/
+zig-out/
+zig-pkg/
