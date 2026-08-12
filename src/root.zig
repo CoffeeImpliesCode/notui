@@ -26,6 +26,8 @@ pub const buffer = @import("buffer.zig");
 // phases land.
 pub const region = @import("region.zig");
 pub const input = @import("input.zig");
+// base-ui presentation layer (P8) — see notes/research/baseui-contract.md.
+pub const component = @import("component/root.zig");
 
 test {
     std.testing.refAllDecls(@This());

@@ -147,6 +147,34 @@ pub const Color = union(enum) {
 
         return .{ .rgb = .{ .r = r, .g = g, .b = b } };
     }
+
+    /// Interpolate between `self` and `b` with an RGB lerp; `t` is
+    /// clamped to 0..1. Falls back to `self` when either end is not
+    /// rgb-convertible (baseui-contract.md §5; direct port of zigzag
+    /// `interpolateColor`, progress.zig:255-266).
+    pub fn interpolate(self: Color, b: Color, t: f64) Color {
+        const ar = toRgb(self) orelse return self;
+        const br = toRgb(b) orelse return self;
+        const tt = clamp01(t);
+        return .{ .rgb = .{
+            .r = lerpChannel(ar.r, br.r, tt),
+            .g = lerpChannel(ar.g, br.g, tt),
+            .b = lerpChannel(ar.b, br.b, tt),
+        } };
+    }
+
+    /// A comptime ramp of `steps` colors from `self` to `end` (1..=8
+    /// steps) for static palettes.
+    pub fn gradient(self: Color, comptime steps: usize, end: Color) [steps]Color {
+        if (steps == 0) @compileError("gradient: steps must be >= 1");
+        if (steps > 8) @compileError("gradient: steps must be <= 8");
+        var ramp: [steps]Color = undefined;
+        for (0..steps) |i| {
+            const t: f64 = if (steps == 1) 0 else @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(steps - 1));
+            ramp[i] = self.interpolate(end, t);
+        }
+        return ramp;
+    }
 };
 
 /// Basic ANSI colors (0-15).
@@ -317,6 +345,24 @@ pub const ColorProfile = enum {
     }
 };
 
+/// RGB view of a color; null when the color is not rgb-convertible.
+fn toRgb(c: Color) ?Color.Rgb {
+    return switch (c) {
+        .rgb => |rgb| rgb,
+        .ansi => |ac| ac.toRgb(),
+        .ansi256 => |n| ansi256ToRgb(n),
+        .default => null,
+    };
+}
+
+fn clamp01(x: f64) f64 {
+    return @max(0, @min(1, x));
+}
+
+fn lerpChannel(x: u8, y: u8, t: f64) u8 {
+    return @intFromFloat(@as(f64, @floatFromInt(x)) * (1.0 - t) + @as(f64, @floatFromInt(y)) * t);
+}
+
 test {
     std.testing.refAllDecls(@This());
 }
@@ -442,4 +488,62 @@ test "color: ColorProfile support matrix" {
     try std.testing.expect(!ColorProfile.ansi.supportsColor());
     try std.testing.expect(ColorProfile.ansi256.supportsColor());
     try std.testing.expect(ColorProfile.truecolor.supportsColor());
+}
+
+test "color: interpolate clamps t to 0..1" {
+    const black: Color = .{ .rgb = .{ .r = 0, .g = 0, .b = 0 } };
+    const white: Color = .{ .rgb = .{ .r = 255, .g = 255, .b = 255 } };
+    try std.testing.expect(Color.eql(black, black.interpolate(white, -1.0)));
+    try std.testing.expect(Color.eql(white, black.interpolate(white, 2.0)));
+    try std.testing.expect(Color.eql(black, black.interpolate(white, 0.0)));
+    try std.testing.expect(Color.eql(white, black.interpolate(white, 1.0)));
+}
+
+test "color: interpolate midpoint lerps each channel" {
+    const red: Color = .{ .rgb = .{ .r = 255, .g = 0, .b = 0 } };
+    const blue: Color = .{ .rgb = .{ .r = 0, .g = 0, .b = 255 } };
+    // 255 * 0.5 + 0 * 0.5 = 127.5 -> 127 (truncating cast, like zigzag).
+    try std.testing.expect(Color.eql(
+        .{ .rgb = .{ .r = 127, .g = 0, .b = 127 } },
+        red.interpolate(blue, 0.5),
+    ));
+}
+
+test "color: interpolate converts ansi and ansi256 ends" {
+    const red: Color = .{ .ansi = .red }; // (128, 0, 0)
+    const blue: Color = .{ .ansi = .blue }; // (0, 0, 128)
+    try std.testing.expect(Color.eql(
+        .{ .rgb = .{ .r = 64, .g = 0, .b = 64 } },
+        red.interpolate(blue, 0.5),
+    ));
+
+    const c0: Color = .{ .ansi256 = 16 }; // black cube corner
+    const c231: Color = .{ .ansi256 = 231 }; // white cube corner
+    try std.testing.expect(Color.eql(
+        .{ .rgb = .{ .r = 127, .g = 127, .b = 127 } },
+        c0.interpolate(c231, 0.5),
+    ));
+}
+
+test "color: interpolate falls back to self on non-rgb-convertible ends" {
+    const def: Color = .default;
+    try std.testing.expect(Color.eql(.default, def.interpolate(.{ .ansi = .red }, 0.5)));
+    try std.testing.expect(Color.eql(.{ .ansi = .red }, (Color{ .ansi = .red }).interpolate(.default, 0.5)));
+}
+
+test "color: gradient builds a comptime ramp" {
+    const black: Color = .{ .rgb = .{ .r = 0, .g = 0, .b = 0 } };
+    const white: Color = .{ .rgb = .{ .r = 255, .g = 255, .b = 255 } };
+    const ramp = black.gradient(3, white);
+    try std.testing.expectEqual(@as(usize, 3), ramp.len);
+    try std.testing.expect(Color.eql(black, ramp[0]));
+    try std.testing.expect(Color.eql(.{ .rgb = .{ .r = 127, .g = 127, .b = 127 } }, ramp[1]));
+    try std.testing.expect(Color.eql(white, ramp[2]));
+
+    const two = black.gradient(2, white);
+    try std.testing.expect(Color.eql(black, two[0]));
+    try std.testing.expect(Color.eql(white, two[1]));
+
+    const one = black.gradient(1, white);
+    try std.testing.expect(Color.eql(black, one[0]));
 }
