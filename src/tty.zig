@@ -13,6 +13,13 @@ const builtin = @import("builtin");
 const posix = std.posix;
 const Winsize = @import("event.zig").Winsize;
 
+/// ioctl request constants above c_int's range (e.g. IOCSPTLCK, IOCGPTN) break
+/// when libc is linked (request becomes c_int); pass the bits via the ABI-safe
+/// type for the current mode.
+fn ioctlReq(req: u32) if (builtin.link_libc) c_int else u32 {
+    return if (builtin.link_libc) @bitCast(req) else req;
+}
+
 /// SIGWINCH resize flag — the single sanctioned global (plan §0), set by
 /// the signal handler, drained by `Tty.checkResize`.
 var resize_signaled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
@@ -350,10 +357,18 @@ test "tty: makeRaw/restore round-trip on a real PTY pair" {
     defer master.close(io);
 
     var unlock: c_int = 0;
-    if (posix.errno(posix.system.ioctl(master.handle, posix.T.IOCSPTLCK, @intFromPtr(&unlock))) != .SUCCESS) return;
+    if (posix.errno(posix.system.ioctl(
+        master.handle,
+        ioctlReq(posix.T.IOCSPTLCK),
+        @intFromPtr(&unlock),
+    )) != .SUCCESS) return;
 
     var ptn: c_uint = 0;
-    if (posix.errno(posix.system.ioctl(master.handle, posix.T.IOCGPTN, @intFromPtr(&ptn))) != .SUCCESS) return;
+    if (posix.errno(posix.system.ioctl(
+        master.handle,
+        ioctlReq(posix.T.IOCGPTN),
+        @intFromPtr(&ptn),
+    )) != .SUCCESS) return;
 
     var pts_path_buf: [32]u8 = undefined;
     const pts_path = std.fmt.bufPrint(&pts_path_buf, "/dev/pts/{d}", .{ptn}) catch return;
