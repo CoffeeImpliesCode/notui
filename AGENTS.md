@@ -12,6 +12,7 @@ conventions as `~/projects/{noapi, nogui, skript, wayland}`.
 - **Dev env**: devenv + direnv (`.envrc` → `use devenv`)
 - **Linting**: zlint (`zlint.json` rules) + `zig fmt --check`
 - **Toolchain**: `zig` from devenv (nixpkgs 0.16)
+- **Lint/analyze tools**: prefer the locally built versions (`~/.local/bin/zlint`, `~/tools/ziglint`, `~/tools/zbc`, `~/tools/zcov`) over devenv's nixpkgs ones — they may be patched for this setup.
 
 ## Structure
 
@@ -58,6 +59,6 @@ zig build           # Debug build → zig-out/bin/notui
 zig build run       # build + run
 zig build test      # unit tests
 zig fmt --check .   # formatting gate
-zlint               # lint (from devenv)
+zlint               # lint (prefer ~/.local/bin/zlint; devenv nixpkgs is fallback)
 jj st               # working-copy status (never git)
 ```
