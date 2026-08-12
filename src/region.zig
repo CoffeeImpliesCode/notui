@@ -105,6 +105,14 @@ pub const Region = struct {
     anchor_dirty: bool = true,
     /// A width change / forced full redraw (strategy 2) is due.
     width_dirty: bool = false,
+    /// A height-only change is pending (the height_dirty strategy is due).
+    height_dirty: bool = false,
+    /// Rows added by the last setHeight (0 unless growing); reserved + diffed
+    /// on the next frame.
+    grow_rows: u16 = 0,
+    /// Rows removed by the last setHeight (0 unless shrinking); erased on the
+    /// next frame.
+    shrink_rows: u16 = 0,
     /// The region has not rendered yet (strategy 1 pending).
     first_frame: bool = true,
     /// The cursor was hidden by the first interactive render.
@@ -161,6 +169,38 @@ pub const Region = struct {
         self.anchor_dirty = true;
     }
 
+    /// Height-only resize. Reallocs both buffers to `new_height` keeping the
+    /// current width, and marks the next frame for a height change. Unlike
+    /// `resize`, does NOT set `width_dirty`: the width is unchanged, so there
+    /// is no `ESC[J` width-clear. Growth reserves the extra rows below the band
+    /// (CNL) and paints them via the normal diff (they are empty in `prev`);
+    /// shrink erases the removed tail rows row by row (`eraseLine` — the
+    /// self-scoped alternative the requirement allows, never wiping content
+    /// below the band) and corrects the anchor (see the `height_dirty`
+    /// strategy in render). No-op when `new_height` is the current height.
+    /// Call this OR `resize` in a frame gap — not both.
+    pub fn setHeight(self: *Region, new_height: u16) !void {
+        const old_height = self.height;
+        if (new_height == old_height) return;
+        try self.cur.resize(self.width, new_height);
+        try self.prev.resize(self.width, new_height);
+        self.height = new_height;
+        self.height_dirty = true;
+        // Delta bookkeeping consumed by the height_dirty strategy in render.
+        self.grow_rows = if (new_height > old_height) new_height - old_height else 0;
+        self.shrink_rows = if (new_height < old_height) old_height - new_height else 0;
+        // Bookkeeping only (anchor_row is never used for positioning); keep it
+        // tracking the reserved band height across grow/shrink cycles.
+        if (new_height > old_height) {
+            self.anchor_row +|= new_height - old_height;
+        } else {
+            self.anchor_row -|= old_height - new_height;
+        }
+        // On grow the diff will paint the new rows (they are empty in prev);
+        // raise the high-water mark so a later shrink erases them correctly.
+        if (new_height > old_height) self.high_water = new_height;
+    }
+
     /// Queue `item` to flush ABOVE the region on the next render.
     pub fn append(self: *Region, item: Append) !void {
         try self.append_queue.append(self.gpa, item);
@@ -208,8 +248,8 @@ pub const Region = struct {
         const cpr = self.anchor_dirty;
         const flush = self.append_queue.items.len > 0;
         const diff = self.scanChanges();
-        const changed = self.first_frame or self.width_dirty or flush or
-            (diff != null);
+        const changed = self.first_frame or self.width_dirty or
+            self.height_dirty or flush or (diff != null);
         if (!cpr and !changed) return; // idle: emit nothing (§3)
         if (cpr) self.anchor_dirty = false;
 
@@ -223,8 +263,61 @@ pub const Region = struct {
             // would erase the shell's output below the cursor.
             self.first_frame = false;
             self.width_dirty = false;
+            self.height_dirty = false;
+            self.grow_rows = 0;
+            self.shrink_rows = 0;
             if (flush) try self.flushAtCursor(w);
             try self.paintFirst(w);
+        } else if (self.height_dirty) {
+            // Strategy "height": a height-only change. No width-clear.
+            self.height_dirty = false;
+            const grow = self.grow_rows;
+            const shrink = self.shrink_rows;
+            self.grow_rows = 0;
+            self.shrink_rows = 0;
+
+            if (grow > 0) {
+                // Reserve the extra rows below the band (CNL), then paint
+                // them via the normal diff (they are empty in prev).
+                // Cursor: old band bottom -> new band bottom after CNL;
+                // renderDiffFrame's moveToBandTop (CUU new-1) climbs to
+                // row 0.
+                if (self.opts.append_lines) try emit.appendLines(w, grow);
+                self.high_water = self.height;
+            } else {
+                // Shrink. The cursor sits at the OLD band bottom (row
+                // `shrink` below the new bottom) and the removed rows
+                // [new..old) are still on screen. Walk back up through
+                // them erasing each row with `eraseLine` (self-scoped —
+                // ESC[K touches only the current row, never content below
+                // the band; the tmux/column-1 discipline), then climb to
+                // the new band bottom so the diff below starts at the
+                // correct anchor.
+                try w.writeAll("\r");
+                var erased: u16 = 0;
+                while (erased < shrink) : (erased += 1) {
+                    try emit.eraseLine(w);
+                    if (erased + 1 < shrink) try w.writeAll("\x1b[1A");
+                }
+                try w.writeAll("\r");
+                try w.writeAll("\x1b[1A"); // first removed row -> new band bottom
+                self.high_water = self.height;
+            }
+
+            // The band rows [0..new) are unchanged in content (grow keeps
+            // them; shrink erased only the removed tail), so diff the
+            // changed rows against prev. renderDiffFrame re-establishes
+            // the anchor (moveToBandTop) and returns the cursor to the
+            // band bottom.
+            if (diff) |ch| {
+                try self.renderDiffFrame(w, ch);
+            } else {
+                // Reserve/erase-only frame (no row changed): the pre-step
+                // above already left the cursor at the new band bottom
+                // (column 1 of the last row); return to column 1 to close
+                // the frame.
+                try w.writeAll("\r");
+            }
         } else if (flush) {
             // Append flush (§4.4): write the queue above the band, then
             // repaint every row (the flush's ESC[J wiped the band, so a
@@ -1145,4 +1238,181 @@ test "region: non-TTY blank cells are written as spaces, never CUF" {
         "\x1b[?2026h\x1b[6n\x1b[?25l\ra\x1b[2Cb\r\n\r\x1b[?2026l",
         t2.w.buffered(),
     );
+}
+
+// ── T5.7 setHeight (height-only resize) ──────────────
+
+test "region: setHeight grow reserves with CNL and diffs the new rows, no width-clear" {
+    var r = try makeRegion(2, true, true);
+    defer r.deinit();
+    try drawRow(&r.cur, 0, "ab");
+    try drawRow(&r.cur, 1, "cd");
+
+    var t1: TestWriter = .{};
+    t1.init();
+    try r.render(&t1.w);
+    try std.testing.expectEqualStrings(
+        "\x1b[?2026h\x1b[6n\x1b[2E\x1b[?25l\rab\r\ncd\r\x1b[?2026l",
+        t1.w.buffered(),
+    );
+
+    // One-shot grow 2 -> 4 with two suggestion rows: the frame emits the
+    // CNL reservation then a strategy-3 diff of rows 2-3 — no ESC[J
+    // anywhere (strategy 2 never runs on a height-only change).
+    try r.setHeight(4);
+    try drawRow(&r.cur, 2, "ef");
+    try drawRow(&r.cur, 3, "gh");
+    var t2: TestWriter = .{};
+    t2.init();
+    try r.render(&t2.w);
+    try std.testing.expectEqualStrings(
+        "\x1b[?2026h\x1b[2E\r\x1b[3A\r\n\n\x1b[Kef\r\n\x1b[Kgh\r\x1b[?2026l",
+        t2.w.buffered(),
+    );
+    try std.testing.expect(std.mem.indexOf(u8, t2.w.buffered(), "\x1b[J") == null);
+    try std.testing.expect(!r.width_dirty);
+}
+
+test "region: setHeight shrink erases the removed tail row by row, then diffs" {
+    var r = try makeRegion(5, true, false);
+    defer r.deinit();
+    try drawRow(&r.cur, 0, "ab");
+    try drawRow(&r.cur, 1, "cd");
+    try drawRow(&r.cur, 2, "ef");
+    try drawRow(&r.cur, 3, "gh");
+    try drawRow(&r.cur, 4, "ij");
+    var t1: TestWriter = .{};
+    t1.init();
+    try r.render(&t1.w);
+    try std.testing.expectEqualStrings(
+        "\x1b[?2026h\x1b[6n\x1b[?25l\rab\r\ncd\r\nef\r\ngh\r\nij\r\x1b[?2026l",
+        t1.w.buffered(),
+    );
+
+    // Shrink 5 -> 2: per-row eraseLine walk over the removed rows
+    // [2..5) (erase the old band bottom, walk back one row, erase —
+    // self-scoped, never ESC[J), then climb to the new band bottom and
+    // diff the changed status row.
+    try r.setHeight(2);
+    try clearRow(&r.cur, 1, 2);
+    try drawRow(&r.cur, 1, "XY");
+    var t2: TestWriter = .{};
+    t2.init();
+    try r.render(&t2.w);
+    try std.testing.expectEqualStrings(
+        "\x1b[?2026h\r\x1b[K\x1b[1A\x1b[K\x1b[1A\x1b[K\r\x1b[1A\r\x1b[1A\r\n\x1b[KXY\r\x1b[?2026l",
+        t2.w.buffered(),
+    );
+    // 3 row-erases in the walk + 1 for the diffed status row.
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, t2.w.buffered(), "\x1b[K"));
+    try std.testing.expect(std.mem.indexOf(u8, t2.w.buffered(), "\x1b[J") == null);
+    try std.testing.expect(!r.width_dirty);
+}
+
+test "region: setHeight grow-then-shrink round-trip leaves the smaller band" {
+    var r = try makeRegion(2, true, false);
+    defer r.deinit();
+    try drawRow(&r.cur, 0, "ab");
+    try drawRow(&r.cur, 1, "cd");
+    var t1: TestWriter = .{};
+    t1.init();
+    try r.render(&t1.w);
+
+    // Grow to 5 with three suggestion rows, then dismiss back to 2.
+    try r.setHeight(5);
+    try drawRow(&r.cur, 2, "ef");
+    try drawRow(&r.cur, 3, "gh");
+    try drawRow(&r.cur, 4, "ij");
+    var t2: TestWriter = .{};
+    t2.init();
+    try r.render(&t2.w);
+
+    try r.setHeight(2);
+    var t3: TestWriter = .{};
+    t3.init();
+    try r.render(&t3.w);
+    // The removed rows [2..5) are erased row by row; rows [0..2) are
+    // unchanged, so this is an erase-only frame (no diff, no repaint) —
+    // exactly the `diff == null` shrink the height_dirty gate exists for.
+    try std.testing.expectEqualStrings(
+        "\x1b[?2026h\r\x1b[K\x1b[1A\x1b[K\x1b[1A\x1b[K\r\x1b[1A\r\x1b[?2026l",
+        t3.w.buffered(),
+    );
+    try std.testing.expectEqual(@as(u16, 2), r.height);
+
+    // Follow-up idle frame emits nothing.
+    var t4: TestWriter = .{};
+    t4.init();
+    try r.render(&t4.w);
+    try std.testing.expectEqualStrings("", t4.w.buffered());
+}
+
+test "region: setHeight never clears width; resize still does" {
+    var r = try makeRegion(2, true, false);
+    defer r.deinit();
+    try drawRow(&r.cur, 0, "ab");
+    try drawRow(&r.cur, 1, "cd");
+    var t1: TestWriter = .{};
+    t1.init();
+    try r.render(&t1.w);
+
+    // Grow with no new content: reserve-only frame, still no ESC[J.
+    try r.setHeight(3);
+    var t2: TestWriter = .{};
+    t2.init();
+    try r.render(&t2.w);
+    try std.testing.expect(std.mem.indexOf(u8, t2.w.buffered(), "\x1b[J") == null);
+    try std.testing.expect(!r.width_dirty);
+
+    // A real width change keeps its strategy-2 ESC[J + full repaint.
+    try r.resize(40, 3);
+    var t3: TestWriter = .{};
+    t3.init();
+    try r.render(&t3.w);
+    try std.testing.expect(std.mem.indexOf(u8, t3.w.buffered(), "\x1b[J") != null);
+    try std.testing.expect(!r.width_dirty);
+}
+
+test "region: setHeight with the same height is a no-op" {
+    var r = try makeRegion(2, true, false);
+    defer r.deinit();
+    try drawRow(&r.cur, 0, "ab");
+    try drawRow(&r.cur, 1, "cd");
+    var t1: TestWriter = .{};
+    t1.init();
+    try r.render(&t1.w);
+
+    try r.setHeight(2);
+    try std.testing.expect(!r.height_dirty);
+    try std.testing.expectEqual(@as(u16, 0), r.grow_rows);
+    try std.testing.expectEqual(@as(u16, 0), r.shrink_rows);
+
+    var t2: TestWriter = .{};
+    t2.init();
+    try r.render(&t2.w);
+    try std.testing.expectEqualStrings("", t2.w.buffered());
+}
+
+test "region: setHeight before the first render just sets the initial band" {
+    var r = try makeRegion(2, true, true);
+    defer r.deinit();
+    try r.setHeight(4);
+    try std.testing.expect(r.height_dirty);
+    try drawRow(&r.cur, 0, "ab");
+    try drawRow(&r.cur, 1, "cd");
+    try drawRow(&r.cur, 2, "ef");
+    try drawRow(&r.cur, 3, "gh");
+
+    var t: TestWriter = .{};
+    t.init();
+    try r.render(&t.w);
+    // First-frame path wins: paintFirst appends all 4 rows; the
+    // height_dirty flags are cleared and no grow reservation runs
+    // (nothing was on screen).
+    try std.testing.expectEqualStrings(
+        "\x1b[?2026h\x1b[6n\x1b[4E\x1b[?25l\rab\r\ncd\r\nef\r\ngh\r\x1b[?2026l",
+        t.w.buffered(),
+    );
+    try std.testing.expect(!r.height_dirty);
+    try std.testing.expectEqual(@as(u16, 0), r.grow_rows);
 }

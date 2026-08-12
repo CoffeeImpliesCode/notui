@@ -15,6 +15,7 @@ pub const AnimatedText = @import("animated_text.zig").AnimatedText;
 pub const Progress = @import("progress.zig").Progress;
 pub const StatusBar = @import("status_bar.zig").StatusBar;
 pub const Gauge = @import("gauge.zig").Gauge;
+pub const Suggestions = @import("suggestions.zig").Suggestions;
 
 test {
     std.testing.refAllDecls(@This());
