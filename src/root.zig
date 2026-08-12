@@ -21,6 +21,11 @@ pub const caps = @import("caps.zig");
 // buffer.zig lands in P4 (parallel round B) — the re-export line is added
 // now so the module root is stable once both phases land.
 pub const buffer = @import("buffer.zig");
+// region.zig (P5) and input.zig (P6) land in parallel round C — both
+// re-export lines are added now so the module root is stable once both
+// phases land.
+pub const region = @import("region.zig");
+pub const input = @import("input.zig");
 
 test {
     std.testing.refAllDecls(@This());

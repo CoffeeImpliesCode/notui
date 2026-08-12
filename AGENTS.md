@@ -60,6 +60,6 @@ zig build run       # build + run
 zig build test      # unit tests
 zig fmt --check .   # formatting gate
 zlint               # lint (prefer ~/.local/bin/zlint; devenv nixpkgs is fallback)
-gate                # all quality gates (zig-gate): fmt --check, build, test, ast-check, ziglint, zlint; optional --zbc/--cov; exit 1 on issues
+gate                # all quality gates (zig-gate): fmt --check, build, test, ast-check, ziglint, zlint; zbc by default (advisory; strict via ZBC_STRICT=1); optional `--cov`; exit 1 on issues
 jj st               # working-copy status (never git)
 ```
