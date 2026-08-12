@@ -4,7 +4,12 @@
 //! for multi-line forms, otherwise the main prompt + live
 //! keyword-highlighted typing with a reverse-video cursor block); row 1
 //! is the status band (base-ui Spinner while an eval runs, "done in
-//! {d}ms" after a completed eval, a keybinding hint otherwise). Completed
+//! {d}ms" after a completed eval, a keybinding hint otherwise). While the
+//! user types a symbol and the eval worker is idle, a sorted candidate
+//! popup (base-ui Suggestions) appears below the input aligned under the
+//! cursor column: the band grows to `base_height + shown` rows and the
+//! status band moves down. Tab accepts the highlighted candidate, ↑/↓
+//! navigate (not history), Esc dismisses. Completed
 //! submissions append above the band as plain `.line` scrollback rows:
 //! the query (keyword-styled), the `⇒ answer (Type)` line, and muted
 //! captured library output (capped at 5 lines + "N more captured").
@@ -71,6 +76,13 @@ const cont_prompt = "    · ";
 /// Status-band hint shown while a multi-line form is mid-continuation.
 const cont_status = "multiline: Enter to continue";
 
+/// Band geometry for the inline-suggestion popup (§4): the band is 2 rows
+/// (input + status) and grows to `base_height + shown` while the popup is
+/// open, capped at `max_rows` candidate rows (an 8-row popup keeps a
+/// 2-row band at 10 rows, never ballooning past a short terminal).
+const base_height: u16 = 2;
+const max_rows: u16 = 8;
+
 /// Answer guard caps (§6): a huge pretty answer is truncated at 16 KiB
 /// (worker side) and at 200 scrollback rows (append side).
 const max_answer_bytes: usize = 16 * 1024;
@@ -117,6 +129,13 @@ const special_forms = [_][]const u8{
     "begin",  "case", "def",   "defn", "fn", "if",
     "lambda", "let",  "quote", "set!",
 };
+
+/// Completion keywords: an alias of `special_forms` (the reader/compiler
+/// special forms are NOT bound in root_ns — skript repl.zig:461-463 keeps
+/// the identical private list; `else`/`and`/`or`/`not`/`nil`/`instance`/
+/// `method` are prelude bindings and come from the namespace iteration).
+/// One list only, to avoid drift.
+const builtin_keywords = special_forms;
 
 /// extern "c" fd plumbing for OutputCapture (skript contract §6 — this is
 /// why the example links libc). Verbatim from skript's repl.zig.
@@ -189,6 +208,11 @@ pub fn main(init: std.process.Init) !void {
     var slot: ResultSlot = .{};
     var worker: ?std.Thread = null;
     var spinner: notui.component.Spinner = .{ .label = "evaluating" };
+    // Open inline-suggestion popup state; null when dismissed. candidates
+    // is arena-owned (replaced wholesale on every recompute — the arena
+    // never frees, matching the session-lifetime slice pattern) and
+    // selected starts at 0 each time the popup opens.
+    var sugg: ?notui.component.Suggestions = null;
     // §7: eval start timestamp (set in submit) and the last completed
     // eval's duration in ms (status band; cleared on the next keypress).
     var eval_start: std.Io.Timestamp = .fromNanoseconds(0);
@@ -203,6 +227,10 @@ pub fn main(init: std.process.Init) !void {
             .key_press => |k| {
                 // Any key clears the "done in …ms" status (§7).
                 last_eval_ms = null;
+                // A Tab-accept dismisses the popup and suppresses the tail
+                // recompute: the accepted symbol itself is a prefix match,
+                // so re-filtering would re-open the popup on the spot.
+                var accepted: bool = false;
                 if (isCtrlC(k)) {
                     if (worker != null) {
                         // ^C during an in-flight eval quits (skript's own
@@ -222,6 +250,12 @@ pub fn main(init: std.process.Init) !void {
                 {
                     break; // `q` quits on an empty (or whitespace-only) line
                 } else if (k.matches(Key.enter, .{})) {
+                    // An open popup dismisses BEFORE Enter's normal path
+                    // (submit or multi-line continuation) runs.
+                    if (sugg != null) {
+                        sugg = null;
+                        try region.setHeight(base_height);
+                    }
                     // Meta commands / multi-line continuation / submit
                     // (§4-§5); ignored while a submission is in flight.
                     if (try handleEnter(
@@ -236,6 +270,21 @@ pub fn main(init: std.process.Init) !void {
                         rt,
                         &eval_start,
                     )) break;
+                } else if (sugg != null and k.matches(Key.tab, .{})) {
+                    // Accept the highlighted candidate (popup only; a
+                    // closed popup falls through to the text insert).
+                    try acceptSuggestion(aa, &line, &cursor, sugg.?);
+                    sugg = null;
+                    try region.setHeight(base_height);
+                    accepted = true;
+                } else if (sugg != null and k.matches(Key.escape, .{})) {
+                    sugg = null; // dismiss without accepting (line untouched)
+                    try region.setHeight(base_height);
+                } else if (sugg != null and k.matches(Key.up, .{})) {
+                    // Navigate candidates (wrap), NOT history.
+                    sugg.?.selected = (sugg.?.selected + sugg.?.candidates.len - 1) % sugg.?.candidates.len;
+                } else if (sugg != null and k.matches(Key.down, .{})) {
+                    sugg.?.selected = (sugg.?.selected + 1) % sugg.?.candidates.len;
                 } else if (k.matches(Key.up, .{})) {
                     history.up(aa, &line);
                     cursor = line.items.len;
@@ -289,6 +338,34 @@ pub fn main(init: std.process.Init) !void {
                 } else {
                     try insertKeyText(aa, &line, &cursor, k);
                 }
+
+                // Recompute the popup for the post-key token (idle only):
+                // every idle keypress re-filters, so the popup tracks the
+                // token under the cursor after text, nav and kill keys.
+                // Never while an eval is in flight — completion reads
+                // root_ns, and the worker owns the runtime during an eval.
+                if (worker == null and !accepted) {
+                    std.debug.assert(worker == null);
+                    const prefix = tokenAtCursor(line.items, cursor);
+                    const cands = if (prefix.len == 0) &.{} else candidates(aa, rt, prefix);
+                    if (cands.len == 0) {
+                        // Zero matches (empty/number token, or a prefix
+                        // nothing starts with): dismiss.
+                        if (sugg != null) {
+                            sugg = null;
+                            try region.setHeight(base_height);
+                        }
+                    } else {
+                        var s = if (sugg) |s0|
+                            s0
+                        else
+                            notui.component.Suggestions{ .candidates = cands, .selected = 0, .max_rows = max_rows };
+                        s.candidates = cands;
+                        if (s.selected >= cands.len) s.selected = 0; // recompute shrank the list
+                        sugg = s;
+                        try region.setHeight(base_height + @as(u16, @intCast(@min(cands.len, @as(usize, max_rows)))));
+                    }
+                }
             },
             .winsize => |wsz| try region.resize(wsz.cols, region.height),
             else => {},
@@ -303,7 +380,7 @@ pub fn main(init: std.process.Init) !void {
         const now = std.Io.Timestamp.now(io, .awake);
         try pollSlot(aa, &region, &slot, &worker, &eval_start, &last_eval_ms, now);
 
-        try drawBand(aa, &region, line.items, cursor, &spinner, worker != null, now, last_eval_ms);
+        try drawBand(aa, &region, line.items, cursor, sugg, &spinner, worker != null, now, last_eval_ms);
         try region.render(w);
         try w.flush();
     }
@@ -968,18 +1045,94 @@ fn styleLine(aa: std.mem.Allocator, segs: []const ScanSeg) ![]const u8 {
     return out.toOwnedSlice(aa);
 }
 
+// ── inline suggestions: candidates + token detection ───────────────
+
+/// Completion candidates: every binding in root_ns whose name starts with
+/// `prefix` (case-sensitive) plus the builtin special forms, sorted for a
+/// stable Tab order. The returned LIST is allocated from `alloc`; the
+/// candidate STRING contents are borrowed (interned store symbols + the
+/// static builtin_keywords array) and stay valid for the runtime's life.
+/// MAIN THREAD ONLY: the caller MUST hold worker == null (§1.4).
+fn candidates(alloc: std.mem.Allocator, rt: *skript.Runtime, prefix: []const u8) []const []const u8 {
+    const ns_ptr = rt.root_ns.obj.toRef().deref(skript.Namespace);
+    const root_map: *skript.HashMapNamespace = @ptrCast(@alignCast(ns_ptr.data));
+    var out: std.ArrayList([]const u8) = .empty;
+    var it = root_map.bindings.iterator();
+    while (it.next()) |kv| {
+        const name: []const u8 = kv.key_ptr.*.*;
+        if (std.mem.startsWith(u8, name, prefix)) out.append(alloc, name) catch break;
+    }
+    for (builtin_keywords) |kw| {
+        if (std.mem.startsWith(u8, kw, prefix)) out.append(alloc, kw) catch break;
+    }
+    std.mem.sort([]const u8, out.items, {}, lessThan);
+    // Arena-backed: toOwnedSlice transfers the backing array to the arena
+    // (the caller frees nothing — the arena resets each frame); on OOM
+    // degrade to no candidates, consistent with the append catches above.
+    return out.toOwnedSlice(alloc) catch return &.{};
+}
+
+fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
+}
+
+/// A completion token terminator: whitespace, the reader grouping
+/// punctuation, a colon, or a quote. A symbol never spans one of these,
+/// so scanning back to the last one yields the prefix being typed. `:` is
+/// deliberately a terminator so a `:keyword` literal never completes
+/// against symbol names.
+fn isCompletionDelim(c: u8) bool {
+    return c == ' ' or c == '\t' or c == '\n' or switch (c) {
+        '(', ')', '[', ']', '{', '}', ':', '"', '\'' => true,
+        else => false,
+    };
+}
+
+/// The in-progress symbol prefix at `cursor`. Empty when the cursor is at
+/// a token boundary or the token can't be a symbol (number / string), in
+/// which case NO popup should show. Scans `line.items[0..cursor]`; the
+/// `\n` delimiter already handles multi-line continuation safety.
+fn tokenAtCursor(line: []const u8, cursor: usize) []const u8 {
+    var start = cursor;
+    while (start > 0 and !isCompletionDelim(line[start - 1])) start -= 1;
+    const tok = line[start..cursor];
+    if (tok.len == 0) return "";
+    if (isDigit(tok[0])) return ""; // number literal → no symbol completion
+    return tok;
+}
+
+/// Replace the current token with the highlighted candidate and move the
+/// cursor to its end. Dismissal (sugg = null + setHeight) is the caller's
+/// job.
+fn acceptSuggestion(
+    aa: std.mem.Allocator,
+    line: *std.ArrayList(u8),
+    cursor: *usize,
+    s: notui.component.Suggestions,
+) !void {
+    const cand = s.candidates[s.selected];
+    // Re-derive the token range exactly as tokenAtCursor (§2.2).
+    var start = cursor.*;
+    while (start > 0 and !isCompletionDelim(line.items[start - 1])) start -= 1;
+    line.items.len = start; // drop the partial token
+    try line.insertSlice(aa, start, cand); // splice in the candidate
+    cursor.* = start + cand.len; // cursor past the accepted symbol
+}
+
 // ── band drawing ───────────────────────────────
 
-/// Paint the 2-row band: row 0 = continuation prompt (when the pending
-/// buffer spans lines) or the main prompt, then the ACTIVE line with a
-/// reverse-video cursor block; row 1 = busy spinner (base-ui Spinner
-/// driven by the std.Io clock), "done in {d}ms" after a completed eval
-/// (§7), or the idle hint.
+/// Paint the band: row 0 = continuation prompt (when the pending buffer
+/// spans lines) or the main prompt, then the ACTIVE line with a
+/// reverse-video cursor block; rows 1..shown = the open suggestion popup
+/// aligned under the cursor column (base-ui Suggestions); the status row
+/// (busy spinner, "done in {d}ms" after a completed eval (§7), or the
+/// idle hint) sits at `1 + shown` — row 1 when the popup is closed.
 fn drawBand(
     aa: std.mem.Allocator,
     region: *Region,
     line: []const u8,
     cursor: usize,
+    sugg: ?notui.component.Suggestions,
     spinner: *notui.component.Spinner,
     busy: bool,
     now: std.Io.Timestamp,
@@ -1002,6 +1155,9 @@ fn drawBand(
     // Left of the cursor.
     const left_segs = try scanQuery(aa, active[0..cur]);
     for (left_segs) |seg| x += try region.cur.draw(seg.style, seg.text, x, 0);
+    // The cursor column: the popup's anchor (its rows align under the
+    // cursor, clamped so the list never starts past the band's right edge).
+    const cursor_col = x;
 
     if (cur < active.len) {
         // Cursor sits ON a codepoint: reverse-video it, then the rest.
@@ -1015,15 +1171,23 @@ fn drawBand(
         _ = try region.cur.draw(cur_style, " ", x, 0); // block cursor at EOL
     }
 
-    // Status row (row 1).
+    // Popup rows (1..shown) under the cursor column; the status row moves
+    // down to `y` (1 + shown when open, 1 otherwise).
+    var y: u16 = 1;
+    if (sugg) |s0| {
+        var s = s0; // draw takes *Suggestions; the payload is copied out of the const optional
+        const popup_x: u16 = @min(cursor_col, region.width);
+        y += try s.draw(aa, &region.cur, popup_x, y, now);
+    }
+
     if (busy) {
-        _ = try spinner.draw(&region.cur, 0, 1, now);
+        _ = try spinner.draw(&region.cur, 0, y, now);
     } else if (last_eval_ms) |ms| {
         var buf: [48]u8 = undefined;
         const done = std.fmt.bufPrint(&buf, "done in {d}ms", .{ms}) catch idle_status;
-        _ = try region.cur.draw(.{}, done, 0, 1);
+        _ = try region.cur.draw(.{}, done, 0, y);
     } else {
-        _ = try region.cur.draw(.{}, if (multiline) cont_status else idle_status, 0, 1);
+        _ = try region.cur.draw(.{}, if (multiline) cont_status else idle_status, 0, y);
     }
 }
 
