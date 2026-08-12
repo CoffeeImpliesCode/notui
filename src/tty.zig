@@ -30,6 +30,27 @@ var term_signal_cleanup_installed: bool = false;
 /// after init.
 pub var global_tty: ?Tty = null;
 
+/// Restore the terminal from the `global_tty` copy: termios plus the
+/// minimal mode disables (cursor show, kitty keyboard pop, sync off).
+/// Used by the SIGTERM/SIGINT handler and by app roots via a `panic`
+/// override — defers never run on kill or panic, and a raw terminal left
+/// behind is what forces a hard reset. Best-effort: safe for the
+/// async-signal context; failure is observed, not acted on.
+pub fn restoreTerminal() void {
+    if (global_tty) |*g| {
+        if (g.original_termios) |termios| {
+            posix.tcsetattr(g.fd.handle, .FLUSH, termios) catch |err| {
+                std.mem.doNotOptimizeAway(@intFromError(err));
+            };
+        }
+        const cleanup = "\x1b[?25h\x1b[<u\x1b[?2026l";
+        switch (builtin.os.tag) {
+            .linux => _ = std.os.linux.write(g.fd.handle, cleanup.ptr, cleanup.len),
+            else => {}, // best-effort: no portable raw write in 0.16
+        }
+    }
+}
+
 pub const Tty = struct {
     /// The Io the tty is threaded onto (output, clock).
     io: std.Io,
@@ -214,20 +235,7 @@ pub const Tty = struct {
     /// kitty keyboard enabled. Best-effort: tcsetattr/write only touch
     /// async-signal-safe-ish paths, and failure still exits.
     fn handleTermSignal(sig: posix.SIG) callconv(.c) void {
-        if (global_tty) |*g| {
-            if (g.original_termios) |termios| {
-                posix.tcsetattr(g.fd.handle, .FLUSH, termios) catch |err| {
-                    // Best-effort in a signal handler: observe, do not
-                    // act — the write cleanup below still runs.
-                    std.mem.doNotOptimizeAway(@intFromError(err));
-                };
-            }
-            const cleanup = "\x1b[?25h\x1b[<u\x1b[?2026l";
-            switch (builtin.os.tag) {
-                .linux => _ = std.os.linux.write(g.fd.handle, cleanup.ptr, cleanup.len),
-                else => {}, // best-effort: no portable raw write in 0.16
-            }
-        }
+        restoreTerminal();
         std.process.exit(@intCast(128 + @intFromEnum(sig)));
     }
 

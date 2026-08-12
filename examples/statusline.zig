@@ -23,6 +23,16 @@
 const std = @import("std");
 const notui = @import("notui");
 
+/// Restore the terminal on panic: defers never run for a panicking
+/// process, and a raw/hidden-cursor/kitty-mode terminal is what forces a
+/// hard reset. Re-raises the default panic after cleanup.
+pub const panic = std.debug.FullPanic(struct {
+    pub fn call(msg: []const u8, ra: ?usize) noreturn {
+        notui.tty.restoreTerminal();
+        std.debug.defaultPanic(msg, ra);
+    }
+}.call);
+
 const Region = notui.region.Region;
 const Style = notui.style.Style;
 const Color = notui.color.Color;
