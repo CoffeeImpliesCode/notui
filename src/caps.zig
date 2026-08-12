@@ -43,13 +43,23 @@ pub const Capabilities = struct {
         return if (self.unicode_core) .zg_unicode else .wcwidth_legacy;
     }
 
-    /// Emit the disable sequences for every terminal mode `detect()`
-    /// enabled, returning the user's terminal to its pre-app state. In v0
-    /// kitty keyboard is the only mode detect() leaves on (sync output
-    /// ends per frame; bracketed paste and mouse are never enabled by the
-    /// library). Call this after `Region.exit`, before `Tty.restore`.
+    /// Emit the disable sequences for every terminal mode a notui session
+    /// may have enabled, returning the user's terminal to its pre-app
+    /// state. Unconditional: each sequence is a no-op on terminals where
+    /// the mode was never on, and the kitty keyboard push (`>1u`) that
+    /// `detect()` always sends must ALWAYS be popped — even when its
+    /// reply was missed, a missed reply would otherwise leave the mode
+    /// enabled (the "terminal needs a hard reset after exit" failure).
+    /// Call after `Region.exit`, before `Tty.restore`.
     pub fn restore(self: *const Capabilities, w: anytype) !void {
-        if (self.kitty_keyboard) try w.writeAll("\x1b[<u");
+        _ = self;
+        try w.writeAll("\x1b[<u"); // kitty keyboard: pop
+        try w.writeAll("\x1b[?2004l"); // bracketed paste: off
+        try w.writeAll("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l"); // mouse: off
+        try w.writeAll("\x1b[?1004l"); // focus events: off
+        try w.writeAll("\x1b[?2026l"); // synchronized output: off
+        try w.writeAll("\x1b[?2027l"); // unicode core: off
+        try w.writeAll("\x1b[?25h"); // cursor: show (idempotent with Region.exit)
     }
 
     /// Sequential live queries (DA1, ?2026 sync, ?2027 unicode core,
@@ -373,18 +383,25 @@ test "caps: widthPolicy" {
     try std.testing.expectEqual(Capabilities.WidthPolicy.zg_unicode, c.widthPolicy());
 }
 
-test "caps: restore emits disables for enabled modes only" {
+test "caps: restore emits the full unconditional cleanup" {
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     const w = &out.writer;
 
+    // Nothing detected → still the full set (kitty pop is unconditional:
+    // the push always went out, so the pop always must).
     var c: Capabilities = .{};
-    try c.restore(w); // nothing enabled → nothing emitted
-    try std.testing.expectEqualStrings("", out.written());
-
-    c.kitty_keyboard = true;
-    try c.restore(w); // kitty keyboard pop — the only v0 enable
-    try std.testing.expectEqualStrings("\x1b[<u", out.written());
+    try c.restore(w);
+    try std.testing.expectEqualStrings(
+        "\x1b[<u" ++
+            "\x1b[?2004l" ++
+            "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l" ++
+            "\x1b[?1004l" ++
+            "\x1b[?2026l" ++
+            "\x1b[?2027l" ++
+            "\x1b[?25h",
+        out.written(),
+    );
 }
 
 test "caps: detect assembles capabilities from scripted replies" {

@@ -9,6 +9,7 @@
 //! §0). Windows paths are not copied (deferred to v1).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
 const Winsize = @import("event.zig").Winsize;
 
@@ -18,6 +19,9 @@ var resize_signaled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false)
 
 /// Whether the SIGWINCH handler is installed (one Tty at a time in v0).
 var handler_installed: bool = false;
+
+/// Whether the SIGTERM/SIGINT cleanup handlers are installed.
+var term_signal_cleanup_installed: bool = false;
 
 /// Global tty instance for panic restore. Not guaranteed to work with
 /// multiple Tty instances under one compilation unit, but better than
@@ -57,6 +61,17 @@ pub const Tty = struct {
             };
             posix.sigaction(posix.SIG.WINCH, &handler, null);
             handler_installed = true;
+        }
+
+        if (!term_signal_cleanup_installed) {
+            const term_handler: posix.Sigaction = .{
+                .handler = .{ .handler = handleTermSignal },
+                .mask = posix.sigemptyset(),
+                .flags = 0,
+            };
+            posix.sigaction(posix.SIG.TERM, &term_handler, null);
+            posix.sigaction(posix.SIG.INT, &term_handler, null);
+            term_signal_cleanup_installed = true;
         }
 
         const self: Tty = .{
@@ -192,17 +207,52 @@ pub const Tty = struct {
         resize_signaled.store(true, .release);
     }
 
-    /// Reset the SIGWINCH handler to its default (libvaxis
+    /// Async-signal-safe cleanup for SIGTERM/SIGINT: restore the termios
+    /// captured by makeRaw and write the minimal mode disables, then exit
+    /// with 128+signal. A killed process never runs its defers, so without
+    /// this a `kill` leaves the terminal raw with the cursor hidden and
+    /// kitty keyboard enabled. Best-effort: tcsetattr/write only touch
+    /// async-signal-safe-ish paths, and failure still exits.
+    fn handleTermSignal(sig: posix.SIG) callconv(.c) void {
+        if (global_tty) |*g| {
+            if (g.original_termios) |termios| {
+                posix.tcsetattr(g.fd.handle, .FLUSH, termios) catch |err| {
+                    // Best-effort in a signal handler: observe, do not
+                    // act — the write cleanup below still runs.
+                    std.mem.doNotOptimizeAway(@intFromError(err));
+                };
+            }
+            const cleanup = "\x1b[?25h\x1b[<u\x1b[?2026l";
+            switch (builtin.os.tag) {
+                .linux => _ = std.os.linux.write(g.fd.handle, cleanup.ptr, cleanup.len),
+                else => {}, // best-effort: no portable raw write in 0.16
+            }
+        }
+        std.process.exit(@intCast(128 + @intFromEnum(sig)));
+    }
+
+    /// Reset the signal handlers to their defaults (libvaxis
     /// resetSignalHandlerLocked pattern).
     fn resetSignalHandler() void {
-        if (!handler_installed) return;
-        handler_installed = false;
-        const act: posix.Sigaction = .{
-            .handler = .{ .handler = posix.SIG.DFL },
-            .mask = posix.sigemptyset(),
-            .flags = 0,
-        };
-        posix.sigaction(posix.SIG.WINCH, &act, null);
+        if (handler_installed) {
+            handler_installed = false;
+            const act: posix.Sigaction = .{
+                .handler = .{ .handler = posix.SIG.DFL },
+                .mask = posix.sigemptyset(),
+                .flags = 0,
+            };
+            posix.sigaction(posix.SIG.WINCH, &act, null);
+        }
+        if (term_signal_cleanup_installed) {
+            term_signal_cleanup_installed = false;
+            const act: posix.Sigaction = .{
+                .handler = .{ .handler = posix.SIG.DFL },
+                .mask = posix.sigemptyset(),
+                .flags = 0,
+            };
+            posix.sigaction(posix.SIG.TERM, &act, null);
+            posix.sigaction(posix.SIG.INT, &act, null);
+        }
     }
 };
 
