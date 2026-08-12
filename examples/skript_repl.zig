@@ -63,7 +63,7 @@ const prompt_text = "skript> ";
 const answer_prefix = " ⇒ ";
 
 /// Status-band hint shown while idle.
-const idle_status = "Enter: eval · ↑/↓: history · ^C: clear · ^D/q: quit";
+const idle_status = "Enter: eval · ↑/↓: history · ^C: clear (quit while eval) · ^D/q: quit";
 
 /// Continuation prompt (row 0) when the pending buffer spans lines (§4.3).
 const cont_prompt = "    · ";
@@ -79,7 +79,7 @@ const max_answer_lines: usize = 200;
 /// `:help` content: one scrollback `.line` row per binding group (§5).
 const help_rows = [_][]const u8{
     "skript repl keys: Enter eval · Enter(unbalanced) continue line",
-    "·/↓ history · ^C clear line · ^D/q/:quit quit · Left/Right move",
+    "·/↓ history · ^C clear (quit while eval) · ^D/q/:quit quit · Left/Right move",
     "· Alt+Left/Right word · Home/End or ^A/^E line ends · ^K kill→end",
     "· ^U kill→start · ^W delete word · Del delete fwd · Backspace del",
 };
@@ -204,14 +204,23 @@ pub fn main(init: std.process.Init) !void {
                 // Any key clears the "done in …ms" status (§7).
                 last_eval_ms = null;
                 if (isCtrlC(k)) {
+                    if (worker != null) {
+                        // ^C during an in-flight eval quits (skript's own
+                        // REPL convention); the join below blocks until
+                        // the cooperative VM finishes. At the prompt, ^C
+                        // clears the line (readline convention).
+                        break;
+                    }
                     // Normal key event: clear the line, keep running
                     // (embed contract §8: ctrl+c never hard-quits).
                     line.clearRetainingCapacity();
                     cursor = 0;
                 } else if (isCtrlD(k)) {
                     break; // ctrl+d always quits (even mid-eval)
-                } else if (k.matches('q', .{}) and line.items.len == 0) {
-                    break; // `q` quits only on an empty line
+                } else if (k.matches('q', .{}) and
+                    std.mem.trim(u8, line.items, " \t").len == 0)
+                {
+                    break; // `q` quits on an empty (or whitespace-only) line
                 } else if (k.matches(Key.enter, .{})) {
                     // Meta commands / multi-line continuation / submit
                     // (§4-§5); ignored while a submission is in flight.
