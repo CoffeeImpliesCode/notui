@@ -1,9 +1,14 @@
-//! Statusline example: styled segments, width truncation/wrapping, and
-//! the non-TTY degradation path.
+//! Statusline example: the base-ui layer dogfood — a StatusBar, a
+//! live Gauge, and a wrapped Text row — plus the non-TTY degradation
+//! path.
 //!
-//! Demonstrates (plan T7.4):
-//! - styled segments: fg/bg/attrs via `Style` + `Buffer.draw`;
-//! - `width.truncate` + `width.wrap` for segment text;
+//! Demonstrates (plan T7.4 / baseui-improvements.md §4):
+//! - `component.StatusBar`: left/center/right segments with width-aware
+//!   truncation (right group anchors to the edge, then the center
+//!   floats; left is kept whole);
+//! - `component.Gauge`: fractional block fill, threshold colors, label
+//!   + percent suffix — value driven by the app each tick;
+//! - `component.Text.wrap` for the message row;
 //! - ColorProfile fallback: rgb accents on a truecolor terminal,
 //!   palette colors on weaker profiles (the emit layer downsamples rgb
 //!   via `writeStyleProfile` for direct users — see `Palette`);
@@ -37,11 +42,15 @@ const Region = notui.region.Region;
 const Style = notui.style.Style;
 const Color = notui.color.Color;
 const ColorProfile = notui.color.ColorProfile;
-const width = notui.width;
 const Key = notui.key;
+const component = notui.component;
 
-/// Region height: one segment row plus one wrapped-message row.
-const region_height: u16 = 2;
+/// Region height: StatusBar, Gauge, and one wrapped-message row.
+const region_height: u16 = 3;
+
+/// Monotonic anchor for the gauge's elapsed-time animation (module
+/// state, the components' scratch pattern, src/component/text.zig).
+var frame_anchor: ?component.Clock = null;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -72,7 +81,11 @@ fn runPiped(gpa: std.mem.Allocator, io: std.Io) !void {
     // `profile = null` renders the same frame plain: every cell carries
     // the default style (no SGR) and the region's plain painter writes
     // blank cells as spaces, so the piped output is escape-free.
-    try buildFrame(arena.allocator(), &region, null);
+    // The gauge is caller-owned: its percent_buf must outlive the
+    // frame build (the cells borrow it until `render`).
+    var gauge: component.Gauge = .{ .width = 30, .label = "scan" };
+    const now: component.Clock = std.Io.Timestamp.now(io, .awake);
+    try buildFrame(arena.allocator(), &region, null, now, &gauge);
 
     var stdout = std.Io.File.stdout();
     var out_buf: [4096]u8 = undefined;
@@ -85,9 +98,11 @@ fn runPiped(gpa: std.mem.Allocator, io: std.Io) !void {
 }
 
 /// Interactive path: raw mode, live capability detection, and a
-/// resize-driven repaint loop. The region's band is 2 rows; narrowing
+/// tick-driven repaint loop. The region's band is 3 rows; narrowing
 /// the terminal triggers a strategy-2 clear + full redraw via
-/// `Region.resize`, so stale wide rows never survive (plan §9.3).
+/// `Region.resize`, so stale wide rows never survive (plan §9.3). The
+/// gauge animates because the frame is rebuilt once per loop iteration
+/// (each tick advances the sin-driven value).
 fn runInteractive(gpa: std.mem.Allocator, io: std.Io) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -113,6 +128,10 @@ fn runInteractive(gpa: std.mem.Allocator, io: std.Io) !void {
     var reader = notui.input.Reader.init(&tty);
     const w = tty.writer();
 
+    // Caller-owned gauge: its percent_buf must outlive each frame
+    // build (the cells borrow it until `render`).
+    var gauge: component.Gauge = .{ .width = 30, .label = "scan" };
+
     var need_redraw = true; // first frame
     while (true) {
         if (tty.checkResize()) {
@@ -122,7 +141,10 @@ fn runInteractive(gpa: std.mem.Allocator, io: std.Io) !void {
         }
 
         if (need_redraw) {
-            try buildFrame(arena.allocator(), &region, caps.color);
+            // The monotonic clock, sampled once per loop iteration —
+            // the gauge's drive signal (v1 clock model, component.zig).
+            const now: component.Clock = std.Io.Timestamp.now(io, .awake);
+            try buildFrame(arena.allocator(), &region, caps.color, now, &gauge);
             try region.render(w);
             try w.flush();
             need_redraw = false;
@@ -139,6 +161,11 @@ fn runInteractive(gpa: std.mem.Allocator, io: std.Io) !void {
             },
             else => {},
         };
+
+        // Animate the gauge: redraw once per tick so the sin-driven
+        // value keeps moving even with no input (the one behavioral
+        // change beyond refactoring).
+        need_redraw = true;
     }
 
     // Park the cursor below the band; the final frame stays in the
@@ -148,73 +175,76 @@ fn runInteractive(gpa: std.mem.Allocator, io: std.Io) !void {
     try w.flush();
 }
 
-/// Draw one frame into `region.cur`: row 0 holds left-aligned styled
-/// segments (mode badge, app name, branch, truncated path) plus a
-/// right-aligned tail, and row 1 the first wrapped line of a message
-/// (`width.wrap`). `width.truncate` guards the narrow-width case.
+/// Draw one frame into `region.cur` with the base-ui components: row 0
+/// a StatusBar (left segments + right-aligned tail), row 1 a Gauge
+/// (label, thresholds, percent), row 2 the first wrapped line of a
+/// message (Text.wrap). The components are static (`advance` false);
+/// the gauge's value follows the elapsed monotonic clock, so the app
+/// redraws each tick to animate it. The gauge is caller-owned (its
+/// percent_buf must outlive this call — the cells borrow it, §2.2).
 ///
 /// All drawn text is allocated from `arena` (the cells borrow the
 /// slices, architecture §3 — the arena lives for the whole session, so
 /// the previous frame's slices in `prev` stay valid for diffing).
-fn buildFrame(arena: std.mem.Allocator, region: *Region, profile: ?ColorProfile) !void {
+fn buildFrame(
+    arena: std.mem.Allocator,
+    region: *Region,
+    profile: ?ColorProfile,
+    now: component.Clock,
+    gauge: *component.Gauge,
+) !void {
     region.cur.clear();
     const palette = Palette.init(profile);
 
-    var x: u16 = 0;
-
-    // Mode badge — background accent, bold.
-    x += try region.cur.draw(palette.badge, " NORMAL ", x, 0);
-    x += try region.cur.draw(Style{}, " ", x, 0);
-    // App name.
-    x += try region.cur.draw(palette.app, "notui", x, 0);
-    x += try region.cur.draw(Style{}, " │ ", x, 0);
-    // Branch.
-    x += try region.cur.draw(palette.branch, "main*", x, 0);
-    x += try region.cur.draw(Style{}, " │ ", x, 0);
-
-    // Path segment — the width.truncate demo: cut at a grapheme
-    // boundary to fit `path_cols`, with a visible ellipsis.
-    const path = "~/projects/notui/src/region.zig";
-    const path_cols: usize = 22;
-    if (width.strWidth(path) > path_cols) {
-        const cut = try width.truncate(arena, path, path_cols - 1);
-        x += try region.cur.draw(palette.dim, cut, x, 0);
-        x += try region.cur.draw(palette.dim, "…", x, 0);
-    } else {
-        x += try region.cur.draw(palette.dim, path, x, 0);
-    }
-
-    // Right-aligned tail, ending at the right edge. Truncated when the
-    // left segments leave too little room; drawn at the current position
-    // when even that is too tight (over-wide drops gracefully, §8.8).
-    // The gap between the left segments and the tail is left empty — the
-    // region advances it with CUF, which is invisible after the
-    // interactive erase.
+    // Row 0 — StatusBar: left segments joined by " │ " (the badge's
+    // leading/trailing space is baked into its text), right-aligned
+    // tail. StatusBar owns the right alignment and truncation now.
     const tail = try std.fmt.allocPrint(arena, "v{s}  col {d}", .{ notui.version, region.width });
-    const avail: i32 = @as(i32, region.width) - @as(i32, x);
-    if (avail > 0) {
-        const tail_w: i32 = @intCast(width.strWidth(tail));
-        const tail_used = if (tail_w > avail)
-            try width.truncate(arena, tail, @intCast(avail))
-        else
-            tail;
-        const used: u16 = @intCast(width.strWidth(tail_used));
-        const tail_x: u16 = region.width - used;
-        if (tail_x >= x) {
-            _ = try region.cur.draw(palette.tail, tail_used, tail_x, 0);
-        } else {
-            x += try region.cur.draw(palette.tail, tail_used, x, 0);
-        }
-    }
+    var bar: component.StatusBar = .{
+        .left = &.{
+            .{ .text = " NORMAL ", .style = palette.badge },
+            .{ .text = "notui", .style = palette.app },
+            .{ .text = "main*", .style = palette.branch },
+        },
+        .right = &.{.{ .text = tail, .style = palette.tail }},
+        .separator = " │ ",
+    };
+    _ = try bar.draw(&region.cur, 0, 0, now);
 
-    // Message row — the width.wrap demo: wrap the message to the
-    // region width and draw the first line (over-wide rows drop
-    // gracefully, plan §8.8).
+    // Row 1 — Gauge: a live meter, value driven by the app from the
+    // elapsed monotonic clock (not component-animated). Fill styles
+    // come from the palette (all-default in the plain frame — a set
+    // color would emit SGR into the pipe); thresholds are dropped in
+    // the plain frame for the same reason.
+    gauge.label_style = palette.app;
+    gauge.percent_style = palette.tail;
+    gauge.full_style = palette.branch;
+    gauge.empty_style = palette.dim;
+    gauge.thresholds = if (profile == null) &.{} else &.{
+        .{ .value = 50, .color = .{ .ansi = .yellow } },
+        .{ .value = 85, .color = .{ .ansi = .red } },
+    };
+    gauge.setValue(50.0 + 45.0 * @sin(elapsedSeconds(now)));
+    _ = try gauge.draw(&region.cur, 0, 1, now);
+
+    // Row 2 — Text.wrap: the wrapped-message row. The scratch is
+    // arena-backed, so the cells it holds borrow valid memory past
+    // this call (the borrow model, architecture §3).
     const message = "the quick brown fox jumps over the lazy dog — width.wrap breaks " ++
         "long text at the region width and Buffer.draw renders it grapheme-safe";
-    const wrapped = try width.wrap(arena, message, region.width, 1);
-    const first_line_end = std.mem.indexOfScalar(u8, wrapped, '\n') orelse wrapped.len;
-    _ = try region.cur.draw(palette.message, wrapped[0..first_line_end], 0, 1);
+    var scratch: std.ArrayList(u8) = .empty;
+    var msg: component.Text = .{ .text = message, .wrap = true, .style = palette.message, .scratch = &scratch };
+    _ = try msg.draw(arena, &region.cur, 0, 2, now);
+}
+
+/// Seconds since the first frame — the gauge's drive signal.
+fn elapsedSeconds(now: component.Clock) f64 {
+    const a = frame_anchor orelse {
+        frame_anchor = now;
+        return 0;
+    };
+    const d = now.nanoseconds - a.nanoseconds;
+    return @as(f64, @floatFromInt(d)) / @as(f64, std.time.ns_per_s);
 }
 
 /// Profile-driven palette. `init(.truecolor)` returns rgb accents; a

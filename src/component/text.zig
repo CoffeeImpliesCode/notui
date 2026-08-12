@@ -1,9 +1,10 @@
 //! Text: a styled, width-aware single- or multi-line text component
 //! (baseui-contract.md §4.2). Truncates at grapheme boundaries with an
-//! optional ellipsis marker, or wraps to a column budget drawing one row
-//! per line. `draw` never allocates beyond the caller-owned `scratch`
-//! list (the contract §3 borrow model): the caller passes the allocator
-//! that owns (or will own) the scratch's memory.
+//! optional ellipsis marker, wraps to a column budget drawing one row
+//! per line, and aligns left/center/right within the available width
+//! (single-line mode). `draw` never allocates beyond the caller-owned
+//! `scratch` list (the contract §3 borrow model): the caller passes the
+//! allocator that owns (or will own) the scratch's memory.
 
 const std = @import("std");
 const Buffer = @import("../buffer.zig").Buffer;
@@ -26,6 +27,11 @@ pub const Text = struct {
     /// row per line. False: single line, truncated.
     wrap: bool = false,
     wrap_width: u16 = 0, // 0 => avail (buf.width - x)
+    /// Horizontal alignment within the available width (single-line
+    /// mode only; wrap mode ignores it). `@"align"` — `align` is a Zig
+    /// keyword, so the contract's field name is escaped (baseui-
+    /// improvements.md §2.3).
+    @"align": enum { left, center, right } = .left,
     /// Caller-owned scratch for wrap/truncate output (the borrow model).
     scratch: *std.ArrayList(u8) = &default_scratch,
 
@@ -47,7 +53,17 @@ pub const Text = struct {
 
         if (!self.wrap) {
             const s = try self.fit(alloc, avail);
-            return buf.draw(self.style, s, x, y);
+            if (self.@"align" == .left) return buf.draw(self.style, s, x, y);
+            // Align within the available width; `w <= avail` by
+            // construction (fit already truncated), so no underflow.
+            // The consumed columns stay `w` either way.
+            const w = Width.strWidth(s);
+            const x0: u16 = @intCast(x + switch (self.@"align") {
+                .left => 0,
+                .center => (avail - w) / 2,
+                .right => avail - w,
+            });
+            return buf.draw(self.style, s, x0, y);
         }
 
         const ww: usize = if (self.wrap_width == 0) avail else self.wrap_width;
@@ -272,4 +288,61 @@ test "text: empty text draws nothing" {
     defer buf.deinit();
     try std.testing.expectEqual(@as(u16, 0), try t.draw(test_alloc, &buf, 0, 0, .fromNanoseconds(0)));
     try std.testing.expect(buf.get(0, 0).eql(.{}));
+}
+
+test "text: right alignment places the last glyph at x + avail - 1" {
+    var t: Text = .{ .text = "Hi", .@"align" = .right };
+    var buf = try Buffer.init(test_alloc, 10, 1);
+    defer buf.deinit();
+    const consumed = try t.draw(test_alloc, &buf, 0, 0, .fromNanoseconds(0));
+    try std.testing.expectEqual(@as(u16, 2), consumed);
+    try std.testing.expectEqualStrings("H", buf.get(8, 0).grapheme);
+    try std.testing.expectEqualStrings("i", buf.get(9, 0).grapheme);
+    try std.testing.expect(buf.get(0, 0).eql(.{})); // leading gap empty
+}
+
+test "text: center alignment centers within the available width" {
+    var t: Text = .{ .text = "Hi", .@"align" = .center };
+    var buf = try Buffer.init(test_alloc, 10, 1);
+    defer buf.deinit();
+    _ = try t.draw(test_alloc, &buf, 0, 0, .fromNanoseconds(0));
+    try std.testing.expectEqualStrings("H", buf.get(4, 0).grapheme); // (10-2)/2
+    try std.testing.expectEqualStrings("i", buf.get(5, 0).grapheme);
+}
+
+test "text: left alignment is unchanged" {
+    var t: Text = .{ .text = "Hi" };
+    var buf = try Buffer.init(test_alloc, 10, 1);
+    defer buf.deinit();
+    _ = try t.draw(test_alloc, &buf, 0, 0, .fromNanoseconds(0));
+    try std.testing.expectEqualStrings("H", buf.get(0, 0).grapheme);
+}
+
+test "text: truncated text aligns at x" {
+    // The fitted string fills `avail`, so every alignment computes
+    // x0 = x (no room to shift into).
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(test_alloc);
+    var t: Text = .{ .text = "a very long line", .@"align" = .right, .scratch = &scratch };
+    var buf = try Buffer.init(test_alloc, 8, 1);
+    defer buf.deinit();
+    _ = try t.draw(test_alloc, &buf, 0, 0, .fromNanoseconds(0));
+    try std.testing.expectEqualStrings("a", buf.get(0, 0).grapheme);
+
+    var t2: Text = .{ .text = "a very long line", .@"align" = .center, .scratch = &scratch };
+    var buf2 = try Buffer.init(test_alloc, 8, 1);
+    defer buf2.deinit();
+    _ = try t2.draw(test_alloc, &buf2, 0, 0, .fromNanoseconds(0));
+    try std.testing.expectEqualStrings("a", buf2.get(0, 0).grapheme);
+}
+
+test "text: wrap mode ignores alignment" {
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(test_alloc);
+    var t: Text = .{ .text = "The quick brown fox", .wrap = true, .@"align" = .right, .scratch = &scratch };
+    var buf = try Buffer.init(test_alloc, 10, 3);
+    defer buf.deinit();
+    _ = try t.draw(test_alloc, &buf, 0, 0, .fromNanoseconds(0));
+    var rowbuf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("The quick ", rowStr(&buf, 0, &rowbuf)); // starts at x
 }

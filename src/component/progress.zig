@@ -1,6 +1,7 @@
-//! Progress: a ratio bar with styled fill/empty segments, an optional
-//! per-cell fill gradient, and an optional percent suffix
-//! (baseui-contract.md §4.4). Static — `advance` is always false.
+//! Progress: a ratio bar with a styled fill/empty segments, an
+//! optional prefix label, an optional per-cell fill gradient, and an
+//! optional percent suffix (baseui-contract.md §4.4). Static —
+//! `advance` is always false.
 
 const std = @import("std");
 const Buffer = @import("../buffer.zig").Buffer;
@@ -13,6 +14,9 @@ pub const Progress = struct {
     total: f64 = 100,
     /// Bar length in cells.
     width: u16 = 40,
+    /// Optional prefix "label " before the bar (styled with label_style).
+    label: ?[]const u8 = null,
+    label_style: Style = .{},
     full_char: []const u8 = "█",
     empty_char: []const u8 = "░",
     /// Char at the fill edge when the bar is partially filled.
@@ -38,19 +42,26 @@ pub const Progress = struct {
     }
 
     /// Draw the bar at (x, y), truncating to `buf.width - x`. Returns
-    /// the columns consumed (bar + optional percent suffix); never
-    /// errors for width.
+    /// the columns consumed (optional label + bar + optional percent
+    /// suffix); never errors for width.
     pub fn draw(self: *Progress, buf: *Buffer, x: u16, y: u16, now: Clock) !u16 {
         _ = self.advance(now);
         const avail: u16 = buf.width -| x;
         if (avail == 0 or y >= buf.height) return 0;
+        var consumed: u16 = 0;
+
+        // Optional prefix "label " (styled with label_style).
+        if (self.label) |l| {
+            consumed +|= try buf.draw(self.label_style, l, x + consumed, y);
+            consumed +|= try buf.draw(self.label_style, " ", x + consumed, y);
+        }
 
         const ratio = if (self.total > 0) clamp01(self.value / self.total) else 0;
         const filled_all: usize = @intFromFloat(@floor(ratio * @as(f64, @floatFromInt(self.width))));
         const bar_cells: u16 = @min(self.width, avail);
         const filled: u16 = @intCast(@min(filled_all, @as(usize, bar_cells)));
         const empty: u16 = bar_cells - filled;
-        var consumed: u16 = 0;
+        const bar_x: u16 = x + consumed;
 
         // Filled portion; the last filled cell is the head char when
         // the bar is not full (zigzag progress.zig:119-121).
@@ -66,12 +77,12 @@ pub const Progress = struct {
                     @as(f64, @floatFromInt(@max(@as(usize, 1), filled - 1)));
                 cell_style.fg = Color.interpolate(self.gradient_a.?, self.gradient_b.?, t);
             }
-            consumed +|= try buf.draw(cell_style, ch, x + col, y);
+            consumed +|= try buf.draw(cell_style, ch, bar_x + col, y);
         }
 
         // Empty portion.
         while (col < bar_cells) : (col += 1) {
-            consumed +|= try buf.draw(self.empty_style, self.empty_char, x + col, y);
+            consumed +|= try buf.draw(self.empty_style, self.empty_char, bar_x + col, y);
         }
 
         // Percent suffix, truncated to avail by Buffer.draw. The string
@@ -257,4 +268,33 @@ test "progress: advance is always false and helpers clamp" {
 
     p.setWidth(12);
     try std.testing.expectEqual(@as(u16, 12), p.width);
+}
+
+test "progress: label drawn before the bar with label_style" {
+    var p: Progress = .{
+        .value = 50,
+        .width = 2,
+        .label = "dl",
+        .label_style = .{ .fg = .{ .ansi = .blue } },
+        .percent_style = .{},
+    };
+    var buf = try Buffer.init(test_alloc, 12, 1);
+    defer buf.deinit();
+    const consumed = try p.draw(&buf, 0, 0, .fromNanoseconds(0));
+    // "dl" + " " + "█░" + " 50%" = 2 + 1 + 2 + 4.
+    try std.testing.expectEqual(@as(u16, 9), consumed);
+    try std.testing.expectEqualStrings("d", buf.get(0, 0).grapheme);
+    try std.testing.expect(buf.get(0, 0).style.fg.?.eql(.{ .ansi = .blue }));
+    try std.testing.expectEqualStrings("█", buf.get(3, 0).grapheme); // bar after "dl "
+    try std.testing.expectEqualStrings("%", buf.get(8, 0).grapheme);
+}
+
+test "progress: label truncates at the edge" {
+    var p: Progress = .{ .value = 50, .width = 2, .label = "abcdef", .percent_style = .{} };
+    var buf = try Buffer.init(test_alloc, 6, 1);
+    defer buf.deinit();
+    const consumed = try p.draw(&buf, 0, 0, .fromNanoseconds(0));
+    try std.testing.expectEqual(@as(u16, 6), consumed); // label capped at 6, bar dropped
+    try std.testing.expectEqualStrings("a", buf.get(0, 0).grapheme);
+    try std.testing.expectEqualStrings("f", buf.get(5, 0).grapheme);
 }
