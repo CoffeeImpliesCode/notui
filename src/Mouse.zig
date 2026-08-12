@@ -1,4 +1,5 @@
 /// A mouse event
+const std = @import("std");
 pub const Mouse = @This();
 
 pub const Shape = enum {
@@ -50,7 +51,6 @@ mods: Modifiers,
 type: Type,
 
 test "button and modifier bit values" {
-    const std = @import("std");
     const testing = std.testing;
 
     try testing.expectEqual(@as(u8, 0), @intFromEnum(Button.left));
@@ -70,7 +70,6 @@ test "button and modifier bit values" {
 }
 
 test "field defaults: pixel offsets are zero" {
-    const std = @import("std");
     const testing = std.testing;
 
     const m: Mouse = .{
@@ -85,6 +84,5 @@ test "field defaults: pixel offsets are zero" {
 }
 
 test {
-    const std = @import("std");
     std.testing.refAllDecls(@This());
 }

@@ -96,7 +96,7 @@ test "graphemes: combining mark joins base (zg Graphemes)" {
     try std.testing.expect(iter.next() == null);
 }
 
-// ── strWidth ───────────────────────────────────────────────
+// ── strWidth ─────────────────────────────────
 
 test "strWidth: ascii" {
     try std.testing.expectEqual(@as(usize, 5), strWidth("Hello"));
@@ -111,7 +111,7 @@ test "strWidth: ZWJ family is one wide grapheme" {
     try std.testing.expectEqual(@as(usize, 2), strWidth("👩‍🔬"));
 }
 
-// ── graphemeWidth ──────────────────────────────────────────
+// ── graphemeWidth ────────────────────────────────
 
 test "graphemeWidth: ZWJ family" {
     try std.testing.expectEqual(@as(isize, 2), graphemeWidth("👨‍🌾"));
@@ -121,7 +121,7 @@ test "graphemeWidth: combining mark cluster" {
     try std.testing.expectEqual(@as(isize, 1), graphemeWidth("e\u{301}"));
 }
 
-// ── wrap ───────────────────────────────────────────────────
+// ── wrap ───────────────────────────────────
 
 test "wrap: word crossing threshold wraps" {
     const allocator = std.testing.allocator;
@@ -145,7 +145,7 @@ test "wrap: empty input" {
     try std.testing.expectEqualStrings("", got);
 }
 
-// ── truncate ───────────────────────────────────────────────
+// ── truncate ─────────────────────────────────
 
 test "truncate: fits verbatim" {
     const allocator = std.testing.allocator;

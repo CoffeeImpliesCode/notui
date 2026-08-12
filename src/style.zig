@@ -82,7 +82,7 @@ test {
 }
 
 test "style: eql identical" {
-    const s = Style{
+    const s: Style = .{
         .fg = .{ .ansi = .red },
         .bg = .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } },
         .hyperlink = "https://example.com",
@@ -93,34 +93,69 @@ test "style: eql identical" {
 }
 
 test "style: eql differs per field" {
-    const base = Style{ .fg = .{ .ansi = .red }, .bg = .{ .ansi256 = 42 }, .hyperlink = "u", .attrs = .{ .bold = true } };
+    const base: Style = .{
+        .fg = .{ .ansi = .red },
+        .bg = .{ .ansi256 = 42 },
+        .hyperlink = "u",
+        .attrs = .{ .bold = true },
+    };
 
     // fg
-    try std.testing.expect(!base.eql(Style{ .fg = .{ .ansi = .blue }, .bg = base.bg, .hyperlink = base.hyperlink, .attrs = base.attrs }));
-    try std.testing.expect(!base.eql(Style{ .fg = null, .bg = base.bg, .hyperlink = base.hyperlink, .attrs = base.attrs }));
+    try std.testing.expect(!base.eql(Style{
+        .fg = .{ .ansi = .blue },
+        .bg = base.bg,
+        .hyperlink = base.hyperlink,
+        .attrs = base.attrs,
+    }));
+    try std.testing.expect(!base.eql(Style{
+        .fg = null,
+        .bg = base.bg,
+        .hyperlink = base.hyperlink,
+        .attrs = base.attrs,
+    }));
     // bg
-    try std.testing.expect(!base.eql(Style{ .fg = base.fg, .bg = .{ .ansi256 = 43 }, .hyperlink = base.hyperlink, .attrs = base.attrs }));
+    try std.testing.expect(!base.eql(Style{
+        .fg = base.fg,
+        .bg = .{ .ansi256 = 43 },
+        .hyperlink = base.hyperlink,
+        .attrs = base.attrs,
+    }));
     // hyperlink: value vs value, null vs value
     try std.testing.expect(!base.eql(Style{ .fg = base.fg, .bg = base.bg, .hyperlink = "v", .attrs = base.attrs }));
     try std.testing.expect(!base.eql(Style{ .fg = base.fg, .bg = base.bg, .hyperlink = null, .attrs = base.attrs }));
     try std.testing.expect(!(Style{}).eql(Style{ .hyperlink = "" }));
     // same hyperlink content in different slices is equal
     const heap_like: []const u8 = "u";
-    try std.testing.expect(base.eql(Style{ .fg = base.fg, .bg = base.bg, .hyperlink = heap_like, .attrs = base.attrs }));
+    try std.testing.expect(base.eql(Style{
+        .fg = base.fg,
+        .bg = base.bg,
+        .hyperlink = heap_like,
+        .attrs = base.attrs,
+    }));
     // attrs
     try std.testing.expect(!base.eql(Style{ .fg = base.fg, .bg = base.bg, .hyperlink = base.hyperlink, .attrs = .{} }));
-    try std.testing.expect(!base.eql(Style{ .fg = base.fg, .bg = base.bg, .hyperlink = base.hyperlink, .attrs = .{ .dim = true } }));
-    try std.testing.expect(!base.eql(Style{ .fg = base.fg, .bg = base.bg, .hyperlink = base.hyperlink, .attrs = .{ .bold = true, .underline = true } }));
+    try std.testing.expect(!base.eql(Style{
+        .fg = base.fg,
+        .bg = base.bg,
+        .hyperlink = base.hyperlink,
+        .attrs = .{ .dim = true },
+    }));
+    try std.testing.expect(!base.eql(Style{
+        .fg = base.fg,
+        .bg = base.bg,
+        .hyperlink = base.hyperlink,
+        .attrs = .{ .bold = true, .underline = true },
+    }));
 }
 
 test "style: merge self overrides base per field" {
-    const base = Style{
+    const base: Style = .{
         .fg = .{ .ansi = .blue },
         .bg = .{ .ansi256 = 21 },
         .hyperlink = "base",
         .attrs = .{ .bold = true, .dim = true },
     };
-    const self = Style{
+    const self: Style = .{
         .fg = .{ .ansi = .red },
         .hyperlink = "self",
         .attrs = .{ .bold = true, .italic = true },
@@ -137,7 +172,7 @@ test "style: merge self overrides base per field" {
 }
 
 test "style: merge defaults fall through" {
-    const base = Style{
+    const base: Style = .{
         .fg = .{ .ansi = .green },
         .bg = .{ .rgb = .{ .r = 9, .g = 9, .b = 9 } },
         .hyperlink = "base",
@@ -155,14 +190,22 @@ test "style: merge defaults fall through" {
 
 test "style: merge attrs precedence matrix" {
     // A flag set in self always wins; a flag unset in self inherits base.
-    try std.testing.expect((Style{ .attrs = .{ .bold = true } }).merge(Style{ .attrs = .{ .bold = false } }).attrs.bold);
-    try std.testing.expect((Style{ .attrs = .{ .bold = true } }).merge(Style{ .attrs = .{ .bold = true } }).attrs.bold);
-    try std.testing.expect((Style{ .attrs = .{ .bold = false } }).merge(Style{ .attrs = .{ .bold = true } }).attrs.bold);
-    try std.testing.expect(!(Style{ .attrs = .{ .bold = false } }).merge(Style{ .attrs = .{ .bold = false } }).attrs.bold);
+    try std.testing.expect(
+        (Style{ .attrs = .{ .bold = true } }).merge(Style{ .attrs = .{ .bold = false } }).attrs.bold,
+    );
+    try std.testing.expect(
+        (Style{ .attrs = .{ .bold = true } }).merge(Style{ .attrs = .{ .bold = true } }).attrs.bold,
+    );
+    try std.testing.expect(
+        (Style{ .attrs = .{ .bold = false } }).merge(Style{ .attrs = .{ .bold = true } }).attrs.bold,
+    );
+    try std.testing.expect(
+        !(Style{ .attrs = .{ .bold = false } }).merge(Style{ .attrs = .{ .bold = false } }).attrs.bold,
+    );
 
     // Full 7-field matrix: each attr of self or-ing with base.
-    const base = Style{ .attrs = .{ .bold = true, .italic = true, .blink = true, .strikethrough = true } };
-    const self = Style{ .attrs = .{ .bold = true, .dim = true, .underline = true, .reverse = true } };
+    const base: Style = .{ .attrs = .{ .bold = true, .italic = true, .blink = true, .strikethrough = true } };
+    const self: Style = .{ .attrs = .{ .bold = true, .dim = true, .underline = true, .reverse = true } };
     const m = self.merge(base);
     try std.testing.expect(m.attrs.bold);
     try std.testing.expect(m.attrs.dim);

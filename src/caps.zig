@@ -15,10 +15,9 @@ const posix = std.posix;
 const Capability = @import("event.zig").Capability;
 const ColorProfile = @import("color.zig").ColorProfile;
 
-const parser_mod = @import("parser.zig");
 /// Parser is declared privately in parser.zig (`const Parser = @This()`);
 /// the file type is reached by using the import in a type position.
-const Parser = parser_mod;
+const Parser = @import("Parser.zig");
 
 /// Per-query deadline in milliseconds.
 const query_timeout_ms: u64 = 250;
@@ -46,8 +45,8 @@ pub const Capabilities = struct {
 
     /// Sequential live queries (DA1, ?2026 sync, ?2027 unicode core,
     /// kitty keyboard, OSC 11 background) with a per-query deadline.
-    pub fn detect(tty: anytype, parser: *Parser, alloc: std.mem.Allocator) !Capabilities {
-        return detectWithTimeout(tty, parser, alloc, query_timeout_ms);
+    pub fn detect(alloc: std.mem.Allocator, tty: anytype, parser: *Parser) !Capabilities {
+        return detectWithTimeout(alloc, tty, parser, query_timeout_ms);
     }
 };
 
@@ -75,14 +74,14 @@ const ScanResult = union(enum) {
     osc11: bool,
 };
 
-fn detectWithTimeout(tty: anytype, parser: *Parser, alloc: std.mem.Allocator, timeout_ms: u64) !Capabilities {
+fn detectWithTimeout(alloc: std.mem.Allocator, tty: anytype, parser: *Parser, timeout_ms: u64) !Capabilities {
     var caps: Capabilities = .{};
 
     // 1. Primary DA: truecolor (param 24) sets `rgb`. The sixel param (4)
     //    is scanned but unused — §5 has no sixel field.
     ttyDrainInput(tty);
     {
-        const r = try queryScan(tty, parser, alloc, "\x1b[c", timeout_ms, .da1, 0);
+        const r = try queryScan(.da1, 0, alloc, tty, parser, "\x1b[c", timeout_ms);
         switch (r) {
             .da1 => |params| {
                 if (params) |p| {
@@ -96,7 +95,7 @@ fn detectWithTimeout(tty: anytype, parser: *Parser, alloc: std.mem.Allocator, ti
     // 2. Synchronized output (?2026).
     ttyDrainInput(tty);
     {
-        const r = try queryScan(tty, parser, alloc, "\x1b[?2026$p", timeout_ms, .decrpm, 2026);
+        const r = try queryScan(.decrpm, 2026, alloc, tty, parser, "\x1b[?2026$p", timeout_ms);
         switch (r) {
             .decrpm => |supported| caps.sync_output = supported orelse false,
             else => {},
@@ -106,7 +105,7 @@ fn detectWithTimeout(tty: anytype, parser: *Parser, alloc: std.mem.Allocator, ti
     // 3. Unicode core (?2027) — drives WidthPolicy.
     ttyDrainInput(tty);
     {
-        const r = try queryScan(tty, parser, alloc, "\x1b[?2027$p", timeout_ms, .decrpm, 2027);
+        const r = try queryScan(.decrpm, 2027, alloc, tty, parser, "\x1b[?2027$p", timeout_ms);
         switch (r) {
             .decrpm => |supported| caps.unicode_core = supported orelse false,
             else => {},
@@ -118,7 +117,7 @@ fn detectWithTimeout(tty: anytype, parser: *Parser, alloc: std.mem.Allocator, ti
     //    parser as Event.cap.
     ttyDrainInput(tty);
     {
-        const r = try queryScan(tty, parser, alloc, "\x1b[>1u", timeout_ms, .kitty, 0);
+        const r = try queryScan(.kitty, 0, alloc, tty, parser, "\x1b[>1u", timeout_ms);
         switch (r) {
             .kitty => |found| caps.kitty_keyboard = found,
             else => {},
@@ -129,7 +128,7 @@ fn detectWithTimeout(tty: anytype, parser: *Parser, alloc: std.mem.Allocator, ti
     //    decoded through the parser.
     ttyDrainInput(tty);
     {
-        const r = try queryScan(tty, parser, alloc, "\x1b]11;?\x1b\\", timeout_ms, .osc11, 0);
+        const r = try queryScan(.osc11, 0, alloc, tty, parser, "\x1b]11;?\x1b\\", timeout_ms);
         switch (r) {
             .osc11 => |found| {
                 if (found) caps.rgb = true;
@@ -146,13 +145,13 @@ fn detectWithTimeout(tty: anytype, parser: *Parser, alloc: std.mem.Allocator, ti
 /// expected reply decodes or the deadline elapses. Never errors for a
 /// failed or timed-out query — the caller sees the feature off.
 fn queryScan(
-    tty: anytype,
-    parser: *Parser,
-    alloc: std.mem.Allocator,
-    query: []const u8,
-    timeout_ms: u64,
     comptime kind: ScanKind,
     comptime mode: u16,
+    alloc: std.mem.Allocator,
+    tty: anytype,
+    parser: *Parser,
+    query: []const u8,
+    timeout_ms: u64,
 ) !ScanResult {
     const w = tty.writer();
     try w.writeAll(query);
@@ -186,10 +185,10 @@ fn queryScan(
                 if (parseDecrpmReply(bytes, mode)) |supported| return .{ .decrpm = supported };
             },
             .kitty => {
-                if (scanCapEvent(bytes, parser, alloc, .kitty_keyboard)) return .{ .kitty = true };
+                if (scanCapEvent(alloc, bytes, parser, .kitty_keyboard)) return .{ .kitty = true };
             },
             .osc11 => {
-                if (scanOsc11Report(bytes, parser, alloc)) return .{ .osc11 = true };
+                if (scanOsc11Report(alloc, bytes, parser)) return .{ .osc11 = true };
             },
         }
     }
@@ -203,7 +202,7 @@ fn queryScan(
 
 /// Decode a capability reply through the parser: the kitty keyboard reply
 /// (CSI > flags ; … u) parses as `Event.cap`.
-fn scanCapEvent(bytes: []const u8, parser: *Parser, alloc: std.mem.Allocator, want: Capability) bool {
+fn scanCapEvent(alloc: std.mem.Allocator, bytes: []const u8, parser: *Parser, want: Capability) bool {
     if (bytes.len == 0) return false;
     const result = parser.parse(bytes, alloc) catch return false;
     if (result.event) |e| {
@@ -214,7 +213,7 @@ fn scanCapEvent(bytes: []const u8, parser: *Parser, alloc: std.mem.Allocator, wa
 
 /// Decode an OSC 11 background-color reply through the parser: it parses
 /// as `Event.color_report` with kind osc11.
-fn scanOsc11Report(bytes: []const u8, parser: *Parser, alloc: std.mem.Allocator) bool {
+fn scanOsc11Report(alloc: std.mem.Allocator, bytes: []const u8, parser: *Parser) bool {
     if (bytes.len == 0) return false;
     const result = parser.parse(bytes, alloc) catch return false;
     if (result.event) |e| {
@@ -379,7 +378,7 @@ test "caps: detect assembles capabilities from scripted replies" {
     try fake.init(io, &script);
     defer fake.deinit();
 
-    var caps = try Capabilities.detect(&fake, &parser, std.testing.allocator);
+    var caps = try Capabilities.detect(std.testing.allocator, &fake, &parser);
     try std.testing.expect(caps.rgb);
     try std.testing.expectEqual(ColorProfile.truecolor, caps.color);
     try std.testing.expect(caps.sync_output);
@@ -413,7 +412,7 @@ test "caps: detect with no unicode core keeps zg_unicode off and defaults" {
     try fake.init(io, &script);
     defer fake.deinit();
 
-    var caps = try Capabilities.detect(&fake, &parser, std.testing.allocator);
+    var caps = try Capabilities.detect(std.testing.allocator, &fake, &parser);
     try std.testing.expect(!caps.sync_output);
     try std.testing.expect(caps.unicode_core);
     try std.testing.expectEqual(Capabilities.WidthPolicy.zg_unicode, caps.widthPolicy());
@@ -422,12 +421,12 @@ test "caps: detect with no unicode core keeps zg_unicode off and defaults" {
 test "caps: timed-out queries leave defaults, no hang" {
     const io = std.testing.io;
     var parser: Parser = .{};
-    const script = [_][]const u8{}; // the terminal never replies
+    const script: [0][]const u8 = .{}; // the terminal never replies
     var fake: FakeTty = undefined;
     try fake.init(io, &script);
     defer fake.deinit();
 
-    var caps = try detectWithTimeout(&fake, &parser, std.testing.allocator, 20);
+    var caps = try detectWithTimeout(std.testing.allocator, &fake, &parser, 20);
     try std.testing.expect(!caps.rgb);
     try std.testing.expectEqual(ColorProfile.ansi256, caps.color);
     try std.testing.expect(!caps.sync_output);
@@ -436,7 +435,7 @@ test "caps: timed-out queries leave defaults, no hang" {
     try std.testing.expectEqual(Capabilities.WidthPolicy.wcwidth_legacy, caps.widthPolicy());
 }
 
-// ── scripted fake tty ──────────────────────────────────────────────
+// ── scripted fake tty ────────────────────────────
 
 /// A fake tty driven by a reply script: each query byte burst drained
 /// through the writer triggers the next canned reply, written into a real
@@ -475,6 +474,7 @@ const FakeTty = struct {
     fn deinit(self: *FakeTty) void {
         self.fd.close(self.io);
         self.pipe_w.close(self.io);
+        self.* = undefined;
     }
 
     fn writer(self: *FakeTty) *std.Io.Writer {
@@ -482,7 +482,8 @@ const FakeTty = struct {
     }
 
     fn read(self: *FakeTty, buf: []u8) !usize {
-        return try self.fd.readStreaming(self.io, &.{buf});
+        const n = try self.fd.readStreaming(self.io, &.{buf});
+        return n;
     }
 
     fn queryLog(self: *const FakeTty) []const u8 {

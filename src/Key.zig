@@ -120,7 +120,7 @@ pub fn matchText(self: Key, cp: u21, mods: Modifiers) bool {
 
     // TODO: Use zg case_data for full unicode support. We'll need to allocate the case data
     // somewhere
-    const _cp: u21 = if (cp < 128 and (mods.shift or mods.caps_lock))
+    const upper_cp: u21 = if (cp < 128 and (mods.shift or mods.caps_lock))
         // Uppercase our codepoint
         std.ascii.toUpper(@intCast(cp))
     else
@@ -131,7 +131,7 @@ pub fn matchText(self: Key, cp: u21, mods: Modifiers) bool {
     arg_mods.caps_lock = false;
 
     var buf: [4]u8 = undefined;
-    const n = std.unicode.utf8Encode(_cp, &buf) catch return false;
+    const n = std.unicode.utf8Encode(upper_cp, &buf) catch return false;
     return std.mem.eql(u8, text, buf[0..n]) and std.meta.eql(self_mods, arg_mods);
 }
 

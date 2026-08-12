@@ -41,15 +41,15 @@ pub fn main(init: std.process.Init) !void {
         // Piped stdin: there is no terminal to query or put into raw
         // mode. Render one plain frame to stdout (fd 1 — the pipe) and
         // exit without parking.
-        return runPiped(io, gpa);
+        return runPiped(gpa, io);
     }
-    try runInteractive(io, gpa);
+    try runInteractive(gpa, io);
 }
 
 /// Non-TTY path: no Tty is opened, no makeRaw, no Caps.detect — the
 /// region degrades to one plain frame (`sync_output = false`, §4.8).
 /// The default 80-column buffer is the frame width (no winsize to ask).
-fn runPiped(io: std.Io, gpa: std.mem.Allocator) !void {
+fn runPiped(gpa: std.mem.Allocator, io: std.Io) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
 
@@ -62,7 +62,7 @@ fn runPiped(io: std.Io, gpa: std.mem.Allocator) !void {
     // `profile = null` renders the same frame plain: every cell carries
     // the default style (no SGR) and the region's plain painter writes
     // blank cells as spaces, so the piped output is escape-free.
-    try buildFrame(&region, arena.allocator(), null);
+    try buildFrame(arena.allocator(), &region, null);
 
     var stdout = std.Io.File.stdout();
     var out_buf: [4096]u8 = undefined;
@@ -78,7 +78,7 @@ fn runPiped(io: std.Io, gpa: std.mem.Allocator) !void {
 /// resize-driven repaint loop. The region's band is 2 rows; narrowing
 /// the terminal triggers a strategy-2 clear + full redraw via
 /// `Region.resize`, so stale wide rows never survive (plan §9.3).
-fn runInteractive(io: std.Io, gpa: std.mem.Allocator) !void {
+fn runInteractive(gpa: std.mem.Allocator, io: std.Io) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
 
@@ -87,7 +87,7 @@ fn runInteractive(io: std.Io, gpa: std.mem.Allocator) !void {
     try tty.makeRaw();
 
     var parser: notui.parser = .{};
-    const caps = try notui.caps.Capabilities.detect(&tty, &parser, gpa);
+    const caps = try notui.caps.Capabilities.detect(gpa, &tty, &parser);
 
     var region = try Region.init(gpa, .{
         .height = region_height,
@@ -111,7 +111,7 @@ fn runInteractive(io: std.Io, gpa: std.mem.Allocator) !void {
         }
 
         if (need_redraw) {
-            try buildFrame(&region, arena.allocator(), caps.color);
+            try buildFrame(arena.allocator(), &region, caps.color);
             try region.render(w);
             try w.flush();
             need_redraw = false;
@@ -140,7 +140,7 @@ fn runInteractive(io: std.Io, gpa: std.mem.Allocator) !void {
 /// All drawn text is allocated from `arena` (the cells borrow the
 /// slices, architecture §3 — the arena lives for the whole session, so
 /// the previous frame's slices in `prev` stay valid for diffing).
-fn buildFrame(region: *Region, arena: std.mem.Allocator, profile: ?ColorProfile) !void {
+fn buildFrame(arena: std.mem.Allocator, region: *Region, profile: ?ColorProfile) !void {
     region.cur.clear();
     const palette = Palette.init(profile);
 
@@ -194,7 +194,8 @@ fn buildFrame(region: *Region, arena: std.mem.Allocator, profile: ?ColorProfile)
     // Message row — the width.wrap demo: wrap the message to the
     // region width and draw the first line (over-wide rows drop
     // gracefully, plan §8.8).
-    const message = "the quick brown fox jumps over the lazy dog — width.wrap breaks long text at the region width and Buffer.draw renders it grapheme-safe";
+    const message = "the quick brown fox jumps over the lazy dog — width.wrap breaks " ++
+        "long text at the region width and Buffer.draw renders it grapheme-safe";
     const wrapped = try width.wrap(arena, message, region.width, 1);
     const first_line_end = std.mem.indexOfScalar(u8, wrapped, '\n') orelse wrapped.len;
     _ = try region.cur.draw(palette.message, wrapped[0..first_line_end], 0, 1);

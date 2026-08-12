@@ -32,14 +32,14 @@ test {
 }
 
 test "cell: defaults" {
-    const c = Cell{};
+    const c: Cell = .{};
     try std.testing.expectEqualStrings(" ", c.grapheme);
     try std.testing.expectEqual(Style{}, c.style);
     try std.testing.expect(!c.wide);
 }
 
 test "cell: eql" {
-    const base = Cell{
+    const base: Cell = .{
         .grapheme = "a",
         .style = .{ .fg = .{ .ansi = .red }, .attrs = .{ .bold = true } },
         .wide = false,
@@ -57,7 +57,11 @@ test "cell: eql" {
     try std.testing.expect(!(Cell{}).eql(.{ .grapheme = "" }));
     // Different style.
     try std.testing.expect(!base.eql(.{ .grapheme = base.grapheme, .style = .{}, .wide = base.wide }));
-    try std.testing.expect(!base.eql(.{ .grapheme = base.grapheme, .style = .{ .bg = .{ .ansi256 = 1 } }, .wide = base.wide }));
+    try std.testing.expect(!base.eql(.{
+        .grapheme = base.grapheme,
+        .style = .{ .bg = .{ .ansi256 = 1 } },
+        .wide = base.wide,
+    }));
     // Different wide flag.
     try std.testing.expect(!base.eql(.{ .grapheme = base.grapheme, .style = base.style, .wide = true }));
 }

@@ -42,7 +42,7 @@ pub fn main(init: std.process.Init) !void {
     // entirely (Tty.init opens /dev/tty, which is wrong and can fail
     // without a controlling terminal) and print one plain frame.
     if (!Tty.isTty(std.posix.STDIN_FILENO)) {
-        return runPlain(io, gpa);
+        return runPlain(gpa, io);
     }
 
     var tty = try Tty.init(io);
@@ -51,7 +51,7 @@ pub fn main(init: std.process.Init) !void {
     defer tty.restore();
 
     var parser: notui.parser = .{};
-    const caps = try notui.caps.Capabilities.detect(&tty, &parser, gpa);
+    const caps = try notui.caps.Capabilities.detect(gpa, &tty, &parser);
     _ = caps; // the spinner needs no capability in v0
 
     var region = try Region.init(gpa, .{ .height = 1 });
@@ -105,7 +105,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 /// One plain frame, no interactive sequences: `glyph\n` (piped run).
-fn runPlain(io: std.Io, gpa: std.mem.Allocator) !void {
+fn runPlain(gpa: std.mem.Allocator, io: std.Io) !void {
     var region = try Region.init(gpa, .{
         .height = 1,
         .append_lines = false,

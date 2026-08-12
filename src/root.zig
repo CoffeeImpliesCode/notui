@@ -13,9 +13,9 @@ pub const style = @import("style.zig");
 pub const cell = @import("cell.zig");
 pub const emit = @import("emit.zig");
 pub const event = @import("event.zig");
-pub const key = @import("key.zig");
-pub const mouse = @import("mouse.zig");
-pub const parser = @import("parser.zig");
+pub const key = @import("Key.zig");
+pub const mouse = @import("Mouse.zig");
+pub const parser = @import("Parser.zig");
 pub const tty = @import("tty.zig");
 pub const caps = @import("caps.zig");
 // buffer.zig lands in P4 (parallel round B) — the re-export line is added

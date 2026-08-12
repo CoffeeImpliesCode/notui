@@ -40,6 +40,7 @@ pub const Buffer = struct {
 
     pub fn deinit(self: *Buffer) void {
         self.allocator.free(self.cells);
+        self.* = undefined;
     }
 
     /// Reallocate to `new_width` x `new_height`, copying the overlapping
@@ -72,7 +73,7 @@ pub const Buffer = struct {
 
     /// Bounds-checked read; returns the empty cell out of bounds.
     pub fn get(self: *const Buffer, x: u16, y: u16) Cell {
-        if (x >= self.width or y >= self.height) return Cell{};
+        if (x >= self.width or y >= self.height) return .{};
         return self.cells[@as(usize, y) * @as(usize, self.width) + x];
     }
 
@@ -89,7 +90,10 @@ pub const Buffer = struct {
         const idx = @as(usize, y) * @as(usize, self.width) + x;
 
         // Overwriting a wide continuation cell: its lead is at x - 1.
-        if (self.cells[idx].wide and x > 0) {
+        // A continuation at column 0 has no lead (a width-2 glyph can
+        // never start at the last column), so the subtraction is
+        // defensive-only.
+        if (self.cells[idx].wide and idx > 0) {
             self.cells[idx - 1] = Cell{};
         }
         // Overwriting the left half of a wide char: null the continuation.
@@ -166,7 +170,7 @@ pub const Buffer = struct {
         const changed = self.firstLastChanged(prev) orelse return; // idle: nothing
 
         var cur_row: usize = 0;
-        var tracked = Style{};
+        var tracked: Style = .{};
         var y = changed.first;
         while (y <= changed.last) : (y += 1) {
             if (self.rowEqual(prev, y)) continue; // unchanged row: leave as-is
@@ -192,7 +196,7 @@ pub const Buffer = struct {
     /// row: `\r`(+`\n`) + column-1 eraseLine, then the row's cells with
     /// the same style-tracking rules as `renderDiff`.
     pub fn renderAll(self: *const Buffer, w: anytype) !void {
-        var tracked = Style{};
+        var tracked: Style = .{};
         for (0..self.height) |y| {
             if (y == 0) {
                 try w.writeAll("\r");
@@ -302,7 +306,7 @@ const TestWriter = struct {
     }
 };
 
-// ── grid ────────────────────────────────────────────────────
+// ── grid ───────────────────────────────────
 
 test "buffer: init yields an all-empty grid" {
     var buf = try Buffer.init(std.testing.allocator, 4, 2);
@@ -331,7 +335,7 @@ test "buffer: set/get round-trip" {
     var buf = try Buffer.init(std.testing.allocator, 6, 3);
     defer buf.deinit();
 
-    const cell = Cell{ .grapheme = "x", .style = .{ .fg = .{ .ansi = .red } } };
+    const cell: Cell = .{ .grapheme = "x", .style = .{ .fg = .{ .ansi = .red } } };
     try buf.set(4, 2, cell);
     const got = buf.get(4, 2);
     try std.testing.expect(got.eql(cell));
@@ -344,7 +348,7 @@ test "buffer: wide glyph placement writes a styled continuation" {
     var buf = try Buffer.init(std.testing.allocator, 6, 3);
     defer buf.deinit();
 
-    const style = Style{ .fg = .{ .ansi = .red } };
+    const style: Style = .{ .fg = .{ .ansi = .red } };
     try buf.set(2, 0, .{ .grapheme = "👨‍🌾", .style = style });
 
     const lead = buf.get(2, 0);
@@ -481,7 +485,7 @@ test "buffer: clear resets every cell" {
     try std.testing.expect(buf.get(3, 1).eql(Cell{}));
 }
 
-// ── renderDiff goldens ──────────────────────────────────────
+// ── renderDiff goldens ──────────────────────────────
 
 test "renderDiff: full row set emits the exact byte string" {
     var prev = try Buffer.init(std.testing.allocator, 6, 3);
@@ -491,7 +495,7 @@ test "renderDiff: full row set emits the exact byte string" {
     _ = try cur.draw(Style{}, "hi", 0, 0);
     _ = try cur.draw(Style{}, "yo", 0, 1);
 
-    var t = TestWriter{};
+    var t: TestWriter = .{};
     t.init();
     try cur.renderDiff(&prev, &t.w);
     // Row 0: `\r` + column-1 erase + cells; row 1: `\r\n` + erase +
@@ -508,7 +512,7 @@ test "renderDiff: one-cell change emits only that cell's bytes" {
     defer cur.deinit();
     try cur.set(2, 1, .{ .grapheme = "b" });
 
-    var t = TestWriter{};
+    var t: TestWriter = .{};
     t.init();
     try cur.renderDiff(&prev, &t.w);
     // Row 0 and the blank cells of row 1 are never re-emitted: the only
@@ -524,7 +528,7 @@ test "renderDiff: style-only change emits only the SGR delta" {
     defer cur.deinit();
     try cur.set(2, 1, .{ .grapheme = "a", .style = .{ .fg = .{ .ansi = .red } } });
 
-    var t = TestWriter{};
+    var t: TestWriter = .{};
     t.init();
     try cur.renderDiff(&prev, &t.w);
     // Same text, new style: SGR `\x1b[31m` + the cell, then the
@@ -540,7 +544,7 @@ test "renderDiff: idle frame (cur == prev) emits zero bytes" {
     _ = try prev.draw(Style{}, "hi", 0, 0);
     _ = try cur.draw(Style{}, "hi", 0, 0);
 
-    var t = TestWriter{};
+    var t: TestWriter = .{};
     t.init();
     try cur.renderDiff(&prev, &t.w);
     try std.testing.expectEqualStrings("", t.w.buffered());
@@ -553,7 +557,7 @@ test "renderDiff: wide continuation is never emitted" {
     defer cur.deinit();
     _ = try cur.draw(Style{}, "a👨‍🌾b", 0, 0);
 
-    var t = TestWriter{};
+    var t: TestWriter = .{};
     t.init();
     try cur.renderDiff(&prev, &t.w);
     // The continuation cell (column 2) emits nothing: the glyph appears
@@ -568,7 +572,7 @@ test "renderDiff: column-1 erase precedes a changed row below the first" {
     defer cur.deinit();
     try cur.set(0, 2, .{ .grapheme = "z" });
 
-    var t = TestWriter{};
+    var t: TestWriter = .{};
     t.init();
     try cur.renderDiff(&prev, &t.w);
     // First changed row is 2: `\r` + two `\n` moves, then the erase at
@@ -587,7 +591,7 @@ test "renderDiff: unchanged rows between changed rows are not touched" {
     _ = try cur.draw(Style{}, "bbbbbbbbbb", 0, 2);
     try cur.set(5, 2, .{ .grapheme = "!" }); // only change: row 2, col 5
 
-    var t = TestWriter{};
+    var t: TestWriter = .{};
     t.init();
     try cur.renderDiff(&prev, &t.w);
     // Row 0 is identical and never re-emitted; row 2 is erased then
@@ -595,7 +599,7 @@ test "renderDiff: unchanged rows between changed rows are not touched" {
     try std.testing.expectEqualStrings("\r\n\n\x1b[Kbbbbb!", t.w.buffered());
 }
 
-// ── renderAll goldens ───────────────────────────────────────
+// ── renderAll goldens ──────────────────────────────
 
 test "renderAll: full band plain" {
     var buf = try Buffer.init(std.testing.allocator, 4, 2);
@@ -603,7 +607,7 @@ test "renderAll: full band plain" {
     _ = try buf.draw(Style{}, "ab", 0, 0);
     _ = try buf.draw(Style{}, "cd", 0, 1);
 
-    var t = TestWriter{};
+    var t: TestWriter = .{};
     t.init();
     try buf.renderAll(&t.w);
     try std.testing.expectEqualStrings("\r\x1b[Kab\r\n\x1b[Kcd", t.w.buffered());
@@ -612,13 +616,13 @@ test "renderAll: full band plain" {
 test "renderAll: style deltas and wide glyphs" {
     var buf = try Buffer.init(std.testing.allocator, 4, 2);
     defer buf.deinit();
-    const red = Style{ .fg = .{ .ansi = .red } };
+    const red: Style = .{ .fg = .{ .ansi = .red } };
     _ = try buf.draw(red, "a", 0, 0);
     _ = try buf.draw(Style{}, "b", 1, 0);
     _ = try buf.draw(red, "👨‍🌾", 0, 1);
     _ = try buf.draw(Style{}, "c", 2, 1);
 
-    var t = TestWriter{};
+    var t: TestWriter = .{};
     t.init();
     try buf.renderAll(&t.w);
     try std.testing.expectEqualStrings(
@@ -631,7 +635,7 @@ test "renderAll: empty band emits the row erases only" {
     var buf = try Buffer.init(std.testing.allocator, 4, 2);
     defer buf.deinit();
 
-    var t = TestWriter{};
+    var t: TestWriter = .{};
     t.init();
     try buf.renderAll(&t.w);
     try std.testing.expectEqualStrings("\r\x1b[K\r\n\x1b[K", t.w.buffered());

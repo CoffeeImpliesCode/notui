@@ -20,8 +20,8 @@
 const std = @import("std");
 const posix = std.posix;
 const Event = @import("event.zig").Event;
-const Key = @import("key.zig");
-const Parser = @import("parser.zig");
+const Key = @import("Key.zig");
+const Parser = @import("Parser.zig");
 const Tty = @import("tty.zig").Tty;
 
 /// Fresh bytes read per poll (vaxis/zigzag 256B read).
@@ -117,8 +117,7 @@ pub const Reader = struct {
                 // payload). Drop the oldest bytes so the stream keeps
                 // flowing; the sequence cannot reassemble within the fixed
                 // buffers (documented graceful degradation).
-                std.mem.copyForwards(
-                    u8,
+                @memmove(
                     self.pending[0 .. self.pending_len - fresh.len],
                     self.pending[fresh.len..self.pending_len],
                 );
@@ -203,8 +202,7 @@ pub const Reader = struct {
     fn prependToPending(self: *Reader, bytes: []const u8) void {
         if (bytes.len == 0) return;
         std.debug.assert(self.pending_len + bytes.len <= self.pending.len);
-        std.mem.copyBackwards(
-            u8,
+        @memmove(
             self.pending[bytes.len .. bytes.len + self.pending_len],
             self.pending[0..self.pending_len],
         );
@@ -277,7 +275,7 @@ test {
     std.testing.refAllDecls(@This());
 }
 
-// ── test helpers ────────────────────────────────────────────────────────
+// ── test helpers ────────────────────────────────
 
 const testing = std.testing;
 
@@ -291,9 +289,10 @@ const Pipe = struct {
         return .{ .read_fd = fds[0], .write_fd = fds[1] };
     }
 
-    fn deinit(self: *const Pipe) void {
+    fn deinit(self: *Pipe) void {
         closeFd(self.read_fd);
         closeFd(self.write_fd);
+        self.* = undefined;
     }
 
     /// A Tty whose read fd is the pipe's read end.
@@ -332,7 +331,7 @@ fn expectKeyPress(ev: Event, codepoint: u21, mods: Key.Modifiers) !void {
     }
 }
 
-// ── unit tests ──────────────────────────────────────────────────────────
+// ── unit tests ─────────────────────────────────
 
 test "input: incompleteTailLen edge cases" {
     const vectors = [_]struct { data: []const u8, expected: usize }{

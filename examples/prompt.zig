@@ -43,7 +43,7 @@ pub fn main(init: std.process.Init) !void {
     defer tty.restore();
 
     var parser: notui.parser = .{};
-    const caps = try notui.caps.Capabilities.detect(&tty, &parser, gpa);
+    const caps = try notui.caps.Capabilities.detect(gpa, &tty, &parser);
     _ = caps; // not needed by the prompt in v0
 
     var region = try Region.init(gpa, .{ .height = 1 });
@@ -60,7 +60,7 @@ pub fn main(init: std.process.Init) !void {
     const aa = arena.allocator();
 
     // The line being typed (grows in the arena).
-    var line: std.ArrayListUnmanaged(u8) = .empty;
+    var line: std.ArrayList(u8) = .empty;
 
     var reader = Reader.init(&tty);
     const w = tty.writer();
@@ -77,14 +77,14 @@ pub fn main(init: std.process.Init) !void {
                 } else if (k.matches('q', .{}) and line.items.len == 0) {
                     break; // `q` quits only on an empty line — else text
                 } else if (k.matches(Key.enter, .{})) {
-                    try pushLine(&region, aa, line.items);
+                    try pushLine(aa, &region, line.items);
                     line.clearRetainingCapacity();
                 } else if (k.matches(Key.backspace, .{})) {
                     line.items = popCodepoint(line.items);
                 } else if (k.matches(Key.escape, .{})) {
                     // Ignore.
                 } else {
-                    try appendKeyText(&line, aa, k);
+                    try appendKeyText(aa, &line, k);
                 }
             },
             .winsize => |wsz| try region.resize(wsz.cols, region.height),
@@ -118,7 +118,7 @@ fn drawPrompt(region: *Region, line: []const u8) !void {
 /// `.line` would wrap at the terminal and drift the region's anchor
 /// accounting. Chunks are arena-owned (never freed until exit), so the
 /// queued slices stay valid until the next render flushes them.
-fn pushLine(region: *Region, aa: std.mem.Allocator, text: []const u8) !void {
+fn pushLine(aa: std.mem.Allocator, region: *Region, text: []const u8) !void {
     var rest = text;
     while (rest.len > 0) {
         const chunk = try notui.width.truncate(aa, rest, region.width);
@@ -145,7 +145,7 @@ fn isCtrlD(k: Key) bool {
 /// `Key.text` is valid only until the next read, so it must be copied
 /// before that. Keys without text (control chars, PUA function /
 /// navigation keys, the multicodepoint marker) produce nothing.
-fn appendKeyText(line: *std.ArrayListUnmanaged(u8), aa: std.mem.Allocator, k: Key) !void {
+fn appendKeyText(aa: std.mem.Allocator, line: *std.ArrayList(u8), k: Key) !void {
     if (k.text) |t| {
         try line.appendSlice(aa, t);
         return;

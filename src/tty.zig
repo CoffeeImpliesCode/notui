@@ -50,7 +50,7 @@ pub const Tty = struct {
         errdefer f.close(io);
 
         if (!handler_installed) {
-            const handler = posix.Sigaction{
+            const handler: posix.Sigaction = .{
                 .handler = .{ .handler = handleWinch },
                 .mask = posix.sigemptyset(),
                 .flags = 0,
@@ -75,6 +75,7 @@ pub const Tty = struct {
         self.restore();
         resetSignalHandler();
         self.fd.close(self.io);
+        self.* = undefined;
     }
 
     /// Check if a file descriptor is a tty by probing for terminal window
@@ -115,7 +116,7 @@ pub const Tty = struct {
     /// report) falls back to 80x24 — graceful, never a hard throw for
     /// width (plan §8.8).
     pub fn getWinsize(self: *Tty) !Winsize {
-        var wsz = posix.winsize{
+        var wsz: posix.winsize = .{
             .row = 0,
             .col = 0,
             .xpixel = 0,
@@ -123,7 +124,7 @@ pub const Tty = struct {
         };
         const err = posix.system.ioctl(self.fd.handle, posix.T.IOCGWINSZ, @intFromPtr(&wsz));
         if (posix.errno(err) == .SUCCESS and wsz.row > 0 and wsz.col > 0)
-            return Winsize{
+            return .{
                 .rows = wsz.row,
                 .cols = wsz.col,
                 .x_pixel = wsz.xpixel,
@@ -150,7 +151,8 @@ pub const Tty = struct {
 
     /// Blocking read from the tty.
     pub fn read(self: *Tty, buf: []u8) !usize {
-        return try self.fd.readStreaming(self.io, &.{buf});
+        const n = try self.fd.readStreaming(self.io, &.{buf});
+        return n;
     }
 
     /// Build the raw-mode termios from the current state: input
@@ -195,7 +197,7 @@ pub const Tty = struct {
     fn resetSignalHandler() void {
         if (!handler_installed) return;
         handler_installed = false;
-        const act = posix.Sigaction{
+        const act: posix.Sigaction = .{
             .handler = .{ .handler = posix.SIG.DFL },
             .mask = posix.sigemptyset(),
             .flags = 0,

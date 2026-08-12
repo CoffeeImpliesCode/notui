@@ -146,6 +146,7 @@ pub const Region = struct {
         self.append_queue.deinit(self.gpa);
         self.cur.deinit();
         self.prev.deinit();
+        self.* = undefined;
     }
 
     /// Realloc both buffers (overlap copied by `Buffer.resize`), then
@@ -194,7 +195,7 @@ pub const Region = struct {
         if (!tty) {
             if (!self.first_frame) return;
             self.first_frame = false;
-            var tracked = Style{};
+            var tracked: Style = .{};
             for (0..self.height) |y| {
                 if (y > 0) try w.writeByte('\n');
                 try self.writeRow(w, y, &tracked, true);
@@ -263,7 +264,7 @@ pub const Region = struct {
         try w.writeAll("\r\n\r");
     }
 
-    // ── frame painters ─────────────────────────────────────
+    // ── frame painters ──────────────────────────────
 
     /// Strategy 1: reserve the band (CNL, when configured), hide the
     /// cursor, and append all `height` rows without clearing. Ends with
@@ -278,7 +279,7 @@ pub const Region = struct {
         try emit.hideCursor(w);
         self.cursor_hidden = true;
 
-        var tracked = Style{};
+        var tracked: Style = .{};
         for (0..self.height) |y| {
             // Row 0: column 1 regardless of where the app left the
             // cursor (after appendLines the CNL already lands on column
@@ -342,7 +343,7 @@ pub const Region = struct {
         while (rest > 0) : (rest -= 1) try w.writeByte('\n');
     }
 
-    // ── append flush ───────────────────────────────────────
+    // ── append flush ───────────────────────────────
 
     /// First-frame flush: nothing rendered yet, so the appends go at the
     /// current cursor position, above the band the first render is about
@@ -393,7 +394,7 @@ pub const Region = struct {
         if (self.height > 1) try w.print("\x1b[{d}A", .{self.height - 1});
     }
 
-    // ── diff bookkeeping ───────────────────────────────────
+    // ── diff bookkeeping ─────────────────────────────
 
     const RowRange = struct { first: usize, last: usize };
 
@@ -440,7 +441,7 @@ pub const Region = struct {
         @memcpy(self.prev.cells, self.cur.cells);
     }
 
-    // ── row emission ───────────────────────────────────────
+    // ── row emission ───────────────────────────────
 
     /// Write one row's cells (entry: cursor at column 1 of the row).
     /// Mirrors `Buffer.writeRow`: wide continuations never emit text
@@ -549,7 +550,7 @@ fn clearRow(buf: *Buffer, y: u16, cols: u16) !void {
     for (0..cols) |x| try buf.set(@intCast(x), y, .{});
 }
 
-// ── T5.1 skeleton ─────────────────────────────────────────
+// ── T5.1 skeleton ────────────────────────────────
 
 test "region: init/deinit leak nothing, queue frees with items" {
     var r = try Region.init(std.testing.allocator, .{ .height = 3 });
@@ -560,7 +561,7 @@ test "region: init/deinit leak nothing, queue frees with items" {
 }
 
 test "region: Options defaults" {
-    const o = Region.Options{ .height = 3 };
+    const o: Region.Options = .{ .height = 3 };
     try std.testing.expect(o.append_lines);
     try std.testing.expect(o.sync_output);
     try std.testing.expectEqual(caps.Capabilities.WidthPolicy.zg_unicode, o.width_policy);
@@ -573,7 +574,7 @@ test "region: append queue round-trips into the first frame flush" {
     try drawRow(&r.cur, 0, "ab");
     try drawRow(&r.cur, 1, "cd");
 
-    var t = TestWriter{};
+    var t: TestWriter = .{};
     t.init();
     try r.render(&t.w);
     // Line item flushed verbatim at the cursor (first frame: no move, no
@@ -584,7 +585,7 @@ test "region: append queue round-trips into the first frame flush" {
     );
 }
 
-// ── T5.2 strategies 1 + 3 ─────────────────────────────────
+// ── T5.2 strategies 1 + 3 ─────────────────────────────
 
 test "region: first render appends height lines without clearing" {
     var r = try makeRegion(2, true, true);
@@ -592,7 +593,7 @@ test "region: first render appends height lines without clearing" {
     try drawRow(&r.cur, 0, "ab");
     try drawRow(&r.cur, 1, "cd");
 
-    var t = TestWriter{};
+    var t: TestWriter = .{};
     t.init();
     try r.render(&t.w);
     // sync wrap + CPR re-query + CNL band reservation + hide cursor +
@@ -612,7 +613,7 @@ test "region: first render without append_lines emits no CNL" {
     try drawRow(&r.cur, 0, "ab");
     try drawRow(&r.cur, 1, "cd");
 
-    var t = TestWriter{};
+    var t: TestWriter = .{};
     t.init();
     try r.render(&t.w);
     try std.testing.expectEqualStrings(
@@ -628,7 +629,7 @@ test "region: changed middle row emits a minimal diff" {
     try drawRow(&r.cur, 1, "bbb");
     try drawRow(&r.cur, 2, "ccc");
 
-    var t1 = TestWriter{};
+    var t1: TestWriter = .{};
     t1.init();
     try r.render(&t1.w);
     try std.testing.expectEqualStrings(
@@ -639,7 +640,7 @@ test "region: changed middle row emits a minimal diff" {
     // Frame 2: only row 1 changes.
     try clearRow(&r.cur, 1, 3);
     try drawRow(&r.cur, 1, "BB");
-    var t2 = TestWriter{};
+    var t2: TestWriter = .{};
     t2.init();
     try r.render(&t2.w);
     // moveToBandTop (`\r` + CUU 2) + renderDiff (`\r\n` + column-1
@@ -657,7 +658,7 @@ test "region: shrink clears the stale tail (high-water)" {
     // rows (rows 1-2 blank), high_water = 3.
     try drawRow(&r.cur, 0, "aaa");
 
-    var t1 = TestWriter{};
+    var t1: TestWriter = .{};
     t1.init();
     try r.render(&t1.w);
     try std.testing.expectEqualStrings(
@@ -669,7 +670,7 @@ test "region: shrink clears the stale tail (high-water)" {
     // never re-emits them, but they are beyond the content end).
     try clearRow(&r.cur, 0, 3);
     try drawRow(&r.cur, 0, "aa");
-    var t2 = TestWriter{};
+    var t2: TestWriter = .{};
     t2.init();
     try r.render(&t2.w);
     // diff row 0, then the high-water tail [1,3) is erased row by row.
@@ -686,11 +687,11 @@ test "region: idle frame emits zero bytes" {
     try drawRow(&r.cur, 0, "ab");
     try drawRow(&r.cur, 1, "cd");
 
-    var t1 = TestWriter{};
+    var t1: TestWriter = .{};
     t1.init();
     try r.render(&t1.w);
 
-    var t2 = TestWriter{};
+    var t2: TestWriter = .{};
     t2.init();
     try r.render(&t2.w);
     try std.testing.expectEqualStrings("", t2.w.buffered());
@@ -702,7 +703,7 @@ test "region: sync_output off emits one plain unwrapped frame" {
     try drawRow(&r.cur, 0, "ab");
     try drawRow(&r.cur, 1, "cd");
 
-    var t = TestWriter{};
+    var t: TestWriter = .{};
     t.init();
     try r.render(&t.w);
     // No sync, no CPR, no hide, no CNL reservation — plain rows only.
@@ -719,7 +720,7 @@ test "region: wide glyph row diff never emits the continuation" {
     defer r.deinit();
     try drawRow(&r.cur, 0, "a👨‍🌾b");
 
-    var t1 = TestWriter{};
+    var t1: TestWriter = .{};
     t1.init();
     try r.render(&t1.w);
     try std.testing.expectEqualStrings(
@@ -729,7 +730,7 @@ test "region: wide glyph row diff never emits the continuation" {
 
     try clearRow(&r.cur, 0, 5);
     try drawRow(&r.cur, 0, "a👨‍🌾c");
-    var t2 = TestWriter{};
+    var t2: TestWriter = .{};
     t2.init();
     try r.render(&t2.w);
     // The continuation cell (column 2) emits nothing: the glyph appears
@@ -740,7 +741,7 @@ test "region: wide glyph row diff never emits the continuation" {
     );
 }
 
-// ── T5.3 strategy 2 ───────────────────────────────────────
+// ── T5.3 strategy 2 ───────────────────────────────
 
 test "region: resize emits ESC[J then re-renders every row, never more than height" {
     var r = try makeRegion(3, true, false);
@@ -750,11 +751,12 @@ test "region: resize emits ESC[J then re-renders every row, never more than heig
     try drawRow(&r.cur, 1, &([_]u8{'b'} ** 20));
     try drawRow(&r.cur, 2, &([_]u8{'c'} ** 20));
 
-    var t1 = TestWriter{};
+    var t1: TestWriter = .{};
     t1.init();
     try r.render(&t1.w);
     try std.testing.expectEqualStrings(
-        "\x1b[?2026h\x1b[6n\x1b[?25l\r" ++ ("a" ** 20) ++ "\r\n" ++ ("b" ** 20) ++ "\r\n" ++ ("c" ** 20) ++ "\r\x1b[?2026l",
+        "\x1b[?2026h\x1b[6n\x1b[?25l\r" ++ ("a" ** 20) ++ "\r\n" ++ ("b" ** 20) ++
+            "\r\n" ++ ("c" ** 20) ++ "\r\x1b[?2026l",
         t1.w.buffered(),
     );
 
@@ -767,7 +769,7 @@ test "region: resize emits ESC[J then re-renders every row, never more than heig
     try drawRow(&r.cur, 0, &([_]u8{'a'} ** 40));
     try drawRow(&r.cur, 1, &([_]u8{'b'} ** 40));
     try drawRow(&r.cur, 2, &([_]u8{'c'} ** 40));
-    var t2 = TestWriter{};
+    var t2: TestWriter = .{};
     t2.init();
     try r.render(&t2.w);
     const expected =
@@ -784,20 +786,20 @@ test "region: resize taller and shorter re-emits exactly height rows" {
     defer r.deinit();
     try drawRow(&r.cur, 0, "ab");
     try drawRow(&r.cur, 1, "cd");
-    var t1 = TestWriter{};
+    var t1: TestWriter = .{};
     t1.init();
     try r.render(&t1.w);
 
     try r.resize(30, 4);
     try drawRow(&r.cur, 2, "ef");
     try drawRow(&r.cur, 3, "gh");
-    var t2 = TestWriter{};
+    var t2: TestWriter = .{};
     t2.init();
     try r.render(&t2.w);
     try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, t2.w.buffered(), "\x1b[K"));
 
     try r.resize(30, 1);
-    var t3 = TestWriter{};
+    var t3: TestWriter = .{};
     t3.init();
     try r.render(&t3.w);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, t3.w.buffered(), "\x1b[K"));
@@ -808,17 +810,17 @@ test "region: width_dirty clears after the strategy-2 render" {
     defer r.deinit();
     try drawRow(&r.cur, 0, "ab");
     try drawRow(&r.cur, 1, "cd");
-    var t1 = TestWriter{};
+    var t1: TestWriter = .{};
     t1.init();
     try r.render(&t1.w);
 
     try r.resize(40, 2);
-    var t2 = TestWriter{};
+    var t2: TestWriter = .{};
     t2.init();
     try r.render(&t2.w);
     try std.testing.expect(!r.width_dirty);
 
-    var t3 = TestWriter{};
+    var t3: TestWriter = .{};
     t3.init();
     try r.render(&t3.w);
     try std.testing.expectEqualStrings("", t3.w.buffered());
@@ -829,30 +831,30 @@ test "region: consecutive resizes each trigger a full redraw" {
     defer r.deinit();
     try drawRow(&r.cur, 0, "ab");
     try drawRow(&r.cur, 1, "cd");
-    var t0 = TestWriter{};
+    var t0: TestWriter = .{};
     t0.init();
     try r.render(&t0.w);
 
     try r.resize(10, 2);
-    var t1 = TestWriter{};
+    var t1: TestWriter = .{};
     t1.init();
     try r.render(&t1.w);
     try std.testing.expect(std.mem.indexOf(u8, t1.w.buffered(), "\x1b[J") != null);
 
     try r.resize(20, 2);
-    var t2 = TestWriter{};
+    var t2: TestWriter = .{};
     t2.init();
     try r.render(&t2.w);
     try std.testing.expect(std.mem.indexOf(u8, t2.w.buffered(), "\x1b[J") != null);
 
     try r.resize(20, 3);
-    var t3 = TestWriter{};
+    var t3: TestWriter = .{};
     t3.init();
     try r.render(&t3.w);
     try std.testing.expect(std.mem.indexOf(u8, t3.w.buffered(), "\x1b[J") != null);
 }
 
-// ── T5.4 append queue ─────────────────────────────────────
+// ── T5.4 append queue ──────────────────────────────
 
 test "region: queued text flushes before the region rows" {
     var r = try makeRegion(2, true, false);
@@ -861,7 +863,7 @@ test "region: queued text flushes before the region rows" {
     try drawRow(&r.cur, 0, "ab");
     try drawRow(&r.cur, 1, "cd");
 
-    var t = TestWriter{};
+    var t: TestWriter = .{};
     t.init();
     try r.render(&t.w);
     // First frame: the text item is flushed at the cursor (with its
@@ -878,12 +880,12 @@ test "region: text newlines become CRLF in the flush" {
     try drawRow(&r.cur, 0, "aaa");
     try drawRow(&r.cur, 1, "bbb");
     try drawRow(&r.cur, 2, "ccc");
-    var t1 = TestWriter{};
+    var t1: TestWriter = .{};
     t1.init();
     try r.render(&t1.w);
 
     try r.append(.{ .text = "a\nb" });
-    var t2 = TestWriter{};
+    var t2: TestWriter = .{};
     t2.init();
     try r.render(&t2.w);
     // Steady-state flush: move to the band top, ESC[J, write the item
@@ -904,12 +906,12 @@ test "region: line items flush verbatim" {
     try drawRow(&r.cur, 0, "aaa");
     try drawRow(&r.cur, 1, "bbb");
     try drawRow(&r.cur, 2, "ccc");
-    var t1 = TestWriter{};
+    var t1: TestWriter = .{};
     t1.init();
     try r.render(&t1.w);
 
     try r.append(.{ .line = "exact-line" });
-    var t2 = TestWriter{};
+    var t2: TestWriter = .{};
     t2.init();
     try r.render(&t2.w);
     // The item bytes are written unchanged (only the flush's own `\r\n`
@@ -928,20 +930,20 @@ test "region: line items shift the anchor deterministically" {
     try drawRow(&r.cur, 0, "aaa");
     try drawRow(&r.cur, 1, "bbb");
     try drawRow(&r.cur, 2, "ccc");
-    var t1 = TestWriter{};
+    var t1: TestWriter = .{};
     t1.init();
     try r.render(&t1.w);
     try std.testing.expectEqual(@as(u16, 0), r.anchor_row);
 
     try r.append(.{ .line = "one" });
-    var t2 = TestWriter{};
+    var t2: TestWriter = .{};
     t2.init();
     try r.render(&t2.w);
     try std.testing.expectEqual(@as(u16, 1), r.anchor_row);
 
     try r.append(.{ .line = "two" });
     try r.append(.{ .line = "three" });
-    var t3 = TestWriter{};
+    var t3: TestWriter = .{};
     t3.init();
     try r.render(&t3.w);
     try std.testing.expectEqual(@as(u16, 3), r.anchor_row);
@@ -953,7 +955,7 @@ test "region: empty queue flushes nothing" {
     try drawRow(&r.cur, 0, "aaa");
     try drawRow(&r.cur, 1, "bbb");
     try drawRow(&r.cur, 2, "ccc");
-    var t1 = TestWriter{};
+    var t1: TestWriter = .{};
     t1.init();
     try r.render(&t1.w);
 
@@ -961,7 +963,7 @@ test "region: empty queue flushes nothing" {
     // bytes — the strategy-3 path only.
     try clearRow(&r.cur, 0, 3);
     try drawRow(&r.cur, 0, "aa");
-    var t2 = TestWriter{};
+    var t2: TestWriter = .{};
     t2.init();
     try r.render(&t2.w);
     try std.testing.expectEqualStrings(
@@ -971,7 +973,7 @@ test "region: empty queue flushes nothing" {
     try std.testing.expectEqual(@as(usize, 0), r.append_queue.items.len);
 }
 
-// ── T5.5 reanchor + CPR ───────────────────────────────────
+// ── T5.5 reanchor + CPR ──────────────────────────────
 
 test "region: CPR on first render and resize, never in steady state" {
     var r = try makeRegion(2, true, false);
@@ -979,7 +981,7 @@ test "region: CPR on first render and resize, never in steady state" {
     try drawRow(&r.cur, 0, "ab");
     try drawRow(&r.cur, 1, "cd");
 
-    var t1 = TestWriter{};
+    var t1: TestWriter = .{};
     t1.init();
     try r.render(&t1.w);
     try std.testing.expect(std.mem.indexOf(u8, t1.w.buffered(), "\x1b[6n") != null);
@@ -987,14 +989,14 @@ test "region: CPR on first render and resize, never in steady state" {
     // Steady state: changed frames carry no CPR query.
     try clearRow(&r.cur, 0, 2);
     try drawRow(&r.cur, 0, "aa");
-    var t2 = TestWriter{};
+    var t2: TestWriter = .{};
     t2.init();
     try r.render(&t2.w);
     try std.testing.expect(std.mem.indexOf(u8, t2.w.buffered(), "\x1b[6n") == null);
 
     try clearRow(&r.cur, 1, 2);
     try drawRow(&r.cur, 1, "dd");
-    var t3 = TestWriter{};
+    var t3: TestWriter = .{};
     t3.init();
     try r.render(&t3.w);
     try std.testing.expect(std.mem.indexOf(u8, t3.w.buffered(), "\x1b[6n") == null);
@@ -1002,7 +1004,7 @@ test "region: CPR on first render and resize, never in steady state" {
     // Resize re-queries (the strategy-2 golden in the T5.3 tests also
     // carries `\x1b[6n` after the first frame's).
     try r.resize(30, 2);
-    var t4 = TestWriter{};
+    var t4: TestWriter = .{};
     t4.init();
     try r.render(&t4.w);
     try std.testing.expect(std.mem.indexOf(u8, t4.w.buffered(), "\x1b[6n") != null);
@@ -1013,17 +1015,17 @@ test "region: reanchor() re-queries on the next render" {
     defer r.deinit();
     try drawRow(&r.cur, 0, "ab");
     try drawRow(&r.cur, 1, "cd");
-    var t1 = TestWriter{};
+    var t1: TestWriter = .{};
     t1.init();
     try r.render(&t1.w);
 
-    var t2 = TestWriter{};
+    var t2: TestWriter = .{};
     t2.init();
     try r.render(&t2.w); // idle: zero bytes
     try std.testing.expectEqualStrings("", t2.w.buffered());
 
     try r.reanchor();
-    var t3 = TestWriter{};
+    var t3: TestWriter = .{};
     t3.init();
     try r.render(&t3.w);
     // An idle frame with a pending re-anchor emits the CPR query only.
@@ -1035,24 +1037,24 @@ test "region: no CPR when sync_output is off" {
     defer r.deinit();
     try drawRow(&r.cur, 0, "ab");
     try drawRow(&r.cur, 1, "cd");
-    var t = TestWriter{};
+    var t: TestWriter = .{};
     t.init();
     try r.render(&t.w);
     try std.testing.expect(std.mem.indexOf(u8, t.w.buffered(), "\x1b[") == null);
 }
 
-// ── T5.6 exit + non-TTY ───────────────────────────────────
+// ── T5.6 exit + non-TTY ──────────────────────────────
 
 test "region: exit restores the cursor, closes sync, parks below the band" {
     var r = try makeRegion(2, true, false);
     defer r.deinit();
     try drawRow(&r.cur, 0, "ab");
     try drawRow(&r.cur, 1, "cd");
-    var t1 = TestWriter{};
+    var t1: TestWriter = .{};
     t1.init();
     try r.render(&t1.w);
 
-    var t2 = TestWriter{};
+    var t2: TestWriter = .{};
     t2.init();
     try r.exit(&t2.w);
     try std.testing.expectEqualStrings("\x1b[?25h\x1b[?2026l\r\n\r", t2.w.buffered());
@@ -1061,12 +1063,12 @@ test "region: exit restores the cursor, closes sync, parks below the band" {
 test "region: exit is idempotent" {
     var r = try makeRegion(2, true, false);
     defer r.deinit();
-    var t1 = TestWriter{};
+    var t1: TestWriter = .{};
     t1.init();
     try r.exit(&t1.w);
     try std.testing.expectEqualStrings("\x1b[?2026l\r\n\r", t1.w.buffered());
 
-    var t2 = TestWriter{};
+    var t2: TestWriter = .{};
     t2.init();
     try r.exit(&t2.w);
     try std.testing.expectEqualStrings("", t2.w.buffered());
@@ -1078,7 +1080,7 @@ test "region: piped mode emits one plain frame, no interactive sequences" {
     try drawRow(&r.cur, 0, "ab");
     try drawRow(&r.cur, 1, "cd");
 
-    var t1 = TestWriter{};
+    var t1: TestWriter = .{};
     t1.init();
     try r.render(&t1.w);
     // Blank cells are written as spaces (no CUF in a pipe): each row is
@@ -1092,13 +1094,13 @@ test "region: piped mode emits one plain frame, no interactive sequences" {
     // Later frames change nothing in a pipe: no repaint, no erase.
     try clearRow(&r.cur, 0, 2);
     try drawRow(&r.cur, 0, "zz");
-    var t2 = TestWriter{};
+    var t2: TestWriter = .{};
     t2.init();
     try r.render(&t2.w);
     try std.testing.expectEqualStrings("", t2.w.buffered());
 
     // Exit parks nothing in piped mode.
-    var t3 = TestWriter{};
+    var t3: TestWriter = .{};
     t3.init();
     try r.exit(&t3.w);
     try std.testing.expectEqualStrings("", t3.w.buffered());
@@ -1114,7 +1116,7 @@ test "region: non-TTY blank cells are written as spaces, never CUF" {
     try drawRow(&r.cur, 0, "a  b");
     // Row 1 stays fully blank (default cells, grapheme " ").
 
-    var t = TestWriter{};
+    var t: TestWriter = .{};
     t.init();
     try r.render(&t.w);
     const out = t.w.buffered();
@@ -1136,7 +1138,7 @@ test "region: non-TTY blank cells are written as spaces, never CUF" {
     var r2 = try makeRegion(2, true, false);
     defer r2.deinit();
     try drawRow(&r2.cur, 0, "a  b");
-    var t2 = TestWriter{};
+    var t2: TestWriter = .{};
     t2.init();
     try r2.render(&t2.w);
     try std.testing.expectEqualStrings(

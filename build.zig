@@ -7,7 +7,7 @@ pub fn build(b: *std.Build) void {
     // Sole dependency: zg — Unicode 16 text/width/graphemes.
     const zg = b.dependency("zg", .{});
 
-    // ── notui module ──────────────────────────────────────
+    // ── notui module ──────────────────────────
     const mod = b.addModule("notui", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -19,7 +19,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // ── notui executable ──────────────────────────────────
+    // ── notui executable ──────────────────────────
     const exe = b.addExecutable(.{
         .name = "notui",
         .root_module = b.createModule(.{
@@ -40,7 +40,7 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_cmd.addArgs(args);
     run_step.dependOn(&run_cmd.step);
 
-    // ── examples ──────────────────────────────────────────
+    // ── examples ──────────────────────────
     // One executable + install + `run-example-*` step per recipe
     // (plan T7.1). Each example imports the notui module with the same
     // zg trio wiring as the library module.
@@ -76,7 +76,7 @@ pub fn build(b: *std.Build) void {
         run_example_step.dependOn(&run_example_cmd.step);
     }
 
-    // ── unit tests ────────────────────────────────────────
+    // ── unit tests ──────────────────────────
     const unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/root.zig"),

@@ -2,8 +2,8 @@ const std = @import("std");
 const testing = std.testing;
 const Color = @import("color.zig").Color;
 const Event = @import("event.zig").Event;
-const Key = @import("key.zig");
-const Mouse = @import("mouse.zig");
+const Key = @import("Key.zig");
+const Mouse = @import("Mouse.zig");
 const Winsize = @import("event.zig").Winsize;
 const width = @import("width.zig");
 
@@ -57,11 +57,11 @@ pub fn parse(self: *Parser, input: []const u8, paste_allocator: ?std.mem.Allocat
     if (input[0] == 0x1b and input.len > 1) {
         switch (input[1]) {
             0x4F => return parseSs3(input),
-            0x50 => return skipUntilST(input), // DCS
-            0x58 => return skipUntilST(input), // SOS
+            0x50 => return skipUntilSt(input), // DCS
+            0x58 => return skipUntilSt(input), // SOS
             0x5B => return parseCsi(input, &self.buf), // CSI
             0x5D => return parseOsc(input, paste_allocator),
-            0x5E => return skipUntilST(input), // PM
+            0x5E => return skipUntilSt(input), // PM
             0x5F => return parseApc(input),
             else => {
                 // Anything else is an "alt + <char>" keypress
@@ -198,7 +198,7 @@ inline fn parseApc(input: []const u8) Result {
 }
 
 /// Skips sequences until we see an ST (String Terminator, ESC \)
-inline fn skipUntilST(input: []const u8) Result {
+inline fn skipUntilSt(input: []const u8) Result {
     if (input.len < 3) {
         return .{
             .event = null,
@@ -234,7 +234,7 @@ inline fn parseOsc(input: []const u8, paste_allocator: ?std.mem.Allocator) !Resu
     // end is the index of the terminating byte(s) (either the last byte of an
     // ST or BEL)
     const end: usize = blk: {
-        const esc_result = skipUntilST(input);
+        const esc_result = skipUntilSt(input);
         if (esc_result.n > 0) break :blk esc_result.n;
 
         // No escape, could be BEL terminated
@@ -256,9 +256,18 @@ inline fn parseOsc(input: []const u8, paste_allocator: ?std.mem.Allocator) !Resu
 
     switch (ps) {
         4 => {
-            const color_idx_delim = std.mem.indexOfScalarPos(u8, input, semicolon_idx + 1, ';') orelse return null_event;
+            const color_idx_delim = std.mem.indexOfScalarPos(
+                u8,
+                input,
+                semicolon_idx + 1,
+                ';',
+            ) orelse return null_event;
             // the palette index is validated but not carried in the §5 Report
-            const ps_idx = std.fmt.parseUnsigned(u8, input[semicolon_idx + 1 .. color_idx_delim], 10) catch return null_event;
+            const ps_idx = std.fmt.parseUnsigned(
+                u8,
+                input[semicolon_idx + 1 .. color_idx_delim],
+                10,
+            ) catch return null_event;
             _ = ps_idx;
             const color_spec = if (bel_terminated)
                 input[color_idx_delim + 1 .. sequence.len - 1]
@@ -334,6 +343,11 @@ inline fn parseCsi(input: []const u8, text_buf: []u8) Result {
         }
     } else return .{ .event = null, .n = 0 };
     const null_event: Result = .{ .event = null, .n = sequence.len };
+
+    // Defensive: the loop below only breaks at index >= 2 (past ESC
+    // `[`), so `sequence` is never empty — the guard keeps the final
+    // byte access unreachable-but-safe.
+    if (sequence.len == 0) return null_event;
 
     const final = sequence[sequence.len - 1];
     switch (final) {
@@ -716,7 +730,7 @@ inline fn parseMouse(input: []const u8, full_input: []const u8) Result {
     const alt = button_mask & mouse_bits.alt > 0;
     const ctrl = button_mask & mouse_bits.ctrl > 0;
 
-    const mouse = Mouse{
+    const mouse: Mouse = .{
         .button = button,
         .mods = .{
             .shift = shift,

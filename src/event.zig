@@ -4,8 +4,8 @@
 //! collapse into one `cap: Capability`, and paste_start/paste_end/mouse_leave/
 //! color_scheme are dropped (not in architecture §5).
 
-pub const Key = @import("key.zig");
-pub const Mouse = @import("mouse.zig");
+pub const Key = @import("Key.zig");
+pub const Mouse = @import("Mouse.zig");
 pub const Color = @import("color.zig").Color;
 
 /// The terminal's cursor position, 1-indexed per the DEC CPR convention.

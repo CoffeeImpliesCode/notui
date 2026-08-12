@@ -14,11 +14,11 @@ pub const Color = union(enum) {
     /// 256-color palette (0-255).
     ansi256: u8,
     /// True color (24-bit RGB).
-    rgb: RGB,
+    rgb: Rgb,
     /// Terminal default color (emit nothing).
     default,
 
-    pub const RGB = struct {
+    pub const Rgb = struct {
         r: u8,
         g: u8,
         b: u8,
@@ -35,14 +35,14 @@ pub const Color = union(enum) {
     pub const white: Color = .{ .ansi = .white };
 
     // Bright ANSI colors
-    pub const brightBlack: Color = .{ .ansi = .bright_black };
-    pub const brightRed: Color = .{ .ansi = .bright_red };
-    pub const brightGreen: Color = .{ .ansi = .bright_green };
-    pub const brightYellow: Color = .{ .ansi = .bright_yellow };
-    pub const brightBlue: Color = .{ .ansi = .bright_blue };
-    pub const brightMagenta: Color = .{ .ansi = .bright_magenta };
-    pub const brightCyan: Color = .{ .ansi = .bright_cyan };
-    pub const brightWhite: Color = .{ .ansi = .bright_white };
+    pub const bright_black: Color = .{ .ansi = .bright_black };
+    pub const bright_red: Color = .{ .ansi = .bright_red };
+    pub const bright_green: Color = .{ .ansi = .bright_green };
+    pub const bright_yellow: Color = .{ .ansi = .bright_yellow };
+    pub const bright_blue: Color = .{ .ansi = .bright_blue };
+    pub const bright_magenta: Color = .{ .ansi = .bright_magenta };
+    pub const bright_cyan: Color = .{ .ansi = .bright_cyan };
+    pub const bright_white: Color = .{ .ansi = .bright_white };
 
     /// A color report from the terminal, answering an OSC 4/10/11/12 query.
     pub const Report = struct {
@@ -182,7 +182,7 @@ pub const AnsiColor = enum(u8) {
 
     /// Approximate RGB for this color (the 16-color palette's
     /// conventional values).
-    pub fn toRgb(self: AnsiColor) Color.RGB {
+    pub fn toRgb(self: AnsiColor) Color.Rgb {
         return switch (self) {
             .black => .{ .r = 0, .g = 0, .b = 0 },
             .red => .{ .r = 128, .g = 0, .b = 0 },
@@ -208,7 +208,7 @@ pub const AnsiColor = enum(u8) {
 ///
 /// Indexes 0-15 map through the ANSI palette, 16-231 through the 6x6x6
 /// color cube, 232-255 through the grayscale ramp.
-pub fn ansi256ToRgb(n: u8) Color.RGB {
+pub fn ansi256ToRgb(n: u8) Color.Rgb {
     if (n < 16) {
         // Standard colors
         return @as(AnsiColor, @enumFromInt(n)).toRgb();
@@ -329,7 +329,10 @@ test "color: eql across all tags" {
     try std.testing.expect(!Color.eql(.{ .ansi256 = 42 }, .{ .ansi256 = 43 }));
     try std.testing.expect(!Color.eql(.{ .ansi256 = 42 }, .{ .rgb = .{ .r = 42, .g = 42, .b = 42 } }));
     try std.testing.expect(Color.eql(.{ .rgb = .{ .r = 1, .g = 2, .b = 3 } }, .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } }));
-    try std.testing.expect(!Color.eql(.{ .rgb = .{ .r = 1, .g = 2, .b = 3 } }, .{ .rgb = .{ .r = 3, .g = 2, .b = 1 } }));
+    try std.testing.expect(!Color.eql(
+        .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } },
+        .{ .rgb = .{ .r = 3, .g = 2, .b = 1 } },
+    ));
     try std.testing.expect(Color.eql(.default, .default));
     try std.testing.expect(!Color.eql(.default, .{ .ansi = .black }));
     try std.testing.expect(!Color.eql(.{ .ansi = .black }, .default));
@@ -381,16 +384,16 @@ test "color: rgbFromSpec vectors" {
 }
 
 test "color: ansi256ToRgb cube corners" {
-    try std.testing.expectEqual(Color.RGB{ .r = 0, .g = 0, .b = 0 }, ansi256ToRgb(16));
-    try std.testing.expectEqual(Color.RGB{ .r = 0, .g = 0, .b = 255 }, ansi256ToRgb(21));
-    try std.testing.expectEqual(Color.RGB{ .r = 255, .g = 0, .b = 0 }, ansi256ToRgb(196));
-    try std.testing.expectEqual(Color.RGB{ .r = 255, .g = 255, .b = 255 }, ansi256ToRgb(231));
-    try std.testing.expectEqual(Color.RGB{ .r = 8, .g = 8, .b = 8 }, ansi256ToRgb(232));
-    try std.testing.expectEqual(Color.RGB{ .r = 238, .g = 238, .b = 238 }, ansi256ToRgb(255));
+    try std.testing.expectEqual(Color.Rgb{ .r = 0, .g = 0, .b = 0 }, ansi256ToRgb(16));
+    try std.testing.expectEqual(Color.Rgb{ .r = 0, .g = 0, .b = 255 }, ansi256ToRgb(21));
+    try std.testing.expectEqual(Color.Rgb{ .r = 255, .g = 0, .b = 0 }, ansi256ToRgb(196));
+    try std.testing.expectEqual(Color.Rgb{ .r = 255, .g = 255, .b = 255 }, ansi256ToRgb(231));
+    try std.testing.expectEqual(Color.Rgb{ .r = 8, .g = 8, .b = 8 }, ansi256ToRgb(232));
+    try std.testing.expectEqual(Color.Rgb{ .r = 238, .g = 238, .b = 238 }, ansi256ToRgb(255));
 
     // Indexes 0-15 map through the ANSI palette.
-    try std.testing.expectEqual(Color.RGB{ .r = 0, .g = 0, .b = 0 }, ansi256ToRgb(0));
-    try std.testing.expectEqual(Color.RGB{ .r = 255, .g = 255, .b = 255 }, ansi256ToRgb(15));
+    try std.testing.expectEqual(Color.Rgb{ .r = 0, .g = 0, .b = 0 }, ansi256ToRgb(0));
+    try std.testing.expectEqual(Color.Rgb{ .r = 255, .g = 255, .b = 255 }, ansi256ToRgb(15));
 }
 
 test "color: rgbToAnsi256 downsampling" {
@@ -423,8 +426,8 @@ test "color: AnsiColor fg/bg code math" {
     try std.testing.expectEqual(@as(u8, 100), AnsiColor.bright_black.bgCode());
     try std.testing.expectEqual(@as(u8, 107), AnsiColor.bright_white.bgCode());
 
-    try std.testing.expectEqual(Color.RGB{ .r = 128, .g = 0, .b = 0 }, AnsiColor.red.toRgb());
-    try std.testing.expectEqual(Color.RGB{ .r = 255, .g = 255, .b = 0 }, AnsiColor.bright_yellow.toRgb());
+    try std.testing.expectEqual(Color.Rgb{ .r = 128, .g = 0, .b = 0 }, AnsiColor.red.toRgb());
+    try std.testing.expectEqual(Color.Rgb{ .r = 255, .g = 255, .b = 0 }, AnsiColor.bright_yellow.toRgb());
 }
 
 test "color: ColorProfile support matrix" {
