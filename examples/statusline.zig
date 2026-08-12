@@ -85,6 +85,7 @@ fn runInteractive(gpa: std.mem.Allocator, io: std.Io) !void {
     var tty = try notui.tty.Tty.init(io);
     defer tty.deinit();
     try tty.makeRaw();
+    defer tty.restore();
 
     var parser: notui.parser = .{};
     const caps = try notui.caps.Capabilities.detect(gpa, &tty, &parser);
@@ -120,7 +121,11 @@ fn runInteractive(gpa: std.mem.Allocator, io: std.Io) !void {
         const ev = try reader.nextTimeout(100);
         if (ev) |e| switch (e) {
             .key_press => |k| {
-                if (k.codepoint == Key.ctrl_c or k.codepoint == 'q') break;
+                // Ctrl+C arrives as a normal key event (raw mode: ISIG
+                // off). Kitty CSI-u reports 0x03 directly; legacy ground
+                // state maps byte 0x03 to 'c' + ctrl — check both forms.
+                if (k.matches(Key.ctrl_c, .{}) or k.matches('c', .{ .ctrl = true }) or
+                    k.matches('q', .{})) break;
             },
             else => {},
         };
@@ -129,6 +134,7 @@ fn runInteractive(gpa: std.mem.Allocator, io: std.Io) !void {
     // Park the cursor below the band; the final frame stays in the
     // transcript (nothing is cleared).
     try region.exit(w);
+    try caps.restore(w); // disable kitty keyboard — leave the user's terminal clean
     try w.flush();
 }
 

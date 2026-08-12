@@ -52,7 +52,6 @@ pub fn main(init: std.process.Init) !void {
 
     var parser: notui.parser = .{};
     const caps = try notui.caps.Capabilities.detect(gpa, &tty, &parser);
-    _ = caps; // the spinner needs no capability in v0
 
     var region = try Region.init(gpa, .{ .height = 1 });
     defer region.deinit();
@@ -101,6 +100,7 @@ pub fn main(init: std.process.Init) !void {
     // Park the cursor below the band; the last frame stays in the
     // transcript (nothing is cleared).
     try region.exit(w);
+    try caps.restore(w); // disable kitty keyboard etc. — leave the user's terminal clean
     try w.flush();
 }
 

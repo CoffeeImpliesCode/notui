@@ -43,6 +43,15 @@ pub const Capabilities = struct {
         return if (self.unicode_core) .zg_unicode else .wcwidth_legacy;
     }
 
+    /// Emit the disable sequences for every terminal mode `detect()`
+    /// enabled, returning the user's terminal to its pre-app state. In v0
+    /// kitty keyboard is the only mode detect() leaves on (sync output
+    /// ends per frame; bracketed paste and mouse are never enabled by the
+    /// library). Call this after `Region.exit`, before `Tty.restore`.
+    pub fn restore(self: *const Capabilities, w: anytype) !void {
+        if (self.kitty_keyboard) try w.writeAll("\x1b[<u");
+    }
+
     /// Sequential live queries (DA1, ?2026 sync, ?2027 unicode core,
     /// kitty keyboard, OSC 11 background) with a per-query deadline.
     pub fn detect(alloc: std.mem.Allocator, tty: anytype, parser: *Parser) !Capabilities {
@@ -362,6 +371,20 @@ test "caps: widthPolicy" {
     try std.testing.expectEqual(Capabilities.WidthPolicy.wcwidth_legacy, c.widthPolicy());
     c.unicode_core = true;
     try std.testing.expectEqual(Capabilities.WidthPolicy.zg_unicode, c.widthPolicy());
+}
+
+test "caps: restore emits disables for enabled modes only" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const w = &out.writer;
+
+    var c: Capabilities = .{};
+    try c.restore(w); // nothing enabled → nothing emitted
+    try std.testing.expectEqualStrings("", out.written());
+
+    c.kitty_keyboard = true;
+    try c.restore(w); // kitty keyboard pop — the only v0 enable
+    try std.testing.expectEqualStrings("\x1b[<u", out.written());
 }
 
 test "caps: detect assembles capabilities from scripted replies" {

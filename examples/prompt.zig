@@ -44,7 +44,6 @@ pub fn main(init: std.process.Init) !void {
 
     var parser: notui.parser = .{};
     const caps = try notui.caps.Capabilities.detect(gpa, &tty, &parser);
-    _ = caps; // not needed by the prompt in v0
 
     var region = try Region.init(gpa, .{ .height = 1 });
     defer region.deinit();
@@ -102,6 +101,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try region.exit(w);
+    try caps.restore(w); // disable kitty keyboard — leave the user's terminal clean
     try w.flush();
 }
 
