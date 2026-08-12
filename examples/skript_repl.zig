@@ -1,23 +1,31 @@
 //! Skript REPL: a non-blocking Lisp REPL on notui (skript embed contract).
 //!
-//! Layout: a 2-row Region. Row 0 is the input band (prompt + live
-//! keyword-highlighted typing); row 1 is the status band (base-ui Spinner
-//! while an eval runs, a keybinding hint otherwise). Completed submissions
-//! append above the band as plain `.line` scrollback rows: the query
-//! (keyword-styled), the `⇒ answer (Type)` line, and muted captured
-//! library output (capped at 5 lines + "N more captured").
+//! Layout: a 2-row Region. Row 0 is the input band (continuation prompt
+//! for multi-line forms, otherwise the main prompt + live
+//! keyword-highlighted typing with a reverse-video cursor block); row 1
+//! is the status band (base-ui Spinner while an eval runs, "done in
+//! {d}ms" after a completed eval, a keybinding hint otherwise). Completed
+//! submissions append above the band as plain `.line` scrollback rows:
+//! the query (keyword-styled), the `⇒ answer (Type)` line, and muted
+//! captured library output (capped at 5 lines + "N more captured").
+//! Answers are guarded: 16 KiB byte cap + 200-row line cap (§6).
 //!
-//! The skript runtime is initialized once and used by exactly ONE thread
-//! at a time: each submission copies the query into the app arena and
-//! spawns a worker `std.Thread` that compiles + evals + formats the
-//! answer entirely off the UI thread, capturing the form's fd 1/2 writes
-//! into a pipe (libc extern block — the example links libc). The worker
-//! publishes into a result slot; the main loop polls the slot each tick
-//! and keeps rendering (the spinner animates while busy). Enter is
-//! ignored while a submission is in flight; Up/Down navigate a 100-entry
-//! history ring; Ctrl+C clears the line; Ctrl+D quits (q quits only on an
-//! empty line). Quitting mid-eval joins the worker first — skript's
-//! cooperative scheduler drains, then the runtime deinits.
+//! The skript runtime (register VM, `initRegvm`) is initialized once and
+//! used by exactly ONE thread at a time: each submission copies the query
+//! into the app arena and spawns a worker `std.Thread` that compiles +
+//! evals + formats the answer entirely off the UI thread, capturing the
+//! form's fd 1/2 writes into a pipe (libc extern block — the example
+//! links libc). The worker evaluates via `spawnEval` + `awaitProcess`
+//! (regvm fast path; the scheduler's own runner thread executes the
+//! bytecode) with a stack-VM `evalNode` fallback for non-regvm-compilable
+//! forms. The worker publishes into a result slot; the main loop polls
+//! the slot each tick and keeps rendering (the spinner animates while
+//! busy). Enter is ignored while a submission is in flight; paren-aware
+//! Enter continues multi-line input; Up/Down navigate a 100-entry history
+//! ring; `:help`/`:quit`/`:q`/`:clear` are exact-match meta commands;
+//! Ctrl+C clears the line; Ctrl+D quits (q quits only on an empty line).
+//! Quitting mid-eval joins the worker first — skript's cooperative
+//! scheduler drains, then the runtime deinits.
 //!
 //! Non-TTY stdin degrades to one plain hint line, exit 0 (no tty
 //! interaction, no interactive sequences).
@@ -56,6 +64,25 @@ const answer_prefix = " ⇒ ";
 
 /// Status-band hint shown while idle.
 const idle_status = "Enter: eval · ↑/↓: history · ^C: clear · ^D/q: quit";
+
+/// Continuation prompt (row 0) when the pending buffer spans lines (§4.3).
+const cont_prompt = "    · ";
+
+/// Status-band hint shown while a multi-line form is mid-continuation.
+const cont_status = "multiline: Enter to continue";
+
+/// Answer guard caps (§6): a huge pretty answer is truncated at 16 KiB
+/// (worker side) and at 200 scrollback rows (append side).
+const max_answer_bytes: usize = 16 * 1024;
+const max_answer_lines: usize = 200;
+
+/// `:help` content: one scrollback `.line` row per binding group (§5).
+const help_rows = [_][]const u8{
+    "skript repl keys: Enter eval · Enter(unbalanced) continue line",
+    "·/↓ history · ^C clear line · ^D/q/:quit quit · Left/Right move",
+    "· Alt+Left/Right word · Home/End or ^A/^E line ends · ^K kill→end",
+    "· ^U kill→start · ^W delete word · Del delete fwd · Backspace del",
+};
 
 /// One plain line printed when stdin is not a terminal (runPlain).
 const hint_plain = "skript repl (notui example): interactive terminal required";
@@ -137,8 +164,12 @@ pub fn main(init: std.process.Init) !void {
     // The skript runtime: init once (prelude + builtins + store), then
     // single-thread-at-a-time — the worker owns it during each eval, the
     // main thread only polls the result slot. deinit() drains the runtime's
-    // scheduler runners, so the worker is joined first (below).
-    var rt = try skript.Runtime.init(gpa, io);
+    // scheduler runners, so the worker is joined first (below). regvm
+    // engine: the register VM is ~10× faster on compute-heavy forms and
+    // does not run out of the fixed store heap on deep recursion (the
+    // stack VM's failure mode past ~fib(17)); the eval path falls back to
+    // the stack VM for non-regvm-compilable forms (§2).
+    var rt = try skript.Runtime.initRegvm(gpa, io);
     defer rt.deinit();
 
     // `display`/`write` route through `rt.stdout`. skript's hosts must set
@@ -153,10 +184,15 @@ pub fn main(init: std.process.Init) !void {
     rt.stdout = &stdout_file_writer.interface;
 
     var line: std.ArrayList(u8) = .empty;
+    var cursor: usize = 0; // byte index into line.items (§3.1)
     var history: History = .{};
     var slot: ResultSlot = .{};
     var worker: ?std.Thread = null;
     var spinner: notui.component.Spinner = .{ .label = "evaluating" };
+    // §7: eval start timestamp (set in submit) and the last completed
+    // eval's duration in ms (status band; cleared on the next keypress).
+    var eval_start: std.Io.Timestamp = .fromNanoseconds(0);
+    var last_eval_ms: ?u64 = null;
 
     var reader = Reader.init(&tty);
     const w = tty.writer();
@@ -165,26 +201,84 @@ pub fn main(init: std.process.Init) !void {
         const ev = reader.nextTimeout(tick_ms) catch break;
         if (ev) |e| switch (e) {
             .key_press => |k| {
+                // Any key clears the "done in …ms" status (§7).
+                last_eval_ms = null;
                 if (isCtrlC(k)) {
-                    // Normal key event: clear the line, keep running.
+                    // Normal key event: clear the line, keep running
+                    // (embed contract §8: ctrl+c never hard-quits).
                     line.clearRetainingCapacity();
+                    cursor = 0;
                 } else if (isCtrlD(k)) {
                     break; // ctrl+d always quits (even mid-eval)
                 } else if (k.matches('q', .{}) and line.items.len == 0) {
                     break; // `q` quits only on an empty line
                 } else if (k.matches(Key.enter, .{})) {
-                    // Ignored while a submission is in flight (busy).
-                    try submit(aa, &line, &history, &slot, &worker, rt);
+                    // Meta commands / multi-line continuation / submit
+                    // (§4-§5); ignored while a submission is in flight.
+                    if (try handleEnter(
+                        aa,
+                        io,
+                        &region,
+                        &line,
+                        &cursor,
+                        &history,
+                        &slot,
+                        &worker,
+                        rt,
+                        &eval_start,
+                    )) break;
                 } else if (k.matches(Key.up, .{})) {
                     history.up(aa, &line);
+                    cursor = line.items.len;
                 } else if (k.matches(Key.down, .{})) {
                     history.down(aa, &line);
+                    cursor = line.items.len;
+                } else if (k.matches(Key.left, .{ .alt = true })) {
+                    cursor = moveWordLeft(line.items, cursor);
+                } else if (k.matches(Key.right, .{ .alt = true })) {
+                    cursor = moveWordRight(line.items, cursor);
+                } else if (k.matches('a', .{ .ctrl = true })) {
+                    cursor = 0; // Ctrl+A: line start
+                } else if (k.matches('e', .{ .ctrl = true })) {
+                    cursor = line.items.len; // Ctrl+E: line end
+                } else if (k.matches('k', .{ .ctrl = true })) {
+                    line.items.len = cursor; // Ctrl+K: kill to end
+                } else if (k.matches('u', .{ .ctrl = true })) {
+                    // Ctrl+U: kill to start.
+                    std.mem.copyForwards(u8, line.items[0..], line.items[cursor..]);
+                    line.items.len -= cursor;
+                    cursor = 0;
+                } else if (k.matches('w', .{ .ctrl = true })) {
+                    // Ctrl+W: delete the word before the cursor.
+                    const start = moveWordLeft(line.items, cursor);
+                    std.mem.copyForwards(u8, line.items[start..], line.items[cursor..]);
+                    line.items.len -= cursor - start;
+                    cursor = start;
+                } else if (k.matches(Key.left, .{})) {
+                    cursor = prevCodepoint(line.items, cursor);
+                } else if (k.matches(Key.right, .{})) {
+                    if (cursor < line.items.len) cursor += utf8SeqLen(line.items, cursor);
+                } else if (k.matches(Key.home, .{})) {
+                    cursor = 0;
+                } else if (k.matches(Key.end, .{})) {
+                    cursor = line.items.len;
                 } else if (k.matches(Key.backspace, .{})) {
-                    line.items = popCodepoint(line.items);
+                    // Delete the codepoint BEFORE the cursor.
+                    const start = prevCodepoint(line.items, cursor);
+                    std.mem.copyForwards(u8, line.items[start..], line.items[cursor..]);
+                    line.items.len -= cursor - start;
+                    cursor = start;
+                } else if (k.matches(Key.delete, .{})) {
+                    // Delete the codepoint AT the cursor (forward).
+                    if (cursor < line.items.len) {
+                        const clen = utf8SeqLen(line.items, cursor);
+                        std.mem.copyForwards(u8, line.items[cursor..], line.items[cursor + clen ..]);
+                        line.items.len -= clen;
+                    }
                 } else if (k.matches(Key.escape, .{})) {
                     // Ignore.
                 } else {
-                    try appendKeyText(aa, &line, k);
+                    try insertKeyText(aa, &line, &cursor, k);
                 }
             },
             .winsize => |wsz| try region.resize(wsz.cols, region.height),
@@ -197,10 +291,10 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // Poll the eval slot; append the finished submission when ready.
-        try pollSlot(aa, &region, &slot, &worker);
-
         const now = std.Io.Timestamp.now(io, .awake);
-        try drawBand(aa, &region, line.items, &spinner, worker != null, now);
+        try pollSlot(aa, &region, &slot, &worker, &eval_start, &last_eval_ms, now);
+
+        try drawBand(aa, &region, line.items, cursor, &spinner, worker != null, now, last_eval_ms);
         try region.render(w);
         try w.flush();
     }
@@ -266,12 +360,19 @@ fn evalWorker(ctx: *WorkerCtx) void {
         break :blk null;
     };
     if (node) |n| {
-        const v: ?skript.Value = ctx.rt.evalNode(ctx.rt.root_ns, n) catch |e| blk: {
+        const v: ?skript.Value = evalFast(ctx.rt, ctx.query, n) catch |e| blk: {
             phase = .eval;
             answer = std.fmt.allocPrint(aa, "Eval error: {any}", .{e}) catch "Eval error";
             break :blk null;
         };
         if (v) |val| answer = formatAnswer(aa, ctx.rt, val);
+    }
+    // Answer guard, byte cap (§6): a huge pretty answer (giant tensor,
+    // giant structure) is truncated so it cannot balloon the scrollback.
+    if (answer.len > max_answer_bytes) {
+        answer = std.fmt.allocPrint(aa, "{s}\n… (truncated)", .{
+            answer[0..max_answer_bytes],
+        }) catch answer[0..max_answer_bytes];
     }
 
     // Restore the fds FIRST (a straggling write then lands on the
@@ -291,11 +392,14 @@ fn evalWorker(ctx: *WorkerCtx) void {
 /// the runtime is single-owner and only one eval runs at a time.
 fn submit(
     aa: std.mem.Allocator,
+    io: std.Io,
     line: *std.ArrayList(u8),
+    cursor: *usize,
     history: *History,
     slot: *ResultSlot,
     worker: *?std.Thread,
     rt: *skript.Runtime,
+    eval_start: *std.Io.Timestamp,
 ) !void {
     const trimmed = std.mem.trim(u8, line.items, " \n\r\t");
     if (trimmed.len == 0) return;
@@ -306,7 +410,23 @@ fn submit(
     ctx.* = .{ .rt = rt, .query = query, .aa = aa, .slot = slot };
     worker.* = try std.Thread.spawn(.{}, evalWorker, .{ctx});
     try history.push(aa, query);
+    eval_start.* = std.Io.Timestamp.now(io, .awake);
     line.clearRetainingCapacity();
+    cursor.* = 0;
+}
+
+/// regvm fast path with a stack-VM fallback for non-compilable forms.
+/// spawnEval compiles on THIS (worker) thread, enqueues a cooperative
+/// process on the scheduler's permanent runner thread, and awaitProcess
+/// parks this worker polling the process's future. If the form is not
+/// regvm-compilable (error.Unimplemented), evaluate the parse-gate node
+/// with evalNode (stack VM) — exactly the v1 path (§2.2).
+fn evalFast(rt: *skript.Runtime, query: []const u8, node: skript.AstNodeRef) !skript.Value {
+    const proc = rt.spawnEval(query) catch |e| switch (e) {
+        error.Unimplemented => return rt.evalNode(rt.root_ns, node),
+        else => return e,
+    };
+    return rt.awaitProcess(proc);
 }
 
 /// Main-loop tick: if the slot holds a fresh result, join the worker,
@@ -317,10 +437,17 @@ fn pollSlot(
     region: *Region,
     slot: *ResultSlot,
     worker: *?std.Thread,
+    eval_start: *std.Io.Timestamp,
+    last_eval_ms: *?u64,
+    now: std.Io.Timestamp,
 ) !void {
     if (!slot.ready.load(.acquire)) return;
     if (worker.*) |t| t.join();
     worker.* = null;
+
+    // §7: elapsed time from spawn to result consumption, in ms.
+    const elapsed_ns = now.nanoseconds - eval_start.nanoseconds;
+    last_eval_ms.* = @intCast(@max(elapsed_ns, 0) / std.time.ns_per_ms);
 
     const query = slot.query;
     const answer = slot.answer;
@@ -330,7 +457,86 @@ fn pollSlot(
     try appendEntry(aa, region, query, answer, lib_out);
 }
 
-// ── scrollback appends (contract §8 / D3: plain per-line, no boxes) ──
+// ── Enter handling: meta commands + multi-line (§4-§5) ────────────
+
+/// Handle Enter: meta-command dispatch, then multi-line continuation,
+/// then submit. Returns true when a `:quit`/`:q` requested exit.
+fn handleEnter(
+    aa: std.mem.Allocator,
+    io: std.Io,
+    region: *Region,
+    line: *std.ArrayList(u8),
+    cursor: *usize,
+    history: *History,
+    slot: *ResultSlot,
+    worker: *?std.Thread,
+    rt: *skript.Runtime,
+    eval_start: *std.Io.Timestamp,
+) !bool {
+    const trimmed = std.mem.trim(u8, line.items, " \n\r\t");
+    if (trimmed.len == 0) return false; // empty: nothing to do (matches v1)
+    switch (try dispatchMeta(region, line, cursor, trimmed)) {
+        .quit => return true,
+        .handled => return false,
+        .not_command => {},
+    }
+    if (!isComplete(line.items)) {
+        // Unbalanced delimiters / unterminated string: continue input.
+        try line.append(aa, '\n');
+        cursor.* = line.items.len;
+        return false;
+    }
+    try submit(aa, io, line, cursor, history, slot, worker, rt, eval_start);
+    return false;
+}
+
+/// Outcome of a meta-command dispatch attempt.
+const MetaOutcome = enum { not_command, handled, quit };
+
+/// Handle leading-`:` commands. Exact-match only (§5): a command is
+/// recognized when the trimmed line starts with ':' and equals a known
+/// command; anything else (bare ':', `:foo` keyword literals) evaluates
+/// normally and is never shadowed.
+fn dispatchMeta(
+    region: *Region,
+    line: *std.ArrayList(u8),
+    cursor: *usize,
+    trimmed: []const u8,
+) !MetaOutcome {
+    if (trimmed.len < 2 or trimmed[0] != ':') return .not_command;
+    if (std.mem.eql(u8, trimmed, ":help")) {
+        for (help_rows) |row| try region.append(.{ .line = row });
+        return .handled;
+    }
+    if (std.mem.eql(u8, trimmed, ":quit") or std.mem.eql(u8, trimmed, ":q")) return .quit;
+    if (std.mem.eql(u8, trimmed, ":clear")) {
+        line.clearRetainingCapacity();
+        cursor.* = 0;
+        return .handled;
+    }
+    return .not_command;
+}
+
+/// True when `src` is a complete expression: balanced delimiters and no
+/// unterminated string/comment. False = incomplete → continue input.
+/// The skript lexer skips comments/strings internally, so a token-walk
+/// depth scan is complete and robust; a lex error (unterminated string
+/// or block comment) means the input is still incomplete (§4.1).
+fn isComplete(src: []const u8) bool {
+    var c: skript.Cursor = .{ .src = src };
+    var depth: i32 = 0;
+    while (true) {
+        const tok = skript.lex(&c) catch return false;
+        switch (tok.kind) {
+            .lparen, .lbracket, .lbrace, .map_marker => depth += 1, // :{ is a grouping opener
+            .rparen, .rbracket, .rbrace => depth -= 1,
+            .eof => return depth <= 0, // negative = overclosed → submit (reader errors)
+            else => {},
+        }
+    }
+}
+
+// ── scrollback appends (contract §8 / D3: plain per-line, no boxes) ────
 
 /// Append one completed submission above the band: the query (chunked at
 /// the region width, keyword-styled per chunk), the " ⇒ answer" line(s),
@@ -358,10 +564,25 @@ fn appendEntry(
         }
     }
     // Answer rows: " ⇒ " prefix on the first chunk; the answer is already
-    // hanging-indented for its own newlines (formatAnswer).
+    // hanging-indented for its own newlines (formatAnswer). Line cap (§6):
+    // at most max_answer_lines rows, then one muted marker row.
+    var total_a_lines: usize = 1;
+    for (answer) |c| {
+        if (c == '\n') total_a_lines += 1;
+    }
     var a_lines = std.mem.splitScalar(u8, answer, '\n');
     var first_a = true;
+    var shown_a_lines: usize = 0;
     while (a_lines.next()) |aline| {
+        if (shown_a_lines >= max_answer_lines) {
+            const hidden = total_a_lines - shown_a_lines;
+            var row: std.ArrayList(u8) = .empty;
+            try pushStyle(aa, &row, lib_style);
+            try row.print(aa, "… (truncated: {d} lines)", .{hidden});
+            try row.appendSlice(aa, reset_sgr);
+            try pushLine(aa, region, row.items);
+            break;
+        }
         var rest = aline;
         var first_chunk = true;
         while (rest.len > 0) {
@@ -378,6 +599,7 @@ fn appendEntry(
         }
         if (first_chunk and first_a) try region.append(.{ .line = answer_prefix });
         first_a = false;
+        shown_a_lines += 1;
     }
     // Muted library output rows (fd-capture preview, ≤ 5 lines).
     if (lib_out.len > 0) {
@@ -595,11 +817,13 @@ fn scanQuery(aa: std.mem.Allocator, src: []const u8) ![]const ScanSeg {
             try segs.append(aa, .{ .text = src[start..i], .style = comment_style });
             plain_start = i;
         } else if (c == '"') {
-            // String literal; backslash escapes the next byte.
+            // String literal; backslash escapes the next byte. The escape
+            // skip is bounded: a trailing backslash (nothing after it)
+            // advances to the line end instead of past src.len.
             const start = i;
             i += 1;
             while (i < src.len) {
-                if (src[i] == '\\') {
+                if (src[i] == '\\' and i + 1 < src.len) {
                     i += 2;
                 } else if (src[i] == '"') {
                     i += 1;
@@ -737,27 +961,60 @@ fn styleLine(aa: std.mem.Allocator, segs: []const ScanSeg) ![]const u8 {
 
 // ── band drawing ───────────────────────────────
 
-/// Paint the 2-row band: row 0 = prompt + live-highlighted input; row 1 =
-/// busy spinner (base-ui Spinner driven by the std.Io clock) or the idle
-/// keybinding hint.
+/// Paint the 2-row band: row 0 = continuation prompt (when the pending
+/// buffer spans lines) or the main prompt, then the ACTIVE line with a
+/// reverse-video cursor block; row 1 = busy spinner (base-ui Spinner
+/// driven by the std.Io clock), "done in {d}ms" after a completed eval
+/// (§7), or the idle hint.
 fn drawBand(
     aa: std.mem.Allocator,
     region: *Region,
     line: []const u8,
+    cursor: usize,
     spinner: *notui.component.Spinner,
     busy: bool,
     now: std.Io.Timestamp,
+    last_eval_ms: ?u64,
 ) !void {
     region.cur.clear();
-    var x = try region.cur.draw(.{}, prompt_text, 0, 0);
-    const segs = try scanQuery(aa, line);
-    for (segs) |seg| {
-        x += try region.cur.draw(seg.style, seg.text, x, 0);
+    // Only the ACTIVE continuation line renders (§4.3); the pending
+    // buffer may contain embedded '\n' from continuation Enters.
+    const active_off = if (std.mem.findScalarLast(u8, line, '\n')) |nl| nl + 1 else 0;
+    const active = line[active_off..];
+    const multiline = std.mem.indexOfScalar(u8, line, '\n') != null;
+    const prompt = if (multiline) cont_prompt else prompt_text;
+    // The cursor is a byte index into the whole buffer; clamp it into
+    // the active line's range so the slice boundaries stay valid.
+    const cur = std.math.clamp(cursor, active_off, line.len) - active_off;
+
+    var x = try region.cur.draw(.{}, prompt, 0, 0);
+    const cur_style: Style = .{ .attrs = .{ .reverse = true } }; // reverse-video block
+
+    // Left of the cursor.
+    const left_segs = try scanQuery(aa, active[0..cur]);
+    for (left_segs) |seg| x += try region.cur.draw(seg.style, seg.text, x, 0);
+
+    if (cur < active.len) {
+        // Cursor sits ON a codepoint: reverse-video it, then the rest.
+        const clen = utf8SeqLen(active, cur);
+        const cell = active[cur .. cur + clen];
+        _ = try region.cur.draw(cur_style, cell, x, 0);
+        x += @as(u16, @intCast(notui.width.strWidth(cell)));
+        const right_segs = try scanQuery(aa, active[cur + clen ..]);
+        for (right_segs) |seg| _ = try region.cur.draw(seg.style, seg.text, x, 0);
+    } else {
+        _ = try region.cur.draw(cur_style, " ", x, 0); // block cursor at EOL
     }
+
+    // Status row (row 1).
     if (busy) {
         _ = try spinner.draw(&region.cur, 0, 1, now);
+    } else if (last_eval_ms) |ms| {
+        var buf: [48]u8 = undefined;
+        const done = std.fmt.bufPrint(&buf, "done in {d}ms", .{ms}) catch idle_status;
+        _ = try region.cur.draw(.{}, done, 0, 1);
     } else {
-        _ = try region.cur.draw(.{}, idle_status, 0, 1);
+        _ = try region.cur.draw(.{}, if (multiline) cont_status else idle_status, 0, 1);
     }
 }
 
@@ -816,31 +1073,54 @@ fn isCtrlD(k: Key) bool {
     return k.matches(ctrl_d, .{}) or k.matches('d', .{ .ctrl = true });
 }
 
-/// Copy the key's text into the app arena — the §3 lifetime contract:
-/// `Key.text` is valid only until the next read. Keys without text
-/// (control chars, PUA function / navigation keys, the multicodepoint
-/// marker) produce nothing.
-fn appendKeyText(aa: std.mem.Allocator, line: *std.ArrayList(u8), k: Key) !void {
-    if (k.text) |t| {
-        try line.appendSlice(aa, t);
-        return;
-    }
-    const cp = k.codepoint;
-    if (cp < 0x20 or cp == 0x7F or (cp >= 0xE000 and cp <= 0xF8FF) or cp > 0x10FFFF) return;
-    var buf: [4]u8 = undefined;
-    const n = try std.unicode.utf8Encode(cp, &buf);
-    try line.appendSlice(aa, buf[0..n]);
+/// Copy the key's text into the app arena and INSERT it at the cursor
+/// (§3.2) — the §3 lifetime contract: `Key.text` is valid only until the
+/// next read. Keys without text (control chars, PUA function / navigation
+/// keys, the multicodepoint marker) produce nothing.
+fn insertKeyText(aa: std.mem.Allocator, line: *std.ArrayList(u8), cursor: *usize, k: Key) !void {
+    var text_buf: [4]u8 = undefined;
+    const text: []const u8 = if (k.text) |t|
+        t
+    else blk: {
+        const cp = k.codepoint;
+        if (cp < 0x20 or cp == 0x7F or (cp >= 0xE000 and cp <= 0xF8FF) or cp > 0x10FFFF) return;
+        const n = try std.unicode.utf8Encode(cp, &text_buf);
+        break :blk text_buf[0..n];
+    };
+    try line.insertSlice(aa, cursor.*, text);
+    cursor.* += text.len;
 }
 
-/// Remove the last UTF-8 codepoint (backspace). Codepoint-level: a
-/// combining mark is removed on its own — grapheme-aware backspace is
-/// out of scope for the example.
-fn popCodepoint(buf: []u8) []u8 {
-    var end = buf.len;
-    if (end == 0) return buf;
-    end -= 1;
-    while (end > 0 and (buf[end] & 0xC0) == 0x80) end -= 1;
-    return buf[0..end];
+// ── cursor helpers (§3.3, zigzag TextInput semantics) ────────────────
+
+/// UTF-8 sequence length of the codepoint starting at buf[i].
+fn utf8SeqLen(buf: []const u8, i: usize) usize {
+    return std.unicode.utf8ByteSequenceLength(buf[i]) catch 1;
+}
+
+/// Byte index of the codepoint boundary before `cursor`.
+fn prevCodepoint(buf: []const u8, cursor: usize) usize {
+    if (cursor == 0) return 0;
+    var p = cursor - 1;
+    while (p > 0 and (buf[p] & 0xC0) == 0x80) p -= 1;
+    return p;
+}
+
+/// Byte index of the start of the word before `cursor` (skip trailing
+/// spaces, then word chars).
+fn moveWordLeft(buf: []const u8, cursor: usize) usize {
+    var c = cursor;
+    while (c > 0 and buf[c - 1] == ' ') c -= 1;
+    while (c > 0 and buf[c - 1] != ' ') c -= 1;
+    return c;
+}
+
+/// Byte index after the word at `cursor` (skip word chars, then spaces).
+fn moveWordRight(buf: []const u8, cursor: usize) usize {
+    var c = cursor;
+    while (c < buf.len and buf[c] != ' ') c += 1;
+    while (c < buf.len and buf[c] == ' ') c += 1;
+    return c;
 }
 
 /// One plain hint line, no interactive sequences (piped run).
