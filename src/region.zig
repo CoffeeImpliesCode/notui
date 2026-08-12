@@ -197,7 +197,7 @@ pub const Region = struct {
             var tracked = Style{};
             for (0..self.height) |y| {
                 if (y > 0) try w.writeByte('\n');
-                try self.writeRow(w, y, &tracked);
+                try self.writeRow(w, y, &tracked, true);
             }
             if (!tracked.eql(Style{})) try w.writeAll(emit.reset);
             try w.writeByte('\n');
@@ -288,7 +288,7 @@ pub const Region = struct {
             } else {
                 try w.writeAll("\r");
             }
-            try self.writeRow(w, y, &tracked);
+            try self.writeRow(w, y, &tracked, false);
         }
         if (!tracked.eql(Style{})) try w.writeAll(emit.reset);
         try w.writeAll("\r");
@@ -443,12 +443,17 @@ pub const Region = struct {
     // ── row emission ───────────────────────────────────────
 
     /// Write one row's cells (entry: cursor at column 1 of the row).
-    /// Mirrors `Buffer.writeRow`: wide continuations and blank cells
-    /// never emit text (blank skips advance with CUF); SGR is written
-    /// only on style change (libvaxis DAM pattern). Used by the
-    /// non-clearing strategy-1 / non-TTY paths — `renderDiff` and
-    /// `renderAll` own the erasing paths.
-    fn writeRow(self: *const Region, w: anytype, y: usize, tracked: *Style) !void {
+    /// Mirrors `Buffer.writeRow`: wide continuations never emit text
+    /// (their column was covered by the lead's write); SGR is written
+    /// only on style change (libvaxis DAM pattern). Interactive rows
+    /// (`plain = false`) skip blank cells — the row's erase or the next
+    /// cell's CUF covers the gap — while plain (non-TTY) rows write
+    /// literal spaces: a pipe has no cursor state for CUF to move, so
+    /// skipped blanks would vanish from the byte stream (raw `ESC[n C`
+    /// garbage instead of the spaces). Used by the non-clearing
+    /// strategy-1 / non-TTY paths — `renderDiff` and `renderAll` own
+    /// the erasing paths.
+    fn writeRow(self: *const Region, w: anytype, y: usize, tracked: *Style, plain: bool) !void {
         var x: usize = 0;
         var phys_col: usize = 0; // terminal cursor column, 0-indexed
         while (x < self.cur.width) {
@@ -456,12 +461,20 @@ pub const Region = struct {
 
             // Wide continuations never emit text; their column was
             // covered by the lead's write (which advances 2).
-            if (cell.wide or cell.grapheme.len == 0) {
+            if (cell.wide) {
                 x += 1;
                 continue;
             }
-            // Blank cells are already blank; skip them.
-            if (cell.eql(Cell{})) {
+            // Blank cells (default `Cell{}` carries a " " grapheme, and
+            // empty-grapheme cells are blank too). Interactive rows skip
+            // them; plain rows write the space byte — a pipe has no
+            // cursor state for CUF to skip over, so the blanks would
+            // otherwise vanish from the output.
+            if (cell.grapheme.len == 0 or cell.eql(Cell{})) {
+                if (plain) {
+                    try w.writeByte(' ');
+                    phys_col += 1;
+                }
                 x += 1;
                 continue;
             }
@@ -469,13 +482,22 @@ pub const Region = struct {
             const wg = Width.graphemeWidth(cell.grapheme);
             const wcell: usize = if (wg >= 2) 2 else 1;
             // A wide glyph at the last column has no continuation cell;
-            // drop it (graceful — over-wide never errors, plan §0).
+            // drop it (graceful — over-wide never errors, plan §0). A
+            // plain row still reserves the column as a space so the
+            // byte stream stays width-aligned.
             if (x + wcell > self.cur.width) {
+                if (plain) {
+                    try w.writeByte(' ');
+                    phys_col += 1;
+                }
                 x += 1;
                 continue;
             }
 
-            if (x > phys_col) try w.print("\x1b[{d}C", .{x - phys_col});
+            // CUF is an interactive-only cursor move — it presumes live
+            // terminal state, which a pipe lacks (and the space writes
+            // above keep `phys_col == x`, so no gap exists to skip).
+            if (!plain and x > phys_col) try w.print("\x1b[{d}C", .{x - phys_col});
             try writeCellStyle(w, tracked, cell.style);
             try w.writeAll(cell.grapheme);
             phys_col = x + wcell;
@@ -684,7 +706,12 @@ test "region: sync_output off emits one plain unwrapped frame" {
     t.init();
     try r.render(&t.w);
     // No sync, no CPR, no hide, no CNL reservation — plain rows only.
-    try std.testing.expectEqualStrings("ab\ncd\n", t.w.buffered());
+    // Blank cells are written as spaces (a pipe has no cursor state for
+    // CUF), so each row is the full buffer width.
+    try std.testing.expectEqualStrings(
+        "ab" ++ " " ** 78 ++ "\n" ++ "cd" ++ " " ** 78 ++ "\n",
+        t.w.buffered(),
+    );
 }
 
 test "region: wide glyph row diff never emits the continuation" {
@@ -1054,7 +1081,12 @@ test "region: piped mode emits one plain frame, no interactive sequences" {
     var t1 = TestWriter{};
     t1.init();
     try r.render(&t1.w);
-    try std.testing.expectEqualStrings("ab\ncd\n", t1.w.buffered());
+    // Blank cells are written as spaces (no CUF in a pipe): each row is
+    // the full buffer width.
+    try std.testing.expectEqualStrings(
+        "ab" ++ " " ** 78 ++ "\n" ++ "cd" ++ " " ** 78 ++ "\n",
+        t1.w.buffered(),
+    );
     try std.testing.expect(std.mem.indexOf(u8, t1.w.buffered(), "\x1b[") == null);
 
     // Later frames change nothing in a pipe: no repaint, no erase.
@@ -1070,4 +1102,45 @@ test "region: piped mode emits one plain frame, no interactive sequences" {
     t3.init();
     try r.exit(&t3.w);
     try std.testing.expectEqualStrings("", t3.w.buffered());
+}
+
+test "region: non-TTY blank cells are written as spaces, never CUF" {
+    // P5 bug regression: a blank run between glyphs was skipped with
+    // CUF (`ESC[n C`), so piped output carried raw escape garbage
+    // instead of the spaces — an interactive-only cursor move a pipe
+    // has no cursor state to honor.
+    var r = try makeRegion(2, false, true);
+    defer r.deinit();
+    try drawRow(&r.cur, 0, "a  b");
+    // Row 1 stays fully blank (default cells, grapheme " ").
+
+    var t = TestWriter{};
+    t.init();
+    try r.render(&t.w);
+    const out = t.w.buffered();
+
+    // No ESC sequences at all: the blanks are literal spaces.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[") == null);
+    // The blank run survives as real bytes, not a cursor move.
+    try std.testing.expectEqualStrings("a  b", out[0..4]);
+    // The fully blank row is the full buffer width of spaces; a pipe
+    // must receive the blanks. Layout: row 0 (80 bytes) + '\n' + row 1
+    // (80 spaces) + '\n'.
+    try std.testing.expectEqual(' ', out[81]);
+    try std.testing.expectEqual(' ', out[160]);
+    try std.testing.expectEqual('\n', out[161]);
+    try std.testing.expectEqual(@as(usize, 162), out.len);
+
+    // The same frame interactive may skip the blanks with CUF — the
+    // terminal's erase state covers them; TTY behavior is unchanged.
+    var r2 = try makeRegion(2, true, false);
+    defer r2.deinit();
+    try drawRow(&r2.cur, 0, "a  b");
+    var t2 = TestWriter{};
+    t2.init();
+    try r2.render(&t2.w);
+    try std.testing.expectEqualStrings(
+        "\x1b[?2026h\x1b[6n\x1b[?25l\ra\x1b[2Cb\r\n\r\x1b[?2026l",
+        t2.w.buffered(),
+    );
 }
