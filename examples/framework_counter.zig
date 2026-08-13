@@ -2,10 +2,12 @@
 //! App(Model) framework (notes/research/framework-contract.md §10).
 //!
 //! Demonstrates the framework contract: the `Msg`/`init`/`update`/`view`
-//! model shape, `setFilter` + `run` wiring, base-ui `Text` + `Spinner` +
-//! `StatusBar` composed into the frame via `View.draw`, the inline
-//! default mode, and the Ctrl+C-routed-as-Msg quit convention (`q` and
-//! `^C` both produce `.quit` — the library never hard-quits).
+//! model shape with `init` returning `{ model, cmd }` (the init-armed
+//! `every` drives the spinner with no input), `setFilter` + `run`
+//! wiring, base-ui `Text` + `Spinner` + `StatusBar` composed into the
+//! frame via `View.draw`, the inline default mode, and the
+//! Ctrl+C-routed-as-Msg quit convention (`q` and `^C` both produce
+//! `.quit` — the library never hard-quits).
 //!
 //! Run with: zig build run-example-framework_counter
 
@@ -30,9 +32,13 @@ pub const Model = struct {
     spinner: component.Spinner = .{ .label = "working" },
     scratch: std.ArrayList(u8) = .empty, // Text truncation scratch (borrow model)
 
-    pub fn init(allocator: std.mem.Allocator) !Model {
+    /// Elm init: the framework (`start`) builds the model via this call
+    /// and runs the returned Cmd through the same path as queued msgs —
+    /// the init-armed `every` starts the periodic timer immediately, so
+    /// the spinner animates with no input.
+    pub fn init(allocator: std.mem.Allocator) !struct { model: Model, cmd: Cmd(Msg) } {
         _ = allocator;
-        return .{};
+        return .{ .model = .{}, .cmd = .{ .every = .{ .interval_ms = 200 } } };
     }
 
     /// The message reducer. `inc`/`dec` edit the counter; `quit` stops
@@ -88,8 +94,7 @@ pub const Model = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
-    const model = try Model.init(init.gpa);
-    var app = notui.app.App(Model).init(model);
+    var app = notui.app.App(Model).init();
     app.setFilter(&filter);
     try app.run(init.io, init.gpa);
 }

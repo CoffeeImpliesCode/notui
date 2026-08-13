@@ -305,9 +305,17 @@ const Cmd = @import("command.zig").Cmd;
 /// The Elm-style app runner. `Model` MUST declare (comptime-checked below):
 ///
 ///   pub const Msg = <type>;                                   // the message type
-///   pub fn init(allocator: std.mem.Allocator) !Model;         // initial state
+///   pub fn init(allocator: std.mem.Allocator) !struct {      // initial state
+///       model: Model,                                        //   + the initial
+///       cmd: Cmd(Msg),                                       //   effect
+///   };
 ///   pub fn update(self: *Model, msg: Msg, ctx: *Context) !Cmd(Msg);
 ///   pub fn view(self: *const Model, ctx: *Context) View;
+///
+/// `start` owns init: it builds the model via `Model.init(gpa)` and runs
+/// the initial Cmd through the same effect path as queued msgs — an
+/// init-armed `Cmd.every`/`Cmd.tick` timer is live before the first loop
+/// iteration, so a demo can animate with no input.
 ///
 /// Single-threaded. Worker-thread patterns (the REPL's eval worker writing a
 /// result slot polled each tick, skript_repl.zig:379-385) stay APP-level: the
@@ -319,7 +327,7 @@ pub fn App(comptime Model: type) type {
 
     comptime {
         if (!@hasDecl(Model, "Msg")) @compileError("Model must declare `pub const Msg`");
-        if (!@hasDecl(Model, "init")) @compileError("Model must declare `pub fn init(allocator) !Model`");
+        if (!@hasDecl(Model, "init")) @compileError("Model must declare `pub fn init(allocator) !struct { model: Model, cmd: Cmd(Msg) }`");
         if (!@hasDecl(Model, "update")) @compileError("Model must declare `pub fn update(self, msg, ctx) !Cmd(Msg)`");
         if (!@hasDecl(Model, "view")) @compileError("Model must declare `pub fn view(self, ctx) View`");
     }
@@ -369,11 +377,14 @@ pub fn App(comptime Model: type) type {
         title: ?[]const u8 = null,
 
         // ── construction ────────────────────────────────────────────────
-        pub fn init(model: Model) Self {
-            return initWithOptions(model, .{});
+        // The model is NOT passed in: `start` owns init — it calls
+        // `Model.init(gpa)` and stores the returned model (Elm-style, the
+        // runtime drives init so the initial Cmd arms effects).
+        pub fn init() Self {
+            return initWithOptions(.{});
         }
-        pub fn initWithOptions(model: Model, opts: Options) Self {
-            return .{ .model = model, .opts = opts, .filter = opts.filter };
+        pub fn initWithOptions(opts: Options) Self {
+            return .{ .model = undefined, .opts = opts, .filter = opts.filter };
         }
 
         // ── lifecycle ───────────────────────────────────────────────────
@@ -425,6 +436,10 @@ else:
     reader = Reader.init(&tty)
     last_tick = Timestamp.now(io, .awake)
     running = true
+# both paths, after the branch (Elm init — the framework owns init):
+model, init_cmd = Model.init(gpa)   // initial state + initial effect
+processCmd(init_cmd)                // same path as queued msgs (arms `every`/`tick`
+                                    // timers now; mode/title writes skipped, no tty)
 ```
 
 ### 5.2 `tick` — the loop body (requirement 2)
@@ -622,14 +637,17 @@ terminal is required.
 1. Contract check: a Model missing `Msg`/`init`/`update`/`view` fails
    `@compileError` (test via `@compileError` reference).
 2. `start` non-TTY path: piped stdin → one plain frame, no raw mode, no error.
-3. `tick` with a pipe-fed fake tty + `fps=0`: a written `\x03` (Ctrl+C) with
+3. Init's Cmd is processed: a model whose `init` returns `Cmd.every` has
+   the periodic timer armed after start, and `Msg.tick` fires + renders
+   with no input (framework_counter spinner regression).
+4. `tick` with a pipe-fed fake tty + `fps=0`: a written `\x03` (Ctrl+C) with
    a filter mapping `Key.ctrl_c → .quit` quits; without a filter it is
    dropped and the loop keeps running (Ctrl+C never hard-quits).
-4. `send`-enqueued msgs drain next tick; `quit` breaks the loop;
+5. `send`-enqueued msgs drain next tick; `quit` breaks the loop;
    `isRunning` reflects the state.
-5. `run` teardown emits `Region.exit` then `caps.restore` then `tty.restore`
+6. `run` teardown emits `Region.exit` then `caps.restore` then `tty.restore`
    (assert writer sequence against a recording writer).
-6. Alt-screen transition: a model returning `View.alt_screen = true` on a
+7. Alt-screen transition: a model returning `View.alt_screen = true` on a
    given tick produces `\x1b[?1049h` exactly once and renders the full
    buffer; flipping back produces `\x1b[?1049l`.
 
@@ -653,9 +671,13 @@ const Model = struct {
     spinner: component.Spinner = .{ .label = "working" },
     scratch: std.ArrayList(u8) = .empty, // Text/StatusBar truncation scratch
 
-    pub fn init(allocator: std.mem.Allocator) !Model {
+    // Elm init: returns the initial state + the initial effect. The
+    // framework (`start`) processes the returned Cmd — the init-armed
+    // `every` starts the periodic timer immediately, so the spinner
+    // animates with no input.
+    pub fn init(allocator: std.mem.Allocator) !struct { model: Model, cmd: Cmd(Msg) } {
         _ = allocator;
-        return .{};
+        return .{ .model = .{}, .cmd = .{ .every = .{ .interval_ms = 200 } } };
     }
     pub fn update(self: *Model, msg: Msg, ctx: *Context) !Cmd(Msg) {
         switch (msg) {
@@ -692,8 +714,7 @@ const Model = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
-    const model = try Model.init(init.gpa);
-    var app = notui.app.App(Model).init(model);
+    var app = notui.app.App(Model).init();
     app.setFilter(&filter);
     try app.run(init.io, init.gpa);
 }
@@ -715,10 +736,11 @@ fn filter(_: *Context, ev: Event) ?Model.Msg {
 ```
 
 **Demonstrates:** `App(Model)` + `init`/`setFilter`/`run`; the Elm contract
-(`Msg`/`init`/`update`/`view`); base-ui `Text` + `Spinner` + `StatusBar`
-composed into the frame via `View.draw`; inline default mode; the
-Ctrl+C-routed-as-Msg quit convention (`q` and `^C` both → `.quit`); an
-`every` Cmd driving animation.
+(`Msg`/`init`/`update`/`view` with `init` returning `{ model, cmd }` — the
+init-armed `every` drives the spinner with no input); base-ui `Text` +
+`Spinner` + `StatusBar` composed into the frame via `View.draw`; inline
+default mode; the Ctrl+C-routed-as-Msg quit convention (`q` and `^C` both
+→ `.quit`); an `every` Cmd driving animation.
 
 **build.zig:** add a `framework_counter` entry to the `examples` tuple
 (`.{ .name = "framework_counter", .file = "examples/framework_counter.zig" }`),

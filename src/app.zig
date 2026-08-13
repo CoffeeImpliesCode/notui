@@ -47,9 +47,17 @@ fn modelViolations(comptime Model: type) []const []const u8 {
 /// below):
 ///
 ///   pub const Msg = <type>;                                   // the message type
-///   pub fn init(allocator: std.mem.Allocator) !Model;         // initial state
+///   pub fn init(allocator: std.mem.Allocator) !struct {      // initial state
+///       model: Model,                                        //   + the
+///       cmd: Cmd(Msg),                                       //   initial effect
+///   };
 ///   pub fn update(self: *Model, msg: Msg, ctx: *Context) !Cmd(Msg);
 ///   pub fn view(self: *const Model, ctx: *Context) View;
+///
+/// `start` owns init: it builds the model via `Model.init(gpa)` and runs
+/// the initial Cmd through the same effect path as queued msgs — an
+/// init-armed `Cmd.every`/`Cmd.tick` timer is live before the first
+/// loop iteration, so a demo can animate with no input.
 ///
 /// Single-threaded. Worker-thread patterns (the REPL's eval worker
 /// writing a result slot polled each tick, skript_repl.zig:379-385) stay
@@ -125,11 +133,14 @@ pub fn App(comptime Model: type) type {
         last_fire: ?std.Io.Timestamp = null,
 
         // ── construction ──
-        pub fn init(model: Model) Self {
-            return initWithOptions(model, .{});
+        /// The model is NOT passed in: `start` owns init — it calls
+        /// `Model.init(gpa)` and stores the returned model (Elm-style, the
+        /// runtime drives init so the initial Cmd arms effects).
+        pub fn init() Self {
+            return initWithOptions(.{});
         }
-        pub fn initWithOptions(model: Model, opts: Options) Self {
-            return .{ .model = model, .opts = opts, .filter = opts.filter };
+        pub fn initWithOptions(opts: Options) Self {
+            return .{ .model = undefined, .opts = opts, .filter = opts.filter };
         }
 
         // ── lifecycle ──
@@ -151,6 +162,25 @@ pub fn App(comptime Model: type) type {
             } else {
                 try self.startPlain(gpa);
             }
+            // Elm contract: init arms the initial effect. The runtime
+            // (region/arena/tty) exists now, so the initial Cmd is
+            // processed through the same path as queued msgs (timer Cmds
+            // anchor at this moment; the first fire is one interval out).
+            try self.processInit();
+        }
+
+        /// Build the initial model via `Model.init` and run its initial
+        /// Cmd through the same effect path as queued msgs — so an
+        /// init-armed `every`/`tick` timer is live before the first tick.
+        /// Called by `start`; `w` is null in the degraded (non-TTY) path,
+        /// matching `tick`'s writer rule (mode/title writes skipped).
+        fn processInit(self: *Self) !void {
+            const init_res = try Model.init(self.gpa);
+            self.model = init_res.model;
+            var ictx = self.makeCtx();
+            const w: ?*std.Io.Writer = if (self.tty != null) self.tty.?.writer() else null;
+            try self.processCmd(init_res.cmd, &ictx, w);
+            self.render_requested = ictx.render_requested;
         }
 
         /// One loop iteration: timers → read one event (paced to fps) →
@@ -563,8 +593,8 @@ const TestModel = struct {
     count: i32 = 0,
     draws: usize = 0,
 
-    fn init(_: std.mem.Allocator) !TestModel {
-        return .{};
+    fn init(_: std.mem.Allocator) !struct { model: TestModel, cmd: Cmd(TestModel.Msg) } {
+        return .{ .model = .{}, .cmd = .none };
     }
     fn update(self: *TestModel, msg: Msg, _: *Context) !Cmd(Msg) {
         switch (msg) {
@@ -590,8 +620,8 @@ const RecModel = struct {
     log: [16]u8 = undefined,
     log_len: usize = 0,
 
-    fn init(_: std.mem.Allocator) !RecModel {
-        return .{};
+    fn init(_: std.mem.Allocator) !struct { model: RecModel, cmd: Cmd(RecModel.Msg) } {
+        return .{ .model = .{}, .cmd = .none };
     }
     fn update(self: *RecModel, msg: Msg, _: *Context) !Cmd(Msg) {
         self.log[self.log_len] = switch (msg) {
@@ -617,8 +647,8 @@ const AltModel = struct {
     pub const Msg = union(enum) { tick };
     alt: bool = false,
 
-    fn init(_: std.mem.Allocator) !AltModel {
-        return .{};
+    fn init(_: std.mem.Allocator) !struct { model: AltModel, cmd: Cmd(AltModel.Msg) } {
+        return .{ .model = .{}, .cmd = .none };
     }
     fn update(_: *AltModel, _: Msg, _: *Context) !Cmd(Msg) {
         return .none;
@@ -635,8 +665,8 @@ const AltModel = struct {
 const CtrlModel = struct {
     pub const Msg = union(enum) { tick, quit };
 
-    fn init(_: std.mem.Allocator) !CtrlModel {
-        return .{};
+    fn init(_: std.mem.Allocator) !struct { model: CtrlModel, cmd: Cmd(CtrlModel.Msg) } {
+        return .{ .model = .{}, .cmd = .none };
     }
     fn update(_: *CtrlModel, msg: Msg, _: *Context) !Cmd(Msg) {
         return switch (msg) {
@@ -739,7 +769,7 @@ const FakeTty = struct {
 fn setupInteractive(comptime M: type, opts: App(M).Options) !struct { app: App(M), tty: FakeTty } {
     var fake = try FakeTty.init();
     errdefer fake.deinit();
-    var app = App(M).initWithOptions(try M.init(testing.allocator), opts);
+    var app = App(M).initWithOptions(opts);
     app.io = testing.io;
     app.gpa = testing.allocator;
     app.tty = fake.tty();
@@ -756,14 +786,17 @@ fn setupInteractive(comptime M: type, opts: App(M).Options) !struct { app: App(M
     app.reader = Reader.init(&app.tty.?);
     app.last_tick = std.Io.Timestamp.now(testing.io, .awake);
     app.running = true;
+    // Mirror `start`: init builds the model and its initial Cmd is
+    // processed through the normal effect path (arms init timers).
+    try app.processInit();
     return .{ .app = app, .tty = fake };
 }
 
 /// A valid model (passes the contract check).
 const GoodModel = struct {
     pub const Msg = union(enum) { tick };
-    fn init(_: std.mem.Allocator) !GoodModel {
-        return .{};
+    fn init(_: std.mem.Allocator) !struct { model: GoodModel, cmd: Cmd(GoodModel.Msg) } {
+        return .{ .model = .{}, .cmd = .none };
     }
     fn update(_: *GoodModel, _: Msg, _: *Context) !Cmd(Msg) {
         return .none;
@@ -784,7 +817,8 @@ const BadModel = struct {
 /// An app wired with enough runtime state (region + arena) for
 /// processCmd-level tests — no tty, no reader.
 fn cmdApp(comptime M: type) !App(M) {
-    var app = App(M).init(try M.init(testing.allocator));
+    var app = App(M).init();
+    app.model = (try M.init(testing.allocator)).model;
     app.io = testing.io;
     app.gpa = testing.allocator;
     app.region = try Region.init(testing.allocator, .{ .height = 2, .sync_output = false });
@@ -799,15 +833,16 @@ test "app: Model contract check accepts a valid model and rejects missing member
     try testing.expectEqual(@as(usize, 0), comptime modelViolations(GoodModel).len);
     try testing.expectEqual(@as(usize, 3), comptime modelViolations(BadModel).len);
 
-    // A valid model instantiates cleanly.
-    const ok = App(GoodModel).init(try GoodModel.init(testing.allocator));
+    // A valid model instantiates cleanly (start owns Model.init).
+    const ok = App(GoodModel).init();
     try testing.expect(!ok.isRunning());
 }
 
 test "app: degraded path renders one plain frame, no raw mode" {
-    var app = App(TestModel).init(try TestModel.init(testing.allocator));
+    var app = App(TestModel).init();
     app.io = testing.io; // `start` sets this before routing to startPlain
     try app.startPlain(testing.allocator);
+    try app.processInit(); // `start` runs init after the runtime exists
     defer app.deinit();
 
     try testing.expect(app.tty == null); // no raw mode, no /dev/tty
@@ -831,9 +866,10 @@ test "app: degraded path renders one plain frame, no raw mode" {
 }
 
 test "app: run in degraded mode stops after one plain frame" {
-    var app = App(TestModel).init(try TestModel.init(testing.allocator));
+    var app = App(TestModel).init();
     app.io = testing.io;
     try app.startPlain(testing.allocator);
+    try app.processInit(); // `start` runs init after the runtime exists
     defer app.deinit();
     try app.runLoop();
     try testing.expect(!app.isRunning());
@@ -861,7 +897,7 @@ test "app: without a filter Ctrl+C is dropped and the loop keeps running" {
 }
 
 test "app: send drains next tick; quit breaks the loop; isRunning reflects state" {
-    var fresh = App(TestModel).init(try TestModel.init(testing.allocator));
+    var fresh = App(TestModel).init();
     try testing.expect(!fresh.isRunning());
 
     var setup = try setupInteractive(TestModel, .{ .fps = 1000 });
@@ -925,8 +961,8 @@ const ArenaDrawModel = struct {
     pub const Msg = union(enum) { tick };
     frame: usize = 0,
 
-    fn init(_: std.mem.Allocator) !ArenaDrawModel {
-        return .{};
+    fn init(_: std.mem.Allocator) !struct { model: ArenaDrawModel, cmd: Cmd(ArenaDrawModel.Msg) } {
+        return .{ .model = .{}, .cmd = .none };
     }
     fn update(self: *ArenaDrawModel, _: Msg, ctx: *Context) !Cmd(Msg) {
         self.frame += 1;
@@ -1077,6 +1113,56 @@ test "cmd: every re-arms and fires Msg.tick periodically" {
     try std.Io.sleep(testing.io, .fromMilliseconds(50), .awake);
     try setup.app.tick(); // due again: the re-armed cycle continues
     try testing.expectEqual(@as(i32, 2), setup.app.model.count);
+}
+
+/// A model whose `init` arms `Cmd.every` — the framework_counter spinner
+/// regression: the initial Cmd must be processed by the framework so the
+/// periodic timer is live with no input (nothing ever dispatches a first
+/// Msg otherwise — the pre-fix bug: `init` returned only the model, so
+/// the spinner advanced only on a keypress).
+const InitCmdModel = struct {
+    pub const Msg = union(enum) { tick };
+    ticks: usize = 0,
+    draws: usize = 0,
+
+    fn init(_: std.mem.Allocator) !struct { model: InitCmdModel, cmd: Cmd(InitCmdModel.Msg) } {
+        return .{ .model = .{}, .cmd = .{ .every = .{ .interval_ms = 30 } } };
+    }
+    fn update(self: *InitCmdModel, msg: Msg, _: *Context) !Cmd(Msg) {
+        switch (msg) {
+            .tick => self.ticks += 1,
+        }
+        return .none;
+    }
+    fn view(_: *const InitCmdModel, _: *Context) View(InitCmdModel) {
+        return .{ .draw = &draw };
+    }
+    fn draw(self: *InitCmdModel, _: *Context, buf: *Buffer) anyerror!void {
+        self.draws += 1;
+        _ = try buf.draw(.{}, "tick", 0, 0);
+    }
+};
+
+test "app: init's every Cmd arms the timer — Msg.tick fires and renders with no input" {
+    var setup = try setupInteractive(InitCmdModel, .{ .fps = 1000 });
+    defer setup.app.deinit();
+    defer setup.tty.deinit();
+
+    // The initial Cmd was processed during setup (mirroring `start`):
+    // the periodic timer is armed before any event/msg exists.
+    try testing.expectEqual(@as(u32, 30), setup.app.every_interval.?);
+
+    try setup.app.tick(); // armed this frame: first fire is one interval away
+    try testing.expectEqual(@as(usize, 0), setup.app.model.ticks);
+    try testing.expectEqual(@as(usize, 1), setup.app.model.draws); // first-frame render
+
+    try std.Io.sleep(testing.io, .fromMilliseconds(50), .awake);
+    try setup.app.tick(); // due: Msg.tick delivered and the frame re-renders
+    try testing.expectEqual(@as(usize, 1), setup.app.model.ticks);
+    try testing.expectEqual(@as(usize, 2), setup.app.model.draws);
+
+    try setup.app.tick(); // just re-armed: not due again
+    try testing.expectEqual(@as(usize, 1), setup.app.model.ticks);
 }
 
 test "cmd: println appends one Region.Append.line and forces a render" {
