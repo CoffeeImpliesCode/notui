@@ -64,6 +64,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "prompt", .file = "examples/prompt.zig" },
         .{ .name = "statusline", .file = "examples/statusline.zig" },
         .{ .name = "framework_counter", .file = "examples/framework_counter.zig" },
+        .{ .name = "kitty_image", .file = "examples/kitty_image.zig" },
     };
     inline for (examples) |ex| {
         const example_exe = b.addExecutable(.{
@@ -100,6 +101,17 @@ pub fn build(b: *std.Build) void {
                 "Run the framework counter example",
             );
             run_framework_counter_step.dependOn(&run_example_cmd.step);
+        }
+
+        // The kitty image demo is also reachable via the shorter
+        // `run-kitty-image` name (the batch acceptance step); the tuple
+        // entry above already wires `run-example-kitty_image`.
+        if (std.mem.eql(u8, ex.name, "kitty_image")) {
+            const run_kitty_image_step = b.step(
+                "run-kitty-image",
+                "Run the kitty image example",
+            );
+            run_kitty_image_step.dependOn(&run_example_cmd.step);
         }
     }
 

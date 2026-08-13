@@ -28,6 +28,7 @@ pub const Winsize = struct {
 /// caps → parser + event.
 pub const Capability = enum {
     kitty_keyboard,
+    kitty_graphics,
     sgr_pixels,
     bracketed_paste,
     sync_output,

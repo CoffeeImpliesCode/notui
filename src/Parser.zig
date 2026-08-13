@@ -176,6 +176,10 @@ inline fn parseSs3(input: []const u8) Result {
     };
 }
 
+/// The kitty graphics probe id used by caps.zig's detect query; a reply
+/// carrying this id decodes as Event.cap.kitty_graphics.
+const kitty_graphics_probe_id = "i=9931";
+
 inline fn parseApc(input: []const u8) Result {
     if (input.len < 3) {
         return .{
@@ -195,12 +199,47 @@ inline fn parseApc(input: []const u8) Result {
     }
     const sequence = input[0 .. end + 1 + 1];
 
-    // APC payloads (kitty graphics) are not part of the §5 surface; the
-    // sequence is consumed without an event (dropped tag)
+    // The kitty graphics query reply (APC G i=9931;OK ST) is part of the
+    // capability surface and decodes as an Event.cap. All other APC
+    // payloads (image chunks, transmit-data) are consumed without an
+    // event (dropped tag: not in §5).
+    if (parseKittyGraphicsProbeReply(sequence)) {
+        return .{
+            .event = .{ .cap = .kitty_graphics },
+            .n = sequence.len,
+        };
+    }
     return .{
         .event = null,
         .n = sequence.len,
     };
+}
+
+/// True when `sequence` (ESC _ G … ST) is the kitty graphics probe reply:
+/// params contain the probe id as a whole comma-delimited field and the
+/// payload begins with "OK" (optionally followed by ";ENV_…"). Mirrors
+/// zigzag parseKittyGraphicsProbeResponse.
+fn parseKittyGraphicsProbeReply(sequence: []const u8) bool {
+    if (sequence.len < 6) return false;
+    if (sequence[0] != 0x1b or sequence[1] != '_' or sequence[2] != 'G') return false;
+    const semicolon = std.mem.indexOfScalarPos(u8, sequence, 3, ';') orelse return false;
+    if (semicolon == 3) return false; // no params
+    const params = sequence[3..semicolon];
+    const payload = sequence[semicolon + 1 .. sequence.len - 2];
+    if (payload.len == 0) return false;
+
+    // Match the id as a whole field so a reply for image 99312 is not
+    // mistaken for the probe id 9931.
+    var param_it = std.mem.splitScalar(u8, params, ',');
+    var id_found = false;
+    while (param_it.next()) |param| {
+        if (std.mem.eql(u8, param, kitty_graphics_probe_id)) {
+            id_found = true;
+            break;
+        }
+    }
+    if (!id_found) return false;
+    return std.mem.startsWith(u8, payload, "OK");
 }
 
 /// Skips sequences until we see an ST (String Terminator, ESC \)
@@ -1690,6 +1729,57 @@ test "parse: incomplete kitty seq (null event, n == 0)" {
 test "parse: apc (dropped tag: consumed, no event)" {
     const alloc = testing.allocator_instance.allocator();
     const input = "\x1b_kitty\x1b\\";
+    var parser: Parser = .{};
+    const result = try parser.parse(input, alloc);
+
+    try testing.expectEqual(input.len, result.n);
+    try testing.expect(result.event == null);
+}
+
+test "parse(apc): kitty graphics query reply decodes as cap" {
+    const alloc = testing.allocator_instance.allocator();
+    const input = "\x1b_Gi=9931;OK\x1b\\";
+    var parser: Parser = .{};
+    const result = try parser.parse(input, alloc);
+
+    try testing.expectEqual(input.len, result.n);
+    try testing.expectEqual(@as(?Event, .{ .cap = .kitty_graphics }), result.event);
+}
+
+test "parse(apc): kitty graphics reply with env suffix decodes as cap" {
+    const alloc = testing.allocator_instance.allocator();
+    const input = "\x1b_Gi=9931;OK;ENV_f=24;c=24,32\x1b\\";
+    var parser: Parser = .{};
+    const result = try parser.parse(input, alloc);
+
+    try testing.expectEqual(input.len, result.n);
+    try testing.expectEqual(@as(?Event, .{ .cap = .kitty_graphics }), result.event);
+}
+
+test "parse(apc): non-probe APC payload is skipped harmlessly" {
+    const alloc = testing.allocator_instance.allocator();
+    // an image chunk APC: no i=9931 probe id → consumed, no event
+    const input = "\x1b_Ga=q,t=f,s=100,v=1;AAAA\x1b\\";
+    var parser: Parser = .{};
+    const result = try parser.parse(input, alloc);
+
+    try testing.expectEqual(input.len, result.n);
+    try testing.expect(result.event == null);
+}
+
+test "parse(apc): superstring id does not match the probe" {
+    const alloc = testing.allocator_instance.allocator();
+    const input = "\x1b_Gi=99312;OK\x1b\\";
+    var parser: Parser = .{};
+    const result = try parser.parse(input, alloc);
+
+    try testing.expectEqual(input.len, result.n);
+    try testing.expect(result.event == null);
+}
+
+test "parse(apc): error reply does not decode as cap" {
+    const alloc = testing.allocator_instance.allocator();
+    const input = "\x1b_Gi=9931;ENOENT:bad\x1b\\";
     var parser: Parser = .{};
     const result = try parser.parse(input, alloc);
 

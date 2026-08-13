@@ -26,6 +26,7 @@ const query_timeout_ms: u64 = 250;
 pub const Capabilities = struct {
     color: ColorProfile = .ansi256,
     kitty_keyboard: bool = false,
+    kitty_graphics: bool = false,
     sgr_pixels: bool = false,
     bracketed_paste: bool = false,
     sync_output: bool = false,
@@ -63,7 +64,8 @@ pub const Capabilities = struct {
     }
 
     /// Sequential live queries (DA1, ?2026 sync, ?2027 unicode core,
-    /// kitty keyboard, OSC 11 background) with a per-query deadline.
+    /// kitty keyboard, kitty graphics, OSC 11 background) with a
+    /// per-query deadline.
     pub fn detect(alloc: std.mem.Allocator, tty: anytype, parser: *Parser) !Capabilities {
         return detectWithTimeout(alloc, tty, parser, query_timeout_ms);
     }
@@ -77,6 +79,8 @@ const ScanKind = enum {
     decrpm,
     /// Kitty keyboard reply: CSI > flags ; … u — decoded via parser.parse.
     kitty,
+    /// Kitty graphics probe reply: APC G i=9931 ; OK ST — decoded via parser.parse.
+    kitty_graphics,
     /// OSC 11 reply: OSC 11 ; spec ST — decoded via parser.parse.
     osc11,
 };
@@ -89,6 +93,8 @@ const ScanResult = union(enum) {
     decrpm: ?bool,
     /// Kitty keyboard cap reply seen.
     kitty: bool,
+    /// Kitty graphics cap reply seen.
+    kitty_graphics: bool,
     /// OSC 11 color report seen.
     osc11: bool,
 };
@@ -143,7 +149,27 @@ fn detectWithTimeout(alloc: std.mem.Allocator, tty: anytype, parser: *Parser, ti
         }
     }
 
-    // 5. RGB via the OSC 11 background query; the color_report reply is
+    // 5. Kitty graphics — APC-G probe (zigzag queryKittyGraphicsSupport).
+    //    The reply ESC _ G i=9931 ; OK ST decodes through the parser as
+    //    Event.cap.
+    ttyDrainInput(tty);
+    {
+        const r = try queryScan(
+            .kitty_graphics,
+            0,
+            alloc,
+            tty,
+            parser,
+            "\x1b_Ga=q,i=9931,s=1,v=1,t=d,f=24;AAAA\x1b\\",
+            timeout_ms,
+        );
+        switch (r) {
+            .kitty_graphics => |found| caps.kitty_graphics = found,
+            else => {},
+        }
+    }
+
+    // 6. RGB via the OSC 11 background query; the color_report reply is
     //    decoded through the parser.
     ttyDrainInput(tty);
     {
@@ -206,6 +232,9 @@ fn queryScan(
             .kitty => {
                 if (scanCapEvent(alloc, bytes, parser, .kitty_keyboard)) return .{ .kitty = true };
             },
+            .kitty_graphics => {
+                if (scanCapEvent(alloc, bytes, parser, .kitty_graphics)) return .{ .kitty_graphics = true };
+            },
             .osc11 => {
                 if (scanOsc11Report(alloc, bytes, parser)) return .{ .osc11 = true };
             },
@@ -215,6 +244,7 @@ fn queryScan(
         .da1 => .{ .da1 = null },
         .decrpm => .{ .decrpm = null },
         .kitty => .{ .kitty = false },
+        .kitty_graphics => .{ .kitty_graphics = false },
         .osc11 => .{ .osc11 = false },
     };
 }
@@ -412,6 +442,7 @@ test "caps: detect assembles capabilities from scripted replies" {
         "\x1b[?2026;1$y", // sync supported
         "\x1b[?2027;0$y", // unicode core NOT supported
         "\x1b[>1;1;0u", // kitty keyboard reply
+        "\x1b_Gi=9931;OK\x1b\\", // kitty graphics reply
         "\x1b]11;rgb:aaaa/bbbb/cccc\x1b\\", // OSC 11 background
     };
     var fake: FakeTty = undefined;
@@ -424,6 +455,7 @@ test "caps: detect assembles capabilities from scripted replies" {
     try std.testing.expect(caps.sync_output);
     try std.testing.expect(!caps.unicode_core);
     try std.testing.expect(caps.kitty_keyboard);
+    try std.testing.expect(caps.kitty_graphics);
     // not queried in v0 — stay off
     try std.testing.expect(!caps.sgr_pixels);
     try std.testing.expect(!caps.bracketed_paste);
@@ -433,7 +465,7 @@ test "caps: detect assembles capabilities from scripted replies" {
 
     // queries were written in order, one per reply
     try std.testing.expectEqualStrings(
-        "\x1b[c\x1b[?2026$p\x1b[?2027$p\x1b[>1u\x1b]11;?\x1b\\",
+        "\x1b[c\x1b[?2026$p\x1b[?2027$p\x1b[>1u\x1b_Ga=q,i=9931,s=1,v=1,t=d,f=24;AAAA\x1b\\\x1b]11;?\x1b\\",
         fake.queryLog(),
     );
 }
@@ -446,6 +478,7 @@ test "caps: detect with no unicode core keeps zg_unicode off and defaults" {
         "\x1b[?2026;0$y",
         "\x1b[?2027;1$y",
         "\x1b[>1;1;0u",
+        "\x1b_Gi=9931;OK\x1b\\",
         "\x1b]11;rgb:aaaa/bbbb/cccc\x1b\\",
     };
     var fake: FakeTty = undefined;
@@ -456,6 +489,28 @@ test "caps: detect with no unicode core keeps zg_unicode off and defaults" {
     try std.testing.expect(!caps.sync_output);
     try std.testing.expect(caps.unicode_core);
     try std.testing.expectEqual(Capabilities.WidthPolicy.zg_unicode, caps.widthPolicy());
+}
+
+test "caps: kitty-graphics error reply leaves the cap off" {
+    const io = std.testing.io;
+    var parser: Parser = .{};
+    const script = [_][]const u8{
+        "\x1b[?1;2;4;6;22;24c",
+        "\x1b[?2026;1$y",
+        "\x1b[?2027;1$y",
+        "\x1b[>1;1;0u",
+        "\x1b_Gi=9931;ENOENT:bad\x1b\\", // probe error → not supported
+        "\x1b]11;rgb:aaaa/bbbb/cccc\x1b\\",
+    };
+    var fake: FakeTty = undefined;
+    try fake.init(io, &script);
+    defer fake.deinit();
+
+    const caps = try detectWithTimeout(std.testing.allocator, &fake, &parser, 20);
+    try std.testing.expect(!caps.kitty_graphics);
+    // the other replies still decode
+    try std.testing.expect(caps.kitty_keyboard);
+    try std.testing.expect(caps.rgb);
 }
 
 test "caps: timed-out queries leave defaults, no hang" {
@@ -472,6 +527,7 @@ test "caps: timed-out queries leave defaults, no hang" {
     try std.testing.expect(!caps.sync_output);
     try std.testing.expect(!caps.unicode_core);
     try std.testing.expect(!caps.kitty_keyboard);
+    try std.testing.expect(!caps.kitty_graphics);
     try std.testing.expectEqual(Capabilities.WidthPolicy.wcwidth_legacy, caps.widthPolicy());
 }
 

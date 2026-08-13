@@ -18,6 +18,7 @@ pub const mouse = @import("Mouse.zig");
 pub const parser = @import("Parser.zig");
 pub const tty = @import("tty.zig");
 pub const caps = @import("caps.zig");
+pub const image = @import("image.zig");
 // buffer.zig lands in P4 (parallel round B) — the re-export line is added
 // now so the module root is stable once both phases land.
 pub const buffer = @import("buffer.zig");
