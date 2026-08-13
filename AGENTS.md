@@ -1,7 +1,11 @@
 # notui
 
-Zig 0.16 project (house scaffold). Purpose TBD — initialized to the same
-conventions as `~/projects/{noapi, nogui, skript, wayland}`.
+Zig 0.16 inline-first terminal UI toolkit: cell-buffer primitives, a
+base-ui component layer (spinner, text, gauge, suggestions, …), and an
+Elm-style app framework on top — TUIs that live inside the terminal
+session (main buffer, scrollback preserved) rather than owning the screen.
+Scaffolded to the same conventions as `~/projects/{noapi, nogui, skript,
+wayland}`.
 
 ## Stack
 
