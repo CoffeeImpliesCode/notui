@@ -237,11 +237,14 @@ pub fn main(init: std.process.Init) !void {
                 if (!anchor_known) {
                     // The FIRST reply answers the query emitted at the
                     // first render start, BEFORE the first paint — the
-                    // cursor then sat at the band's future top, so the
-                    // 1-indexed reply row IS the band top. Anchor it
-                    // directly, then place the one-shot gallery at its
-                    // absolute row (it rides the scroll with its cells).
-                    region.setAnchorRow(pos.row);
+                    // cursor then sat at the pre-frame row. The
+                    // region's bookkeeping already holds every shift
+                    // applied since (CNL reservation + any appends
+                    // flushed), so applyFirstCpr re-anchors exactly.
+                    // Anchor it, then place the one-shot gallery at its
+                    // absolute row (it rides the scroll with its
+                    // cells).
+                    region.applyFirstCpr(pos.row);
                     anchor_known = true;
                     if (caps.kitty_graphics) {
                         try notui.image.kitty.place(w, .{

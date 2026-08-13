@@ -96,7 +96,7 @@ pub const Region = struct {
 
     /// Tracked terminal row of the band top (1-indexed, DEC CPR
     /// convention; shifted by append flushes). Bookkeeping maintained by
-    /// `applyCpr`/`setAnchorRow` and exposed via `anchorRow` so apps can
+    /// `applyCpr`/`applyFirstCpr` and exposed via `anchorRow` so apps can
     /// place absolute-row content (kitty graphics) at band rows.
     anchor_row: u16 = 0,
     /// Highest row index ever emitted since the last clear; the shrink
@@ -251,21 +251,18 @@ pub const Region = struct {
         return self.anchor_row;
     }
 
-    /// DIRECT top-based anchor set: records `row` as the band top.
-    /// Complements `applyCpr` (bottom-based, steady-state). The FIRST
-    /// CPR reply answers the query emitted at the first render start,
-    /// BEFORE the first paint — the cursor then sits at the band's
-    /// future top, so the reply's 1-indexed row IS the band top and
-    /// needs no height correction. Later replies are steady-state (the
-    /// cursor parks at the band bottom after every frame) and go to
-    /// `applyCpr`.
-    ///
-    /// Leaves `anchor_dirty` untouched: the render already cleared it
-    /// when it emitted the query, and the caller consumes this reply
-    /// immediately after. If a re-query is due anyway, the next reply
-    /// is steady-state and belongs to `applyCpr`.
-    pub fn setAnchorRow(self: *Region, row: u16) void {
-        self.anchor_row = row;
+    /// FIRST CPR reply handling: re-anchors exactly from the tracked
+    /// shifts. The first query fires at the first render's start,
+    /// BEFORE strategy 1 ran — the reply's 1-indexed row is the
+    /// pre-frame cursor row R. Since then the bookkeeping has absorbed
+    /// every shift applied on top of R (paintFirst's CNL reservation
+    /// when `opts.append_lines`, append-flush rows, setHeight deltas),
+    /// so `anchor_row +|= R` lands on the real band top regardless of
+    /// how much the first frame reserved or flushed. Later replies are
+    /// steady-state (the cursor parks at the band bottom after every
+    /// frame) and belong to `applyCpr`.
+    pub fn applyFirstCpr(self: *Region, row: u16) void {
+        self.anchor_row +|= row;
     }
 
     /// Render one frame into `w` (a std.Io.Writer-compatible writer).
@@ -1216,24 +1213,32 @@ test "region: anchorRow exposes the tracked band top" {
     try std.testing.expectEqual(@as(u16, 10), r.anchorRow());
 }
 
-test "region: setAnchorRow records the first-reply band top directly" {
-    var r = try makeRegion(3, true, false);
+test "region: applyFirstCpr re-anchors from the tracked shifts" {
+    // The FIRST reply answers the query emitted before the first
+    // paint, when the cursor sat at the pre-frame row R; the
+    // bookkeeping then holds every shift applied on top of R
+    // (paintFirst's CNL reservation + append-flush rows). Adding the
+    // reply row lands exactly on the band top.
+    var r = try makeRegion(3, true, true); // append_lines
     defer r.deinit();
-    // The FIRST reply answers the query emitted before the first paint,
-    // when the cursor sat at the band's future top: the 1-indexed reply
-    // row IS the band top, no height correction (applyCpr's bottom-based
-    // formula would be wrong here).
-    r.setAnchorRow(7);
+    // paintFirst bookkeeping: CNL reserved `height` rows below R.
+    r.anchor_row = 3;
+    r.applyFirstCpr(4); // R = 4 -> band top 4 + 3
     try std.testing.expectEqual(@as(u16, 7), r.anchorRow());
-    // anchor_dirty is left as-is: the render cleared it when it emitted
-    // the query; the caller consumes this reply right after. The two
-    // formulas agree: height 3, steady-state reply at the band bottom
-    // (row 9) corrects to the same 7.
-    r.anchor_dirty = true;
-    r.setAnchorRow(7);
-    try std.testing.expect(r.anchor_dirty);
-    try r.applyCpr(9, 1);
-    try std.testing.expectEqual(@as(u16, 7), r.anchorRow());
+    // A scroll line flushed before the reply: one more tracked row.
+    r.anchor_row = 4; // 3 CNL + 1 append
+    r.applyFirstCpr(4);
+    try std.testing.expectEqual(@as(u16, 8), r.anchorRow());
+    // Without append_lines the band was painted from the cursor: no
+    // tracked shift, the reply row IS the band top.
+    var r2 = try makeRegion(3, true, false);
+    defer r2.deinit();
+    r2.applyFirstCpr(4);
+    try std.testing.expectEqual(@as(u16, 4), r2.anchorRow());
+    // The formulas agree at steady state: height 3, the band bottom is
+    // anchor + 2, so a reply at row 10 corrects back to the same 8.
+    try r.applyCpr(10, 1);
+    try std.testing.expectEqual(@as(u16, 8), r.anchorRow());
 }
 
 test "region: drift corrected by applyCpr; the next diff repaints at the corrected anchor" {

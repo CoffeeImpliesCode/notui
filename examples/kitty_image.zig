@@ -123,11 +123,12 @@ pub fn main(init: std.process.Init) !void {
                 if (!anchor_known) {
                     // The FIRST reply answers the query emitted at the
                     // first render start, BEFORE the first paint — the
-                    // cursor then sat at the band's future top, so the
-                    // 1-indexed reply row IS the band top. Anchor it
-                    // directly, then place the image at its top-left
-                    // cell.
-                    region.setAnchorRow(pos.row);
+                    // cursor then sat at the pre-frame row. The
+                    // region's bookkeeping already holds every shift
+                    // applied since (the CNL reservation), so
+                    // applyFirstCpr re-anchors exactly. Anchor it, then
+                    // place the image at its top-left cell.
+                    region.applyFirstCpr(pos.row);
                     anchor_known = true;
                     if (caps.kitty_graphics) {
                         try notui.image.kitty.place(w, .{
