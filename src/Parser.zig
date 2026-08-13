@@ -187,6 +187,12 @@ inline fn parseApc(input: []const u8) Result {
         .event = null,
         .n = 0,
     };
+    if (input.len < end + 1 + 1) {
+        return .{
+            .event = null,
+            .n = 0,
+        };
+    }
     const sequence = input[0 .. end + 1 + 1];
 
     // APC payloads (kitty graphics) are not part of the §5 surface; the
@@ -703,19 +709,31 @@ inline fn parseMouse(input: []const u8, full_input: []const u8) Result {
     var button_mask: u16 = undefined;
     var px: i16 = undefined;
     var py: i16 = undefined;
+    var xoff: u16 = 0;
+    var yoff: u16 = 0;
     var xterm: bool = undefined;
     if (input.len == 3 and (input[2] == 'M') and full_input.len >= 6) {
         xterm = true;
-        button_mask = full_input[3] - 32;
-        px = full_input[4] - 32;
-        py = full_input[5] - 32;
+        button_mask = full_input[3] -| 32;
+        px = full_input[4] -| 32;
+        py = full_input[5] -| 32;
     } else if (input.len >= 4 and input[2] == '<') {
         xterm = false;
         const delim1 = std.mem.indexOfScalarPos(u8, input, 3, ';') orelse return null_event;
         button_mask = parseParam(u16, input[3..delim1], null) orelse return null_event;
         const delim2 = std.mem.indexOfScalarPos(u8, input, delim1 + 1, ';') orelse return null_event;
         px = parseParam(i16, input[delim1 + 1 .. delim2], 1) orelse return null_event;
-        py = parseParam(i16, input[delim2 + 1 .. input.len - 1], 1) orelse return null_event;
+        // SGR 1016 pixel reporting appends `;xoffset;yoffset` after the y
+        // param; SGR 1006 ends at the y param.
+        const after_y = delim2 + 1;
+        if (std.mem.findScalarPos(u8, input, after_y, ';')) |delim3| {
+            py = parseParam(i16, input[after_y..delim3], 1) orelse return null_event;
+            const delim4 = std.mem.findScalarPos(u8, input, delim3 + 1, ';') orelse return null_event;
+            xoff = parseParam(u16, input[delim3 + 1 .. delim4], 0) orelse return null_event;
+            yoff = parseParam(u16, input[delim4 + 1 .. input.len - 1], 0) orelse return null_event;
+        } else {
+            py = parseParam(i16, input[after_y .. input.len - 1], 1) orelse return null_event;
+        }
     } else {
         return null_event;
     }
@@ -737,8 +755,13 @@ inline fn parseMouse(input: []const u8, full_input: []const u8) Result {
             .alt = alt,
             .ctrl = ctrl,
         },
-        .col = px -| 1,
-        .row = py -| 1,
+        // 1-based → 0-based. The xterm decode saturates below 32 (px/py = 0),
+        // and `-|` on i16 would yield -1 (representable), so clamp xterm coords
+        // at 0; SGR coords keep their (deliberately) signed values.
+        .col = if (xterm) @max(px -| 1, 0) else px -| 1,
+        .row = if (xterm) @max(py -| 1, 0) else py -| 1,
+        .xoffset = xoff,
+        .yoffset = yoff,
         .type = blk: {
             if (motion and button != Mouse.Button.none) {
                 break :blk .drag;
@@ -1367,6 +1390,180 @@ test "parse(csi): xterm mouse" {
     try testing.expectEqual(expected.event, result.event);
 }
 
+test "parse(csi): sgr mouse drag with button held" {
+    var buf: [1]u8 = undefined;
+    const vectors = [_]struct { input: []const u8, button: Mouse.Button }{
+        // SGR 1006: button 0-2 + motion bit 32 = drag while button held
+        .{ .input = "\x1b[<32;10;20M", .button = .left },
+        .{ .input = "\x1b[<33;10;20M", .button = .middle },
+        .{ .input = "\x1b[<34;10;20M", .button = .right },
+    };
+    for (vectors) |v| {
+        const result = parseCsi(v.input, &buf);
+        const expected: Result = .{
+            .event = .{ .mouse = .{
+                .col = 9,
+                .row = 19,
+                .button = v.button,
+                .type = .drag,
+                .mods = .{},
+            } },
+            .n = v.input.len,
+        };
+
+        try testing.expectEqual(expected.n, result.n);
+        try testing.expectEqual(expected.event, result.event);
+    }
+}
+
+test "parse(csi): sgr mouse drag with modifiers" {
+    var buf: [1]u8 = undefined;
+    // button 0 + motion 32 + shift 4 = 36
+    const input = "\x1b[<36;10;20M";
+    const result = parseCsi(input, &buf);
+    const expected: Result = .{
+        .event = .{ .mouse = .{
+            .col = 9,
+            .row = 19,
+            .button = .left,
+            .type = .drag,
+            .mods = .{ .shift = true },
+        } },
+        .n = input.len,
+    };
+
+    try testing.expectEqual(expected.n, result.n);
+    try testing.expectEqual(expected.event, result.event);
+}
+
+test "parse(csi): sgr mouse motion without button" {
+    var buf: [1]u8 = undefined;
+    // button 3 + motion bit 32 = motion with no button held
+    const input = "\x1b[<35;10;20M";
+    const result = parseCsi(input, &buf);
+    const expected: Result = .{
+        .event = .{ .mouse = .{
+            .col = 9,
+            .row = 19,
+            .button = .none,
+            .type = .motion,
+            .mods = .{},
+        } },
+        .n = input.len,
+    };
+
+    try testing.expectEqual(expected.n, result.n);
+    try testing.expectEqual(expected.event, result.event);
+}
+
+test "parse(csi): sgr mouse release" {
+    var buf: [1]u8 = undefined;
+    const input = "\x1b[<3;10;20m";
+    const result = parseCsi(input, &buf);
+    const expected: Result = .{
+        .event = .{ .mouse = .{
+            .col = 9,
+            .row = 19,
+            .button = .none,
+            .type = .release,
+            .mods = .{},
+        } },
+        .n = input.len,
+    };
+
+    try testing.expectEqual(expected.n, result.n);
+    try testing.expectEqual(expected.event, result.event);
+}
+
+test "parse(csi): sgr 1016 pixel mouse with offsets" {
+    var buf: [1]u8 = undefined;
+    const vectors = [_]struct { input: []const u8, button: Mouse.Button, type: Mouse.Type, xoff: u16, yoff: u16 }{
+        // SGR 1016: `;xoffset;yoffset` follow the y param
+        .{ .input = "\x1b[<35;10;20;100;200M", .button = .none, .type = .motion, .xoff = 100, .yoff = 200 },
+        .{ .input = "\x1b[<0;10;20;5;7M", .button = .left, .type = .press, .xoff = 5, .yoff = 7 },
+        .{ .input = "\x1b[<32;10;20;1;2M", .button = .left, .type = .drag, .xoff = 1, .yoff = 2 },
+    };
+    for (vectors) |v| {
+        const result = parseCsi(v.input, &buf);
+        const expected: Result = .{
+            .event = .{ .mouse = .{
+                .col = 9,
+                .row = 19,
+                .xoffset = v.xoff,
+                .yoffset = v.yoff,
+                .button = v.button,
+                .type = v.type,
+                .mods = .{},
+            } },
+            .n = v.input.len,
+        };
+
+        try testing.expectEqual(expected.n, result.n);
+        try testing.expectEqual(expected.event, result.event);
+    }
+}
+
+test "parse(csi): xterm mouse drag and motion" {
+    var buf: [1]u8 = undefined;
+    {
+        // X10 any-event mode: byte 32|button + 32 (0x40 '@' = left drag)
+        const input = "\x1b[M@!!";
+        const result = parseCsi(input, &buf);
+        const expected: Result = .{
+            .event = .{ .mouse = .{
+                .col = 0,
+                .row = 0,
+                .button = .left,
+                .type = .drag,
+                .mods = .{},
+            } },
+            .n = input.len,
+        };
+
+        try testing.expectEqual(expected.n, result.n);
+        try testing.expectEqual(expected.event, result.event);
+    }
+    {
+        // byte 35 + 32 (0x43 'C' = motion, no button)
+        const input = "\x1b[MC!!";
+        const result = parseCsi(input, &buf);
+        const expected: Result = .{
+            .event = .{ .mouse = .{
+                .col = 0,
+                .row = 0,
+                .button = .none,
+                .type = .motion,
+                .mods = .{},
+            } },
+            .n = input.len,
+        };
+
+        try testing.expectEqual(expected.n, result.n);
+        try testing.expectEqual(expected.event, result.event);
+    }
+}
+
+test "parse(csi): xterm mouse payload bytes below 32 (no overflow)" {
+    var buf: [1]u8 = undefined;
+    // payload bytes below 32 would underflow the `- 32` decode and panic
+    // (fuzz regression: integer overflow); they must saturate instead
+    const input = "\x1b[M\x00\x00\x00";
+    const result = parseCsi(input, &buf);
+    const expected: Result = .{
+        .event = .{ .mouse = .{
+            .col = 0,
+            .row = 0,
+            .button = .left,
+            .type = .press,
+            .mods = .{},
+        } },
+        .n = input.len,
+    };
+
+    try testing.expectEqual(expected.n, result.n);
+    try testing.expectEqual(expected.event, result.event);
+}
+
 test "parse: disambiguate shift + space" {
     const alloc = testing.allocator_instance.allocator();
     const input = "\x1b[32;2u";
@@ -1488,6 +1685,91 @@ test "parse: incomplete kitty seq (null event, n == 0)" {
 
     try testing.expect(result.event == null);
     try testing.expectEqual(@as(usize, 0), result.n);
+}
+
+test "parse: apc (dropped tag: consumed, no event)" {
+    const alloc = testing.allocator_instance.allocator();
+    const input = "\x1b_kitty\x1b\\";
+    var parser: Parser = .{};
+    const result = try parser.parse(input, alloc);
+
+    try testing.expectEqual(input.len, result.n);
+    try testing.expect(result.event == null);
+}
+
+test "parse: incomplete apc (null event, n == 0)" {
+    const alloc = testing.allocator_instance.allocator();
+    // APC whose ST's ESC is the final byte: parseApc must not read past the
+    // end of the input (fuzz regression: index out of bounds)
+    const input = "\x1b_\x1b";
+    var parser: Parser = .{};
+    const result = try parser.parse(input, alloc);
+
+    try testing.expect(result.event == null);
+    try testing.expectEqual(@as(usize, 0), result.n);
+}
+
+test "fuzz: parser never panics on arbitrary input" {
+    // Corpus-seeded from the conformance vectors above so the fuzzer starts
+    // from known-good sequences (SGR 1006/1016 mouse, X10, OSC 52, CPR, …).
+    try std.testing.fuzz(@as(void, undefined), testFuzz, .{
+        .corpus = &.{
+            "a",
+            "\x1b",
+            "\x1b[A",
+            "\x1b[2~",
+            "\x1b[97;1:3u",
+            "\x1b[<35;10;20M",
+            "\x1b[<32;10;20M",
+            "\x1b[<3;10;20m",
+            "\x1b[<35;10;20;100;200M",
+            "\x1b[M\x20\x21\x21",
+            "\x1b[M@!!",
+            "\x1b]52;c;aGVsbG8=\x1b\\",
+            "\x1b[5;10R",
+            "\x1b[?1016;1$y",
+            "🙂",
+            "👩‍🚀",
+        },
+    });
+}
+
+/// Public so other modules (e.g. a standalone fuzz driver) can reuse it.
+pub fn testFuzz(_: void, smith: *std.testing.Smith) !void {
+    var buf: [64]u8 = undefined;
+    const len = smith.slice(&buf);
+    // parse asserts non-empty input; the empty string is the runner's
+    // default smoke input and must be skipped.
+    if (len == 0) return;
+
+    var parser: Parser = .{};
+    const input = buf[0..len];
+    const result = try parser.parse(input, testing.allocator);
+
+    if (result.event) |ev| {
+        switch (ev) {
+            .paste => |text| testing.allocator.free(text),
+            else => {},
+        }
+    }
+
+    // Invariants: parse is a prefix consumer — it may consume nothing
+    // (incomplete input) but never more than it was given, and an event
+    // always implies a non-zero consumed count.
+    try testing.expect(result.n <= input.len);
+    if (result.event) |ev| {
+        try testing.expect(result.n >= 1);
+        switch (ev) {
+            // per-event-kind minimal sequence lengths
+            .mouse => try testing.expect(result.n >= 6),
+            .cpr, .cap => try testing.expect(result.n >= 5),
+            .focus_in, .focus_out, .key_release, .winsize, .paste => try testing.expect(result.n >= 3),
+            else => {},
+        }
+    } else {
+        // documented: incomplete input reports n == 0; unknown/consumed
+        // sequences report n > 0 with no event.
+    }
 }
 
 test {

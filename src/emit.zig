@@ -1,10 +1,11 @@
 //! ANSI emit helpers: cursor movement, erasure, line reservation, sync
 //! output, alt screen, and profile-gated SGR style writing.
 //!
-//! Adapted from zigzag `terminal/ansi.zig` constants (:8-63) and cursor /
-//! SGR writers (:66-122, :294-321). OSC 52/8 functions are NOT copied
-//! (deferred per plan). Every writer is `w: anytype` and must be
-//! `std.Io.Writer`-compatible. No zg import — pure ANSI bytes.
+//! Adapted from zigzag `terminal/ansi.zig` constants (:8-63), cursor /
+//! SGR writers (:66-122, :294-321), and the OSC 52 clipboard writer
+//! (:176-234). OSC 8 (hyperlinks) is not copied (deferred per plan).
+//! Every writer is `w: anytype` and must be `std.Io.Writer`-compatible.
+//! No zg import — pure ANSI bytes.
 
 const std = @import("std");
 const Color = @import("color.zig").Color;
@@ -99,6 +100,28 @@ pub fn enterAltScreen(w: anytype) !void {
 /// Exit the alternate screen buffer (CSI ?1049l).
 pub fn exitAltScreen(w: anytype) !void {
     try w.writeAll(alt_screen_exit);
+}
+
+/// Write an OSC 52 clipboard sequence: `ESC ] 52 ; <clipboard> ; <base64> ST`.
+/// `clipboard` names the selection (X11 convention): `"c"` is the system
+/// clipboard, `"p"` the primary selection; null defaults to `"c"`. The
+/// payload is base64-encoded with `std.base64.standard` and terminated
+/// with ST (`ESC \`). v1 only: no tmux/DCS passthrough or BEL terminator
+/// variant (zigzag `osc52Start`/`osc52End`/`osc52Encoded`).
+pub fn osc52(w: anytype, clipboard: ?[]const u8, text: []const u8) !void {
+    const target = clipboard orelse "c";
+    try w.writeAll(osc ++ "52;");
+    try w.writeAll(target);
+    try w.writeByte(';');
+    // Chunked 3-byte encoding: base64 is a concatenative block code, so
+    // per-chunk padding only lands on the final partial chunk. No
+    // allocation; mirrors std.base64.standard.Encoder.encodeWriter.
+    var chunker = std.mem.window(u8, text, 3, 3);
+    while (chunker.next()) |chunk| {
+        var temp: [5]u8 = undefined;
+        try w.writeAll(std.base64.standard.Encoder.encode(&temp, chunk));
+    }
+    try w.writeAll(st);
 }
 
 /// Emit SGR for `s` assuming a truecolor profile (maximum fidelity).
@@ -417,4 +440,30 @@ test "emit: writeStyle combined sequence" {
         },
     });
     try std.testing.expectEqualStrings("\x1b[1;2;3;4;5;7;9;38;5;200;48;2;1;2;3m", t.w.buffered());
+}
+
+test "emit: osc52 clipboard write" {
+    // Default clipboard ("c"), ST terminator, base64 of "hi" is aGk=.
+    var t: TestWriter = .{};
+    t.init();
+    try osc52(&t.w, null, "hi");
+    try std.testing.expectEqualStrings("\x1b]52;c;aGk=\x1b\\", t.w.buffered());
+
+    // Empty payload: header and terminator only.
+    var t2: TestWriter = .{};
+    t2.init();
+    try osc52(&t2.w, null, "");
+    try std.testing.expectEqualStrings("\x1b]52;c;\x1b\\", t2.w.buffered());
+
+    // Alternate selection: primary clipboard "p".
+    var t3: TestWriter = .{};
+    t3.init();
+    try osc52(&t3.w, "p", "hi");
+    try std.testing.expectEqualStrings("\x1b]52;p;aGk=\x1b\\", t3.w.buffered());
+
+    // Unicode payload ("hé" is 0x68 0xC3 0xA9, base64 aMOp).
+    var t4: TestWriter = .{};
+    t4.init();
+    try osc52(&t4.w, null, "hé");
+    try std.testing.expectEqualStrings("\x1b]52;c;aMOp\x1b\\", t4.w.buffered());
 }
