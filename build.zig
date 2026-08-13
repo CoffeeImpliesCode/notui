@@ -63,6 +63,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "spinner", .file = "examples/spinner.zig" },
         .{ .name = "prompt", .file = "examples/prompt.zig" },
         .{ .name = "statusline", .file = "examples/statusline.zig" },
+        .{ .name = "framework_counter", .file = "examples/framework_counter.zig" },
     };
     inline for (examples) |ex| {
         const example_exe = b.addExecutable(.{
@@ -89,6 +90,17 @@ pub fn build(b: *std.Build) void {
         run_example_cmd.step.dependOn(b.getInstallStep());
         if (b.args) |args| run_example_cmd.addArgs(args);
         run_example_step.dependOn(&run_example_cmd.step);
+
+        // The framework counter demo is also reachable via the shorter
+        // `run-framework-counter` name (the batch acceptance step); the
+        // tuple entry above already wires `run-example-framework_counter`.
+        if (std.mem.eql(u8, ex.name, "framework_counter")) {
+            const run_framework_counter_step = b.step(
+                "run-framework-counter",
+                "Run the framework counter example",
+            );
+            run_framework_counter_step.dependOn(&run_example_cmd.step);
+        }
     }
 
     // ── skript REPL example ──────────────────────────

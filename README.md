@@ -6,10 +6,64 @@ notui is a small library of TUI building blocks: a cell buffer with
 grapheme-aware drawing, an inline `Region` renderer that repaints a fixed
 band in the terminal's main buffer (never the alt screen, so scrollback
 survives), live terminal capability detection, and an input reader with
-split-sequence reassembly. There is no app framework — you drive the
-primitives in a plain event loop. The only dependency is
+split-sequence reassembly. The only dependency is
 [zg](https://codeberg.org/atman/zg) (Unicode 16 width/graphemes), sealed
 behind the `width` module.
+
+## App framework
+
+On top of those primitives, notui ships an Elm-style `App(Model)` layer:
+your `Model` declares a `Msg` union plus `init` / `update(model, msg,
+ctx) !Cmd(Msg)` / `view(model, ctx) View`, and the framework owns the
+event loop, terminal modes, and rendering (spec:
+[notes/research/framework-contract.md](notes/research/framework-contract.md)).
+A minimal shape:
+
+```zig
+const notui = @import("notui");
+const Cmd = notui.command.Cmd;
+const View = notui.view.View;
+
+const Model = struct {
+    count: u32 = 0,
+
+    pub const Msg = union(enum) { inc, dec, quit };
+
+    pub fn init(allocator: std.mem.Allocator) !Model {
+        _ = allocator;
+        return .{};
+    }
+    pub fn update(self: *Model, msg: Msg, ctx: *notui.context.Context) !Cmd(Msg) {
+        _ = ctx;
+        switch (msg) {
+            .inc => self.count += 1,
+            .dec => self.count -= 1,
+            .quit => return .quit,
+        }
+        return .none;
+    }
+    pub fn view(self: *const Model, ctx: *notui.context.Context) View(Model) {
+        _ = self;
+        _ = ctx;
+        return .{ .draw = draw }; // paint the frame in `draw`
+    }
+};
+
+pub fn main(init: std.process.Init) !void {
+    const model = try Model.init(init.gpa);
+    var app = notui.app.App(Model).init(model);
+    app.setFilter(&filter); // event → Msg; q / ^C → .quit
+    try app.run(init.io, init.gpa);
+}
+```
+
+The full counter demo — `Text` + `Spinner` + `StatusBar` composed into
+the frame via `View.draw`, keys wired through a filter, `every`-Cmd
+animation — is [`examples/framework_counter.zig`](examples/framework_counter.zig):
+
+```bash
+zig build run-example-framework_counter
+```
 
 ## Quick start
 
