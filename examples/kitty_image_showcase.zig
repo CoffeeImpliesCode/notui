@@ -193,26 +193,15 @@ pub fn main(init: std.process.Init) !void {
 
     const w = tty.writer();
 
-    // Transmit every image once; place the STATIC gallery (row 2) once.
-    // Placements are absolute screen rows: in a fresh terminal the band
-    // starts at row 0, so rows 0..3 are the band rows (the minimal demo's
-    // assumption). The gallery sprites then ride the scroll with their
-    // cells when append lines push the band up; the animated ball and
-    // star are re-placed at the band rows every tick instead.
+    // Transmit every image once (transmits are position-independent).
+    // Placements need the band's ABSOLUTE screen rows, which are only
+    // known once the first CPR reply anchors the band (see the `.cpr`
+    // arm below): the gallery is placed once at `anchorRow() + 2` and
+    // rides the scroll with its cells; the animated ball and star are
+    // re-placed at `anchorRow() + <band row>` every tick, keeping them
+    // glued to the band.
     if (caps.kitty_graphics) {
         try transmitAll(w);
-        try notui.image.kitty.place(w, .{
-            .id = square_red_id,
-            .col = 0,
-            .row = 2,
-            .size = .{ .width = 8, .height = 8 },
-        });
-        try notui.image.kitty.place(w, .{
-            .id = square_blue_id,
-            .col = 12,
-            .row = 2,
-            .size = .{ .width = 8, .height = 8 },
-        });
         try w.flush();
     }
 
@@ -224,6 +213,10 @@ pub fn main(init: std.process.Init) !void {
     var ball_col: u32 = 0;
     var ball_dir: i32 = 1;
     var frame_index: u32 = 0;
+    // The band's absolute top row is unknown until the FIRST CPR reply
+    // (the query fires before the first paint; see `.cpr` below). No
+    // placements are emitted before that — a tick or two at most.
+    var anchor_known: bool = false;
     var spinner: notui.component.Spinner = .{
         .label = if (caps.kitty_graphics) "images: ON" else "images: unsupported",
     };
@@ -239,6 +232,37 @@ pub fn main(init: std.process.Init) !void {
                 // to 'c' + ctrl. Check both forms.
                 if (isCtrlC(k)) break;
                 if (k.matches('q', .{})) break;
+            },
+            .cpr => |pos| {
+                if (!anchor_known) {
+                    // The FIRST reply answers the query emitted at the
+                    // first render start, BEFORE the first paint — the
+                    // cursor then sat at the band's future top, so the
+                    // 1-indexed reply row IS the band top. Anchor it
+                    // directly, then place the one-shot gallery at its
+                    // absolute row (it rides the scroll with its cells).
+                    region.setAnchorRow(pos.row);
+                    anchor_known = true;
+                    if (caps.kitty_graphics) {
+                        try notui.image.kitty.place(w, .{
+                            .id = square_red_id,
+                            .col = 0,
+                            .row = region.anchorRow() + 2,
+                            .size = .{ .width = 8, .height = 8 },
+                        });
+                        try notui.image.kitty.place(w, .{
+                            .id = square_blue_id,
+                            .col = 12,
+                            .row = region.anchorRow() + 2,
+                            .size = .{ .width = 8, .height = 8 },
+                        });
+                    }
+                } else {
+                    // Steady-state: the cursor parks at the band bottom
+                    // after every frame, so the bottom-based correction
+                    // applies.
+                    try region.applyCpr(pos.row, pos.col);
+                }
             },
             .winsize => |wsz| try region.resize(wsz.cols, region.height),
             else => {},
@@ -274,19 +298,21 @@ pub fn main(init: std.process.Init) !void {
 
         try drawBand(io, &region, &spinner);
 
-        if (caps.kitty_graphics) {
+        if (caps.kitty_graphics and anchor_known) {
             // Re-place = animation: the same id at a new col (ball) or a
-            // new frame id at a fixed cell (flip-book).
+            // new frame id at a fixed cell (flip-book). Absolute rows:
+            // the CURRENT anchor + the band row, so the images stay
+            // glued to the band as append lines scroll it up.
             try notui.image.kitty.place(w, .{
                 .id = ball_id,
                 .col = ball_col,
-                .row = 0,
+                .row = region.anchorRow() + 0,
                 .size = .{ .width = ball_w, .height = ball_h },
             });
             try notui.image.kitty.place(w, .{
                 .id = star_id_base + frame_index,
                 .col = star_col,
-                .row = 1,
+                .row = region.anchorRow() + 1,
                 .size = .{ .width = star_w, .height = star_h },
             });
         }

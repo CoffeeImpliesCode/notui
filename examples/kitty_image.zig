@@ -82,8 +82,10 @@ pub fn main(init: std.process.Init) !void {
 
     const w = tty.writer();
 
-    // Transmit + place only when the terminal advertises kitty graphics
-    // (interactive is implied: this path only runs on a tty).
+    // Transmit once up front (position-independent). The placement needs
+    // the band's ABSOLUTE screen row, which is only known once the first
+    // CPR reply anchors the band (see the `.cpr` arm below): the image
+    // is placed at `anchorRow() + 0` (the band's top-left cell).
     if (caps.kitty_graphics) {
         try notui.image.kitty.transmit(w, .{
             .format = .rgba,
@@ -91,12 +93,6 @@ pub fn main(init: std.process.Init) !void {
             .height = 4,
             .id = image_id,
         }, &checkerboard);
-        try notui.image.kitty.place(w, .{
-            .id = image_id,
-            .col = 0,
-            .row = 0,
-            .z_index = 0,
-        });
         try w.flush();
     }
 
@@ -108,6 +104,9 @@ pub fn main(init: std.process.Init) !void {
         "kitty images: unsupported";
 
     var reader = Reader.init(&tty);
+    // The band's absolute top row is unknown until the FIRST CPR reply
+    // (the query fires before the first paint; see `.cpr` below).
+    var anchor_known: bool = false;
     while (true) {
         const ev = reader.nextTimeout(tick_ms) catch break;
         if (ev) |e| switch (e) {
@@ -119,6 +118,31 @@ pub fn main(init: std.process.Init) !void {
                 // to 'c' + ctrl. Check both forms.
                 if (k.matches(Key.ctrl_c, .{}) or k.matches('c', .{ .ctrl = true })) break;
                 if (k.matches('q', .{})) break;
+            },
+            .cpr => |pos| {
+                if (!anchor_known) {
+                    // The FIRST reply answers the query emitted at the
+                    // first render start, BEFORE the first paint — the
+                    // cursor then sat at the band's future top, so the
+                    // 1-indexed reply row IS the band top. Anchor it
+                    // directly, then place the image at its top-left
+                    // cell.
+                    region.setAnchorRow(pos.row);
+                    anchor_known = true;
+                    if (caps.kitty_graphics) {
+                        try notui.image.kitty.place(w, .{
+                            .id = image_id,
+                            .col = 0,
+                            .row = region.anchorRow() + 0,
+                            .z_index = 0,
+                        });
+                    }
+                } else {
+                    // Steady-state: the cursor parks at the band bottom
+                    // after every frame, so the bottom-based correction
+                    // applies.
+                    try region.applyCpr(pos.row, pos.col);
+                }
             },
             .winsize => |wsz| try region.resize(wsz.cols, region.height),
             else => {},

@@ -94,8 +94,10 @@ pub const Region = struct {
     prev: Buffer,
     opts: Options,
 
-    /// Tracked terminal row of the band top (bookkeeping only — never
-    /// used for absolute positioning; shifted by append flushes).
+    /// Tracked terminal row of the band top (1-indexed, DEC CPR
+    /// convention; shifted by append flushes). Bookkeeping maintained by
+    /// `applyCpr`/`setAnchorRow` and exposed via `anchorRow` so apps can
+    /// place absolute-row content (kitty graphics) at band rows.
     anchor_row: u16 = 0,
     /// Highest row index ever emitted since the last clear; the shrink
     /// path erases stale rows between the content end and this mark.
@@ -239,6 +241,31 @@ pub const Region = struct {
         _ = col;
         self.anchor_row = row -| (self.height -| 1);
         self.anchor_dirty = false;
+    }
+
+    /// The tracked absolute terminal row of the band top (1-indexed,
+    /// DEC CPR convention; 0 until the first CPR reply anchors it).
+    /// Apps place absolute-row content — kitty graphics — at
+    /// `anchorRow() + <band row>`.
+    pub fn anchorRow(self: *const Region) u16 {
+        return self.anchor_row;
+    }
+
+    /// DIRECT top-based anchor set: records `row` as the band top.
+    /// Complements `applyCpr` (bottom-based, steady-state). The FIRST
+    /// CPR reply answers the query emitted at the first render start,
+    /// BEFORE the first paint — the cursor then sits at the band's
+    /// future top, so the reply's 1-indexed row IS the band top and
+    /// needs no height correction. Later replies are steady-state (the
+    /// cursor parks at the band bottom after every frame) and go to
+    /// `applyCpr`.
+    ///
+    /// Leaves `anchor_dirty` untouched: the render already cleared it
+    /// when it emitted the query, and the caller consumes this reply
+    /// immediately after. If a re-query is due anyway, the next reply
+    /// is steady-state and belongs to `applyCpr`.
+    pub fn setAnchorRow(self: *Region, row: u16) void {
+        self.anchor_row = row;
     }
 
     /// Render one frame into `w` (a std.Io.Writer-compatible writer).
@@ -1178,6 +1205,35 @@ test "region: applyCpr clears anchor_dirty (the query was answered)" {
     r.anchor_dirty = true;
     try r.applyCpr(4, 1);
     try std.testing.expect(!r.anchor_dirty);
+}
+
+test "region: anchorRow exposes the tracked band top" {
+    var r = try makeRegion(3, true, false);
+    defer r.deinit();
+    // Unanchored before the first CPR reply.
+    try std.testing.expectEqual(@as(u16, 0), r.anchorRow());
+    r.anchor_row = 10;
+    try std.testing.expectEqual(@as(u16, 10), r.anchorRow());
+}
+
+test "region: setAnchorRow records the first-reply band top directly" {
+    var r = try makeRegion(3, true, false);
+    defer r.deinit();
+    // The FIRST reply answers the query emitted before the first paint,
+    // when the cursor sat at the band's future top: the 1-indexed reply
+    // row IS the band top, no height correction (applyCpr's bottom-based
+    // formula would be wrong here).
+    r.setAnchorRow(7);
+    try std.testing.expectEqual(@as(u16, 7), r.anchorRow());
+    // anchor_dirty is left as-is: the render cleared it when it emitted
+    // the query; the caller consumes this reply right after. The two
+    // formulas agree: height 3, steady-state reply at the band bottom
+    // (row 9) corrects to the same 7.
+    r.anchor_dirty = true;
+    r.setAnchorRow(7);
+    try std.testing.expect(r.anchor_dirty);
+    try r.applyCpr(9, 1);
+    try std.testing.expectEqual(@as(u16, 7), r.anchorRow());
 }
 
 test "region: drift corrected by applyCpr; the next diff repaints at the corrected anchor" {
