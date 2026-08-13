@@ -8,7 +8,7 @@ rec {
     bash
     pkg-config
     zig-zlint
-    emscripten
+    # emscripten
   ];
 
   env = {

@@ -436,22 +436,28 @@ fn evalWorker(ctx: *WorkerCtx) void {
     var capture: OutputCapture = .{};
     const cap_ok = if (capture.begin()) |_| true else |_| false;
 
-    // Two-step parse-vs-eval so errors are labeled correctly (the skript
-    // REPL Query.submit pattern).
+    // Eval: regvm via the Reader. spawnEval parses with Reader.readAll
+    // (which desugars tensor/map literals `[2 5]` → `(tensor 2 5)` /
+    // `:{...}` → `(map ...)`) then compiles on the regvm. Parse/compile
+    // errors surface from spawnEval → "Parser error"; eval errors from
+    // awaitProcess → "Eval error". NO AST parse gate: rt.read/Ast.create
+    // is MORE restrictive than the Reader and rejects reader-valid
+    // constructs (e.g. `[2 5]` → error.Unimplemented), which is why a
+    // tensor literal worked in skript's CLI (Reader path) but failed here.
     var phase: Phase = .ok;
     var answer: []const u8 = "OoM";
-    const node = ctx.rt.read(ctx.query, .Expression) catch |e| blk: {
+    const proc = ctx.rt.spawnEval(ctx.query) catch |e| blk: {
         phase = .parse;
         answer = std.fmt.allocPrint(aa, "Parser error: {any}", .{e}) catch "Parser error";
         break :blk null;
     };
-    if (node) |n| {
-        const v: ?skript.Value = evalFast(ctx.rt, ctx.query, n) catch |e| blk: {
+    if (proc) |p| {
+        const res = ctx.rt.awaitProcess(p) catch |e| blk: {
             phase = .eval;
             answer = std.fmt.allocPrint(aa, "Eval error: {any}", .{e}) catch "Eval error";
             break :blk null;
         };
-        if (v) |val| answer = formatAnswer(aa, ctx.rt, val);
+        if (res) |val| answer = formatAnswer(aa, ctx.rt, val);
     }
     // Answer guard, byte cap (§6): a huge pretty answer (giant tensor,
     // giant structure) is truncated so it cannot balloon the scrollback.
@@ -499,20 +505,6 @@ fn submit(
     eval_start.* = std.Io.Timestamp.now(io, .awake);
     line.clearRetainingCapacity();
     cursor.* = 0;
-}
-
-/// regvm fast path with a stack-VM fallback for non-compilable forms.
-/// spawnEval compiles on THIS (worker) thread, enqueues a cooperative
-/// process on the scheduler's permanent runner thread, and awaitProcess
-/// parks this worker polling the process's future. If the form is not
-/// regvm-compilable (error.Unimplemented), evaluate the parse-gate node
-/// with evalNode (stack VM) — exactly the v1 path (§2.2).
-fn evalFast(rt: *skript.Runtime, query: []const u8, node: skript.AstNodeRef) !skript.Value {
-    const proc = rt.spawnEval(query) catch |e| switch (e) {
-        error.Unimplemented => return rt.evalNode(rt.root_ns, node),
-        else => return e,
-    };
-    return rt.awaitProcess(proc);
 }
 
 /// Main-loop tick: if the slot holds a fresh result, join the worker,
