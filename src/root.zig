@@ -28,6 +28,12 @@ pub const region = @import("region.zig");
 pub const input = @import("input.zig");
 // base-ui presentation layer (P8) — see notes/research/baseui-contract.md.
 pub const component = @import("component/root.zig");
+// app-framework layer (P9) — see notes/research/framework-contract.md.
+// app.zig re-exports the framework surface (App/Context/View/Cmd).
+pub const context = @import("context.zig");
+pub const command = @import("command.zig");
+pub const view = @import("view.zig");
+pub const app = @import("app.zig");
 
 test {
     std.testing.refAllDecls(@This());
