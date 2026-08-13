@@ -368,6 +368,10 @@ pub fn main(init: std.process.Init) !void {
                 }
             },
             .winsize => |wsz| try region.resize(wsz.cols, region.height),
+            // The reply to the region's own CPR query (first render,
+            // resize, reanchor): correct the bookkeeping anchor so an
+            // external fd-1/fd-2 write can't leave the band drifted.
+            .cpr => |pos| try region.applyCpr(pos.row, pos.col),
             else => {},
         };
 

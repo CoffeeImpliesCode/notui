@@ -16,8 +16,8 @@
 //!   external writes; the anchor's absolute row is bookkeeping only
 //!   (`anchor_row`, shifted by append flushes). CPR (`ESC[6n`) is
 //!   re-queried on the first render, after resize, and on `reanchor()`;
-//!   v0 does not consume the reply (it surfaces as `Event.cpr` for the
-//!   app — drift correction deferred, architecture §9.2).
+//!   the reply surfaces as `Event.cpr` and is consumed by the app via
+//!   `applyCpr` — the drift correction deferred in architecture §9.2.
 //!
 //! - **Three strategies.** (1) First render: append all `height` rows
 //!   WITHOUT clearing, reserving the band with `appendLines` (CNL) when
@@ -213,10 +213,32 @@ pub const Region = struct {
     }
 
     /// Mark the anchor as suspect; the next render re-queries CPR
-    /// (the reply surfaces as `Event.cpr` for the app — v0 does not
-    /// consume it).
+    /// (the reply surfaces as `Event.cpr` for the app — see
+    /// `applyCpr`).
     pub fn reanchor(self: *Region) !void {
         self.anchor_dirty = true;
+    }
+
+    /// Apply a Cursor Position Report (CPR) reply, correcting the
+    /// bookkeeping `anchor_row` from the terminal's answer to the last
+    /// `queryCursor` (emitted at the start of every `anchor_dirty`
+    /// frame). Between frames the cursor sits at the band bottom —
+    /// column 1 of the last row (every painter parks with `\r` + `\n`
+    /// walks) — so the reply's 1-indexed row IS that bottom row and
+    /// the band top is `height - 1` rows above it:
+    /// `anchor_row = row -| (height - 1)`, clamped to 0. `col` is
+    /// ignored: the parking is always column 1.
+    ///
+    /// The reply is asynchronous — if it lands while a frame is
+    /// mid-render (first frame, resize, append flush) it describes the
+    /// pre-render cursor, so the correction applies at the next frame.
+    /// Painting is cursor-relative (`moveToBandTop` + CUU), so the next
+    /// render's diff repaints at the corrected rows with no forced full
+    /// redraw. Clears `anchor_dirty` (the query was answered).
+    pub fn applyCpr(self: *Region, row: u16, col: u16) !void {
+        _ = col;
+        self.anchor_row = row -| (self.height -| 1);
+        self.anchor_dirty = false;
     }
 
     /// Render one frame into `w` (a std.Io.Writer-compatible writer).
@@ -1123,6 +1145,72 @@ test "region: reanchor() re-queries on the next render" {
     try r.render(&t3.w);
     // An idle frame with a pending re-anchor emits the CPR query only.
     try std.testing.expectEqualStrings("\x1b[?2026h\x1b[6n\x1b[?2026l", t3.w.buffered());
+}
+
+test "region: applyCpr corrects anchor_row from the reply" {
+    var r = try makeRegion(3, true, false);
+    defer r.deinit();
+    // Cursor parked at the band bottom, 1-indexed row 12; the band top
+    // is height - 1 rows above it: 12 - (3-1) = 10.
+    r.anchor_row = 10;
+    try r.applyCpr(12, 1);
+    try std.testing.expectEqual(@as(u16, 10), r.anchor_row);
+}
+
+test "region: applyCpr clamps the anchor to 0" {
+    var r = try makeRegion(3, true, false);
+    defer r.deinit();
+    // A reply above the band height saturates the subtraction to 0.
+    try r.applyCpr(1, 1);
+    try std.testing.expectEqual(@as(u16, 0), r.anchor_row);
+    try r.applyCpr(2, 1);
+    try std.testing.expectEqual(@as(u16, 0), r.anchor_row);
+    // A single-row band anchors exactly at the reply row.
+    var r1 = try makeRegion(1, true, false);
+    defer r1.deinit();
+    try r1.applyCpr(7, 1);
+    try std.testing.expectEqual(@as(u16, 7), r1.anchor_row);
+}
+
+test "region: applyCpr clears anchor_dirty (the query was answered)" {
+    var r = try makeRegion(2, true, false);
+    defer r.deinit();
+    r.anchor_dirty = true;
+    try r.applyCpr(4, 1);
+    try std.testing.expect(!r.anchor_dirty);
+}
+
+test "region: drift corrected by applyCpr; the next diff repaints at the corrected anchor" {
+    var r = try makeRegion(3, true, false);
+    defer r.deinit();
+    try drawRow(&r.cur, 0, "aaa");
+    try drawRow(&r.cur, 1, "bbb");
+    try drawRow(&r.cur, 2, "ccc");
+    var t1: TestWriter = .{};
+    t1.init();
+    try r.render(&t1.w);
+
+    // An external fd-1/fd-2 write scrolled the terminal while the region
+    // was idle, leaving the bookkeeping stale: the parked cursor (the
+    // band bottom) moved from row 15 to row 13. The reanchor's CPR
+    // reply reports 13; applyCpr corrects 12 -> 11 (13 - (3-1)).
+    r.anchor_row = 12; // stale bookkeeping (the drift, simulated)
+    try r.reanchor();
+    try r.applyCpr(13, 1);
+    try std.testing.expectEqual(@as(u16, 11), r.anchor_row);
+    try std.testing.expect(!r.anchor_dirty);
+
+    // The next changed frame emits the same cursor-relative diff an
+    // undrifted region would — the repaint targets the corrected band.
+    try clearRow(&r.cur, 1, 3);
+    try drawRow(&r.cur, 1, "BB");
+    var t2: TestWriter = .{};
+    t2.init();
+    try r.render(&t2.w);
+    try std.testing.expectEqualStrings(
+        "\x1b[?2026h\r\x1b[2A\r\n\x1b[KBB\r\n\x1b[?2026l",
+        t2.w.buffered(),
+    );
 }
 
 test "region: no CPR when sync_output is off" {

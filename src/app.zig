@@ -239,10 +239,20 @@ pub fn App(comptime Model: type) type {
             }
 
             // 4. Dispatch the event: winsize resizes the inline region;
-            //    other events go through the filter to a Msg (null = the
-            //    event is dropped — the framework never synthesizes one).
+            //    cpr feeds the region's anchor correction (the framework
+            //    owns the region — it is NOT forwarded to the model, so
+            //    the model surface stays clean); other events go through
+            //    the filter to a Msg (null = the event is dropped — the
+            //    framework never synthesizes one).
             var dispatched = ev != null;
             if (ev) |e| switch (e) {
+                .cpr => |pos| {
+                    // The reply to the region's own queryCursor: correct
+                    // the drift (region.zig applyCpr). Bookkeeping only —
+                    // no forced repaint; the next frame renders at the
+                    // corrected anchor.
+                    if (self.region) |*r| try r.applyCpr(pos.row, pos.col);
+                },
                 .winsize => |wsz| {
                     if (self.region) |*r| try r.resize(wsz.cols, r.height);
                     self.render_requested = true;
