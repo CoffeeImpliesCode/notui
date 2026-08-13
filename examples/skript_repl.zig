@@ -1150,14 +1150,20 @@ fn drawBand(
     const cur = std.math.clamp(cursor, active_off, line.len) - active_off;
 
     var x = try region.cur.draw(.{}, prompt, 0, 0);
+    const prompt_col = x;
     const cur_style: Style = .{ .attrs = .{ .reverse = true } }; // reverse-video block
 
     // Left of the cursor.
     const left_segs = try scanQuery(aa, active[0..cur]);
     for (left_segs) |seg| x += try region.cur.draw(seg.style, seg.text, x, 0);
-    // The cursor column: the popup's anchor (its rows align under the
-    // cursor, clamped so the list never starts past the band's right edge).
-    const cursor_col = x;
+    // The TOKEN-START column (the popup's anchor): the first column of the
+    // word being completed. Scan back to the completion delimiter, then
+    // measure the display width of everything before it — so the popup
+    // starts at the word's beginning and STAYS there while the cursor
+    // moves within the word (typing more chars, or Left/Right through it).
+    var token_start: usize = cur;
+    while (token_start > 0 and !isCompletionDelim(active[token_start - 1])) token_start -= 1;
+    const token_col: u16 = prompt_col + @as(u16, @intCast(notui.width.strWidth(active[0..token_start])));
 
     if (cur < active.len) {
         // Cursor sits ON a codepoint: reverse-video it, then the rest.
@@ -1176,7 +1182,9 @@ fn drawBand(
     var y: u16 = 1;
     if (sugg) |s0| {
         var s = s0; // draw takes *Suggestions; the payload is copied out of the const optional
-        const popup_x: u16 = @min(cursor_col, region.width);
+        // Anchor under the TOKEN START (not the cursor): the list begins
+        // where the completed word begins, clamped to the band width.
+        const popup_x: u16 = @min(token_col, region.width);
         y += try s.draw(aa, &region.cur, popup_x, y, now);
     }
 
