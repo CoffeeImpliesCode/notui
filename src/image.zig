@@ -7,7 +7,7 @@
 //!     — payload chunked across frames: the first frame carries the full
 //!       parameter set with `m=1` while more chunks follow (`m=0` final);
 //!       continuation frames carry only `m=1;`/`m=0;` before the payload.
-//!   place:    `\x1b_Ga=p,i=<id>,c=<col>,r=<row>[,z=<z>]\x1b\\`
+//!   place:    `\x1b_Ga=p,i=<id>,c=<col>,r=<row>[,w=<px>,h=<px>][,z=<z>]\x1b\\`
 //!   delete:   `\x1b_Ga=d\x1b\\` (all) | `\x1b_Ga=d,i=<id>\x1b\\`
 //!
 //! Every writer is `w: anytype` and must be `std.Io.Writer`-compatible.
@@ -51,6 +51,12 @@ pub const kitty = struct {
         col: u32,
         /// 1-indexed row to place at.
         row: u32,
+        /// Pixel size to scale the placed image to; null keeps the
+        /// size it was transmitted at.
+        size: ?struct {
+            width: u32,
+            height: u32,
+        } = null,
         /// Stacking order; negative renders beneath text.
         z_index: ?i32 = null,
     };
@@ -100,10 +106,12 @@ pub const kitty = struct {
     }
 
     /// Place a previously transmitted image (`id`) on the grid at
-    /// 1-indexed `col`/`row`, optionally with a `z_index` (negative
-    /// renders beneath text, positive above).
+    /// 1-indexed `col`/`row`, optionally scaled to a `size` in pixels
+    /// and/or with a `z_index` (negative renders beneath text, positive
+    /// above).
     pub fn place(w: anytype, opts: PlaceOptions) !void {
         try w.print(apc ++ "Ga=p,i={d},c={d},r={d}", .{ opts.id, opts.col, opts.row });
+        if (opts.size) |size| try w.print(",w={d},h={d}", .{ size.width, size.height });
         if (opts.z_index) |z| try w.print(",z={d}", .{z});
         try w.writeAll(st);
     }
@@ -224,6 +232,16 @@ test "image: place cached image" {
     t2.init();
     try kitty.place(&t2.w, .{ .id = 1, .col = 3, .row = 2, .z_index = -1 });
     try std.testing.expectEqualStrings("\x1b_Ga=p,i=1,c=3,r=2,z=-1\x1b\\", t2.w.buffered());
+
+    var t3: TestWriter = .{};
+    t3.init();
+    try kitty.place(&t3.w, .{ .id = 1, .col = 3, .row = 2, .size = .{ .width = 16, .height = 16 } });
+    try std.testing.expectEqualStrings("\x1b_Ga=p,i=1,c=3,r=2,w=16,h=16\x1b\\", t3.w.buffered());
+
+    var t4: TestWriter = .{};
+    t4.init();
+    try kitty.place(&t4.w, .{ .id = 1, .col = 3, .row = 2, .size = .{ .width = 32, .height = 24 }, .z_index = 5 });
+    try std.testing.expectEqualStrings("\x1b_Ga=p,i=1,c=3,r=2,w=32,h=24,z=5\x1b\\", t4.w.buffered());
 }
 
 test "image: delete all and delete by id" {
