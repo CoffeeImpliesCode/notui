@@ -1247,9 +1247,11 @@ fn isCtrlD(k: Key) bool {
 }
 
 /// Copy the key's text into the app arena and INSERT it at the cursor
-/// (§3.2) — the §3 lifetime contract: `Key.text` is valid only until the
-/// next read. Keys without text (control chars, PUA function / navigation
-/// keys, the multicodepoint marker) produce nothing.
+/// (§3.2), with automatic matching-bracket insertion: typing `(` inserts
+/// `()` with the cursor between; typing `)` when the auto-inserted `)` is
+/// already at the cursor skips over it instead of duplicating. Only for a
+/// single typed char (pastes insert verbatim). The §3 lifetime contract
+/// applies: `Key.text` is valid only until the next read.
 fn insertKeyText(aa: std.mem.Allocator, line: *std.ArrayList(u8), cursor: *usize, k: Key) !void {
     var text_buf: [4]u8 = undefined;
     const text: []const u8 = if (k.text) |t|
@@ -1260,8 +1262,38 @@ fn insertKeyText(aa: std.mem.Allocator, line: *std.ArrayList(u8), cursor: *usize
         const n = try std.unicode.utf8Encode(cp, &text_buf);
         break :blk text_buf[0..n];
     };
+
+    // Automatic matching-bracket insertion (single typed char only).
+    if (text.len == 1) {
+        const c = text[0];
+        if (closerFor(c)) |close| {
+            // Opener: insert the pair, cursor between the brackets.
+            try line.insertSlice(aa, cursor.*, &[_]u8{ c, close });
+            cursor.* += 1;
+            return;
+        }
+        // Closer typed when the auto-inserted closer is already at the
+        // cursor: skip over it (no duplicate).
+        if ((c == ')' or c == ']' or c == '}') and cursor.* < line.items.len and
+            line.items[cursor.*] == c)
+        {
+            cursor.* += 1;
+            return;
+        }
+    }
+
     try line.insertSlice(aa, cursor.*, text);
     cursor.* += text.len;
+}
+
+/// The closing delimiter paired with an opening bracket, or null.
+fn closerFor(opener: u8) ?u8 {
+    return switch (opener) {
+        '(' => ')',
+        '[' => ']',
+        '{' => '}',
+        else => null,
+    };
 }
 
 // ── cursor helpers (§3.3, zigzag TextInput semantics) ────────────────
