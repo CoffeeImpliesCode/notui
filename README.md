@@ -15,8 +15,9 @@ behind the `width` module.
 On top of those primitives, notui ships an Elm-style `App(Model)` layer:
 your `Model` declares a `Msg` union plus `init` / `update(model, msg,
 ctx) !Cmd(Msg)` / `view(model, ctx) View`, and the framework owns the
-event loop, terminal modes, and rendering (spec:
-[notes/research/framework-contract.md](notes/research/framework-contract.md)).
+event loop, terminal modes, and rendering (sources:
+[`src/app.zig`](src/app.zig), [`src/view.zig`](src/view.zig),
+[`src/command.zig`](src/command.zig), [`src/context.zig`](src/context.zig)).
 A minimal shape:
 
 ```zig
@@ -135,6 +136,11 @@ plain frame — no interactive escape sequences.
 | `buffer` | cell grid: `draw`, `renderDiff` / `renderAll` (style-tracking, wide-safe) |
 | `region` | the inline renderer: 3 strategies, append queue, anchoring, non-TTY path |
 | `input`  | `Reader`: blocking read with split-sequence reassembly |
+| `image`  | kitty graphics: transmit / place / delete (APC-G, a=t / a=p / a=d) |
+| `coverage` | SIMD row-intersection rasterizer for the formula example |
+| `component` | base-ui: `Text`, `Spinner`, `AnimatedText`, `Progress`, `Gauge`, `StatusBar`, `Suggestions` |
+| `context` / `command` / `view` | framework: runtime context, the `Cmd(Msg)` effect type, the frame closure |
+| `app`    | `App(Model)`: event loop, terminal modes, inline rendering |
 
 ## Examples
 
@@ -152,9 +158,15 @@ zig build run-example-statusline < /dev/null | cat
 
 ## Design
 
-- [notes/architecture.md](notes/architecture.md) — the v0 contract: API
-  surface (§5), the inline-first model (§4), risks (§9)
-- [notes/implementation-plan.md](notes/implementation-plan.md) — the
-  phased build plan (P0–P7) and verification checklist
-- [notes/research/](notes/research/) — TUI-landscape and zig-foundation
-  research behind the design
+- Inline-first: [`src/region.zig`](src/region.zig) repaints a fixed band
+  in the terminal's main buffer, so scrollback survives and the band
+  anchors correctly across repaints, resizes, and CPR replies.
+- One dependency, one seam: `zg` is reached only through
+  [`src/width.zig`](src/width.zig); every grapheme and column decision
+  funnels there.
+- The framework stays dumb: `App(Model)` owns the loop, the terminal
+  modes, and rendering. `update` returns a `Cmd`, `view` paints into the
+  buffer, and the app never reads the terminal directly.
+- [`FAST_COVERAGE.md`](FAST_COVERAGE.md) — the fast row-intersection
+  rasterizer behind [`examples/formula_tui.zig`](examples/formula_tui.zig)
+  ([`src/coverage.zig`](src/coverage.zig)).
