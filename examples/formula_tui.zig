@@ -10,9 +10,10 @@
 //! (the kitty spec: re-transmitting an id deletes the old image +
 //! placements, so transmit + re-place is the whole update). Enter commits
 //! the formula — keeps the display, clears the line, bumps the prompt
-//! counter — while an invalid formula on Enter draws a one-line hint and
-//! keeps the input. Empty input and parse errors while typing keep the
-//! last good preview displayed (no error spam). Line editing: Left/Right
+//! — while an invalid formula on Enter draws a one-line hint and
+//! keeps the input. Parse errors while typing also draw the hint below
+//! the preview (the last good preview stays displayed); empty input
+//! keeps the last good preview and shows no error. Line editing: Left/Right
 //! move the cursor by codepoint, Home/End (or ^A/^E) jump to the line
 //! ends, Backspace deletes before the cursor, Delete forward, ^K/^U/^W
 //! kill to end / to start / the word before the cursor. q on an empty
@@ -144,7 +145,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Default formula: render + transmit up front (position-independent);
     // the placement waits for the first CPR reply to anchor the band.
-    preview_ok = preview(gpa, &ctx, default_formula, size_pt, kitty, w);
+    preview_ok = preview(gpa, &ctx, default_formula, size_pt, kitty, w, &hint, &hint_buf);
     try w.flush();
 
     while (true) {
@@ -202,7 +203,7 @@ pub fn main(init: std.process.Init) !void {
                     line.shrinkRetainingCapacity(cursor);
                     hint = null;
                     if (line.items.len > 0) {
-                        preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w);
+                        preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf);
                     }
                 } else if (isCtrl(k, 0x15, 'u')) {
                     // ^U: kill to start of line (up to the cursor).
@@ -214,7 +215,7 @@ pub fn main(init: std.process.Init) !void {
                     cursor = 0;
                     hint = null;
                     if (line.items.len > 0) {
-                        preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w);
+                        preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf);
                     }
                 } else if (isCtrl(k, 0x17, 'w')) {
                     // ^W: delete the whitespace-delimited word before the
@@ -227,7 +228,7 @@ pub fn main(init: std.process.Init) !void {
                         cursor = start;
                         hint = null;
                         if (line.items.len > 0) {
-                            preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w);
+                            preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf);
                         }
                     }
                 } else if (k.matches(Key.backspace, .{})) {
@@ -240,7 +241,7 @@ pub fn main(init: std.process.Init) !void {
                         cursor = start;
                         hint = null;
                         if (line.items.len > 0) {
-                            preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w);
+                            preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf);
                         }
                     }
                 } else if (k.matches(Key.delete, .{})) {
@@ -252,7 +253,7 @@ pub fn main(init: std.process.Init) !void {
                         line.shrinkRetainingCapacity(line.items.len - clen);
                         hint = null;
                         if (line.items.len > 0) {
-                            preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w);
+                            preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf);
                         }
                     }
                 } else if (k.matches(Key.escape, .{})) {
@@ -268,6 +269,8 @@ pub fn main(init: std.process.Init) !void {
                         size_pt,
                         kitty,
                         w,
+                        &hint,
+                        &hint_buf,
                     );
                 } else if (k.matches(Key.page_down, .{})) {
                     size_pt = @max(min_size_pt, size_pt - size_step_pt);
@@ -278,15 +281,17 @@ pub fn main(init: std.process.Init) !void {
                         size_pt,
                         kitty,
                         w,
+                        &hint,
+                        &hint_buf,
                     );
                 } else {
-                    // Live preview: re-render on every keystroke. Parse
-                    // errors are silent while typing — the last good
-                    // preview stays displayed.
+                    // Live preview: re-render on every keystroke. On a
+                    // parse error the last good preview stays displayed
+                    // and the error line appears below it (hint row).
                     try insertKeyText(aa, &line, &cursor, k);
                     hint = null;
                     if (line.items.len > 0) {
-                        preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w);
+                        preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf);
                     }
                 }
             },
@@ -377,9 +382,10 @@ fn updatePreview(
     }, bmp.data);
 }
 
-/// `updatePreview` as a predicate for the silent live-preview paths:
-/// true when a fresh bitmap is on screen, false on any error (the last
-/// good preview stays displayed).
+/// `updatePreview` as a predicate for the live-preview paths: true when a
+/// fresh bitmap is on screen. On any error the last good preview stays
+/// displayed and `hint` gets the error name (rendered below the preview
+/// at `hint_row`); on success the hint clears.
 fn preview(
     gpa: std.mem.Allocator,
     ctx: *const ztex.Context,
@@ -387,8 +393,14 @@ fn preview(
     size_pt: f32,
     kitty: bool,
     w: anytype,
+    hint: *?[]const u8,
+    hint_buf: []u8,
 ) bool {
-    updatePreview(gpa, ctx, src, size_pt, kitty, w) catch return false;
+    updatePreview(gpa, ctx, src, size_pt, kitty, w) catch |err| {
+        hint.* = std.fmt.bufPrint(hint_buf, "latex error: {s}", .{@errorName(err)}) catch null;
+        return false;
+    };
+    hint.* = null;
     return true;
 }
 
