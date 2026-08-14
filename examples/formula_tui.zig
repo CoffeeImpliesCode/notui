@@ -172,6 +172,7 @@ pub fn main(init: std.process.Init) !void {
                             formula_n += 1;
                             committed = try aa.dupe(u8, line.items);
                             line.clearRetainingCapacity();
+                            cursor = 0;
                             hint = null;
                         } else |err| {
                             // Invalid: do NOT commit, do NOT clear — draw
@@ -206,7 +207,8 @@ pub fn main(init: std.process.Init) !void {
                 } else if (isCtrl(k, 0x15, 'u')) {
                     // ^U: kill to start of line (up to the cursor).
                     if (cursor > 0) {
-                        @memmove(line.items[0..], line.items[cursor..]);
+                        const tail = line.items[cursor..];
+                        @memmove(line.items[0..tail.len], tail);
                         line.shrinkRetainingCapacity(line.items.len - cursor);
                     }
                     cursor = 0;
@@ -219,7 +221,8 @@ pub fn main(init: std.process.Init) !void {
                     // cursor.
                     const start = wordStart(line.items, cursor);
                     if (start < cursor) {
-                        @memmove(line.items[start..], line.items[cursor..]);
+                        const tail = line.items[cursor..];
+                        @memmove(line.items[start .. start + tail.len], tail);
                         line.shrinkRetainingCapacity(line.items.len - (cursor - start));
                         cursor = start;
                         hint = null;
@@ -231,7 +234,8 @@ pub fn main(init: std.process.Init) !void {
                     // Delete the codepoint BEFORE the cursor.
                     const start = prevCodepoint(line.items, cursor);
                     if (start < cursor) {
-                        @memmove(line.items[start..], line.items[cursor..]);
+                        const tail = line.items[cursor..];
+                        @memmove(line.items[start .. start + tail.len], tail);
                         line.shrinkRetainingCapacity(line.items.len - (cursor - start));
                         cursor = start;
                         hint = null;
@@ -244,7 +248,7 @@ pub fn main(init: std.process.Init) !void {
                     if (cursor < line.items.len) {
                         const clen = utf8SeqLen(line.items, cursor);
                         const tail = line.items[cursor + clen ..];
-                        @memmove(line.items[cursor..], tail);
+                        @memmove(line.items[cursor .. cursor + tail.len], tail);
                         line.shrinkRetainingCapacity(line.items.len - clen);
                         hint = null;
                         if (line.items.len > 0) {
