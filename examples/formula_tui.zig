@@ -222,7 +222,18 @@ pub fn main(init: std.process.Init) !void {
                     line.shrinkRetainingCapacity(cursor);
                     hint = null;
                     if (line.items.len > 0) {
-                        preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf, &err_span, &stats);
+                        preview_ok = preview(
+                            gpa,
+                            &ctx,
+                            line.items,
+                            size_pt,
+                            kitty,
+                            w,
+                            &hint,
+                            &hint_buf,
+                            &err_span,
+                            &stats,
+                        );
                     }
                 } else if (isCtrl(k, 0x15, 'u')) {
                     // ^U: kill to start of line (up to the cursor).
@@ -234,7 +245,18 @@ pub fn main(init: std.process.Init) !void {
                     cursor = 0;
                     hint = null;
                     if (line.items.len > 0) {
-                        preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf, &err_span, &stats);
+                        preview_ok = preview(
+                            gpa,
+                            &ctx,
+                            line.items,
+                            size_pt,
+                            kitty,
+                            w,
+                            &hint,
+                            &hint_buf,
+                            &err_span,
+                            &stats,
+                        );
                     }
                 } else if (isCtrl(k, 0x17, 'w')) {
                     // ^W: delete the whitespace-delimited word before the
@@ -247,7 +269,18 @@ pub fn main(init: std.process.Init) !void {
                         cursor = start;
                         hint = null;
                         if (line.items.len > 0) {
-                            preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf, &err_span, &stats);
+                            preview_ok = preview(
+                                gpa,
+                                &ctx,
+                                line.items,
+                                size_pt,
+                                kitty,
+                                w,
+                                &hint,
+                                &hint_buf,
+                                &err_span,
+                                &stats,
+                            );
                         }
                     }
                 } else if (k.matches(Key.backspace, .{})) {
@@ -260,7 +293,18 @@ pub fn main(init: std.process.Init) !void {
                         cursor = start;
                         hint = null;
                         if (line.items.len > 0) {
-                            preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf, &err_span, &stats);
+                            preview_ok = preview(
+                                gpa,
+                                &ctx,
+                                line.items,
+                                size_pt,
+                                kitty,
+                                w,
+                                &hint,
+                                &hint_buf,
+                                &err_span,
+                                &stats,
+                            );
                         }
                     }
                 } else if (k.matches(Key.delete, .{})) {
@@ -272,7 +316,18 @@ pub fn main(init: std.process.Init) !void {
                         line.shrinkRetainingCapacity(line.items.len - clen);
                         hint = null;
                         if (line.items.len > 0) {
-                            preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf, &err_span, &stats);
+                            preview_ok = preview(
+                                gpa,
+                                &ctx,
+                                line.items,
+                                size_pt,
+                                kitty,
+                                w,
+                                &hint,
+                                &hint_buf,
+                                &err_span,
+                                &stats,
+                            );
                         }
                     }
                 } else if (k.matches(Key.escape, .{})) {
@@ -327,7 +382,18 @@ pub fn main(init: std.process.Init) !void {
                     try insertKeyText(aa, &line, &cursor, k);
                     hint = null;
                     if (line.items.len > 0) {
-                        preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf, &err_span, &stats);
+                        preview_ok = preview(
+                            gpa,
+                            &ctx,
+                            line.items,
+                            size_pt,
+                            kitty,
+                            w,
+                            &hint,
+                            &hint_buf,
+                            &err_span,
+                            &stats,
+                        );
                     }
                 }
             },
