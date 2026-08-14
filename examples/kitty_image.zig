@@ -2,8 +2,8 @@
 //!
 //! After Caps.detect, if the terminal advertises kitty graphics
 //! (`caps.kitty_graphics`), a tiny 4x4 RGBA checkerboard is transmitted
-//! inline (`notui.image.kitty.transmit`) and placed at the top-left cell
-//! (`notui.image.kitty.place`); the image is dropped again on quit
+//! inline (`notui.image.kitty.transmit`) and placed at the band's
+//! top-left cell (`region.placeAt`); the image is dropped again on quit
 //! (`notui.image.kitty.delete`). A one-line hint shows the outcome:
 //! "kitty images: ON" or "kitty images: unsupported". q / Ctrl+C quit.
 //!
@@ -84,8 +84,9 @@ pub fn main(init: std.process.Init) !void {
 
     // Transmit once up front (position-independent). The placement needs
     // the band's ABSOLUTE screen row, which is only known once the first
-    // CPR reply anchors the band (see the `.cpr` arm below): the image
-    // is placed at `anchorRow() + 0` (the band's top-left cell).
+    // CPR reply anchors the band (see the `.cpr` arm below):
+    // `region.placeAt` CUP's to the absolute cell (band row 0), places,
+    // then parks back at the band bottom.
     if (caps.kitty_graphics) {
         try notui.image.kitty.transmit(w, .{
             .format = .rgba,
@@ -127,15 +128,14 @@ pub fn main(init: std.process.Init) !void {
                     // region's bookkeeping already holds every shift
                     // applied since (the CNL reservation), so
                     // applyFirstCpr re-anchors exactly. Anchor it, then
-                    // place the image at its top-left cell.
+                    // place the image at the band's top-left cell via
+                    // `region.placeAt` (band row 0, col 1).
                     region.applyFirstCpr(pos.row);
                     anchor_known = true;
                     if (caps.kitty_graphics) {
-                        try notui.image.kitty.place(w, .{
+                        try region.placeAt(w, 0, 1, .{
                             .id = image_id,
-                            .col = 0,
-                            .row = region.anchorRow() + 0,
-                            .z_index = 0,
+                            .placement = image_id,
                         });
                     }
                 } else {

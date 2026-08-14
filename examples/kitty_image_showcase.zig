@@ -4,17 +4,19 @@
 //! Row 0 — a text line plus a MOVING image: a 12x12 RGBA ball (a
 //! procedurally generated filled circle) bouncing horizontally across
 //! the row width, re-placed at a new column every tick (~100 ms).
-//! Re-placing the same id is the animation mechanism (`a=p` moves the
-//! placement; `size` scales it in pixels).
+//! Re-placing the same (id, placement) pair is the animation
+//! mechanism (`a=p` moves the placement to the cursor; `c`/`r` span
+//! it in cells — here 2x1).
 //!
 //! Row 1 — a FLIP-BOOK: 6 pre-transmitted 12x12 RGBA frames of a
 //! rotating 4-point star (ids 100..105); each tick places the current
-//! frame id at a fixed cell, cycling — animation via placement swap.
+//! frame id into a fixed placement slot (500), cycling — animation via
+//! placement swap, no accumulation.
 //!
 //! Row 2 — a STATIC GALLERY: two 8x8 RGBA sprites (a red square and a
-//! blue square) placed at cols 0 and 12 with text drawn between and
-//! around them ("A", "B", and a caption flowing under the sprites) —
-//! text+image interleaving in one band row.
+//! blue square) placed at cols 0 and 12 (4x1 cells) with text drawn
+//! between and around them ("A", "B", and a caption flowing under the
+//! sprites) — text+image interleaving in one band row.
 //!
 //! Row 3 — status: a spinning base-ui Spinner plus "images: ON" or
 //! "images: unsupported".
@@ -69,7 +71,7 @@ const ball_id: u32 = 200;
 const square_red_id: u32 = 300;
 const square_blue_id: u32 = 301;
 
-/// Fixed cell (row 1) the flip-book cycles at.
+/// Fixed cell (col 12, 1-indexed) the flip-book cycles at.
 const star_col: u32 = 12;
 
 // ── frame generation (pure Zig, comptime, no deps) ─────────────
@@ -196,10 +198,11 @@ pub fn main(init: std.process.Init) !void {
     // Transmit every image once (transmits are position-independent).
     // Placements need the band's ABSOLUTE screen rows, which are only
     // known once the first CPR reply anchors the band (see the `.cpr`
-    // arm below): the gallery is placed once at `anchorRow() + 2` and
-    // rides the scroll with its cells; the animated ball and star are
-    // re-placed at `anchorRow() + <band row>` every tick, keeping them
-    // glued to the band.
+    // arm below): `region.placeAt` CUP's to the absolute cell, places,
+    // then parks back at the band bottom. The gallery is placed once
+    // at band row 2 and rides the scroll with its cells; the animated
+    // ball and star are re-placed at their band rows every tick,
+    // keeping them glued to the band.
     if (caps.kitty_graphics) {
         try transmitAll(w);
         try w.flush();
@@ -241,23 +244,21 @@ pub fn main(init: std.process.Init) !void {
                     // region's bookkeeping already holds every shift
                     // applied since (CNL reservation + any appends
                     // flushed), so applyFirstCpr re-anchors exactly.
-                    // Anchor it, then place the one-shot gallery at its
-                    // absolute row (it rides the scroll with its
-                    // cells).
+                    // Anchor it, then place the one-shot gallery via
+                    // `region.placeAt` (CUP to the absolute cell; the
+                    // band rides the scroll with its cells).
                     region.applyFirstCpr(pos.row);
                     anchor_known = true;
                     if (caps.kitty_graphics) {
-                        try notui.image.kitty.place(w, .{
+                        try region.placeAt(w, 2, 1, .{
                             .id = square_red_id,
-                            .col = 0,
-                            .row = region.anchorRow() + 2,
-                            .size = .{ .width = 8, .height = 8 },
+                            .placement = square_red_id,
+                            .size = .{ .width = 4, .height = 1 },
                         });
-                        try notui.image.kitty.place(w, .{
+                        try region.placeAt(w, 2, 13, .{
                             .id = square_blue_id,
-                            .col = 12,
-                            .row = region.anchorRow() + 2,
-                            .size = .{ .width = 8, .height = 8 },
+                            .placement = square_blue_id,
+                            .size = .{ .width = 4, .height = 1 },
                         });
                     }
                 } else {
@@ -302,21 +303,22 @@ pub fn main(init: std.process.Init) !void {
         try drawBand(io, &region, &spinner);
 
         if (caps.kitty_graphics and anchor_known) {
-            // Re-place = animation: the same id at a new col (ball) or a
-            // new frame id at a fixed cell (flip-book). Absolute rows:
-            // the CURRENT anchor + the band row, so the images stay
-            // glued to the band as append lines scroll it up.
-            try notui.image.kitty.place(w, .{
+            // Re-place = animation: `region.placeAt` CUP's to the
+            // absolute cell (current anchor + band row), places, then
+            // parks back — the images stay glued to the band as append
+            // lines scroll it up. Placement ids make re-placing move
+            // the existing placement instead of stacking a new one
+            // (the ball reuses its image id; the flip-book cycles
+            // frame ids into fixed slot 500).
+            try region.placeAt(w, 0, ball_col + 1, .{
                 .id = ball_id,
-                .col = ball_col,
-                .row = region.anchorRow() + 0,
-                .size = .{ .width = ball_w, .height = ball_h },
+                .placement = ball_id,
+                .size = .{ .width = 2, .height = 1 },
             });
-            try notui.image.kitty.place(w, .{
+            try region.placeAt(w, 1, star_col, .{
                 .id = star_id_base + frame_index,
-                .col = star_col,
-                .row = region.anchorRow() + 1,
-                .size = .{ .width = star_w, .height = star_h },
+                .placement = 500,
+                .size = .{ .width = 2, .height = 1 },
             });
         }
 

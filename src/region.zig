@@ -45,9 +45,9 @@
 //!   plan resolution): one plain frame, no hide/CPR/sync/erase/CNL, no
 //!   park — the ink/delta piped-output pattern.
 //!
-//! Writer-agnostic: imports only buffer, emit, width, caps (the
-//! `WidthPolicy` type). No tty, no zg — the zg import grep-gate is
-//! `width.zig` only.
+//! Writer-agnostic: imports only buffer, emit, image (kitty placement
+//! via `placeAt`), width, caps (the `WidthPolicy` type). No tty, no zg
+//! — the zg import grep-gate is `width.zig` only.
 
 const std = @import("std");
 const Buffer = @import("buffer.zig").Buffer;
@@ -56,6 +56,7 @@ const Style = @import("style.zig").Style;
 const emit = @import("emit.zig");
 const Width = @import("width.zig");
 const caps = @import("caps.zig");
+const image = @import("image.zig"); // no cycle — image.zig imports only std
 
 /// The inline Region renderer.
 pub const Region = struct {
@@ -263,6 +264,46 @@ pub const Region = struct {
     /// frame) and belong to `applyCpr`.
     pub fn applyFirstCpr(self: *Region, row: u16) void {
         self.anchor_row +|= row;
+    }
+
+    /// Options for `placeAt` (the absolute row/col are derived from the
+    /// region's anchor + the positional args).
+    pub const PlaceAtOptions = struct {
+        /// Cache id from a prior `transmit`.
+        id: u32,
+        /// Display size in CELLS (c/r span); null = native pixel size.
+        size: ?image.kitty.CellSize = null,
+        /// Placement id; re-placing the same (id, placement) moves the
+        /// image without trails.
+        placement: ?u32 = null,
+        /// Stacking order; negative renders beneath text.
+        z_index: ?i32 = null,
+    };
+
+    /// Place a kitty image at band row `band_row` (0-based within the
+    /// band), column `col` (1-indexed), then restore the parked cursor.
+    /// The cursor is moved to the absolute cell (anchor + band row) so
+    /// the placement renders there, and CUP'd back to the band bottom
+    /// (column 1 of the last row) so the next frame's relative moves
+    /// start where the painter expects. The one absolute cursor
+    /// positioning in this file (grep-gate exception; cursor restored).
+    pub fn placeAt(
+        self: *Region,
+        w: anytype,
+        band_row: u32,
+        col: u32,
+        opts: PlaceAtOptions,
+    ) !void {
+        const top: u32 = self.anchorRow();
+        try image.kitty.place(w, .{
+            .id = opts.id,
+            .col = col,
+            .row = top + band_row,
+            .size = opts.size,
+            .placement = opts.placement,
+            .z_index = opts.z_index,
+        });
+        try w.print("\x1b[{d};1H", .{top + @as(u32, self.height -| 1)});
     }
 
     /// Render one frame into `w` (a std.Io.Writer-compatible writer).
@@ -527,7 +568,8 @@ pub const Region = struct {
 
     /// Move from the band bottom to the band top: `\r` + CUU. The one
     /// upward relative move; the anchor is never positioned absolutely
-    /// (grep-gate: no absolute cursor-positioning call in this file).
+    /// (grep-gate: `placeAt` is the file's only absolute
+    /// cursor-positioning call — it restores the parked cursor).
     fn moveToBandTop(self: *const Region, w: anytype) !void {
         try w.writeAll("\r");
         if (self.height > 1) try w.print("\x1b[{d}A", .{self.height - 1});
@@ -1239,6 +1281,21 @@ test "region: applyFirstCpr re-anchors from the tracked shifts" {
     // anchor + 2, so a reply at row 10 corrects back to the same 8.
     try r.applyCpr(10, 1);
     try std.testing.expectEqual(@as(u16, 8), r.anchorRow());
+}
+
+test "region: placeAt CUP's to the absolute cell and parks back at the band bottom" {
+    var r = try makeRegion(3, true, false);
+    defer r.deinit();
+    // Anchor at 5; band row 1 -> absolute row 6, col 2; park back at
+    // anchor + (height - 1) = 7, column 1.
+    r.anchor_row = 5;
+    var t: TestWriter = .{};
+    t.init();
+    try r.placeAt(&t.w, 1, 2, .{ .id = 1 });
+    try std.testing.expectEqualStrings(
+        "\x1b[6;2H\x1b_Ga=p,q=1,i=1\x1b\\\x1b[7;1H",
+        t.w.buffered(),
+    );
 }
 
 test "region: drift corrected by applyCpr; the next diff repaints at the corrected anchor" {
