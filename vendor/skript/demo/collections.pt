@@ -1,0 +1,106 @@
+#!/usr/bin/env skript
+; collections.pt — a tour of cons lists and maps
+;
+; Cons cells as pairs and proper lists, hand-rolled recursive list
+; functions (no builtin list map/fold), records as lists, and hash
+; maps with keyword and symbol keys.
+; Verified against the current binary:
+;   - (map-get m :missing) returns nil — no error
+;   - (map-set! m k v) updates m IN PLACE and returns the PREVIOUS
+;     value (not the updated map)
+;   - maps have no key enumeration, so no recursion over keys
+;   - write round-trips values: strings print quoted, \n shows as "\n";
+;     display prints labels raw, so section headers and newlines come
+;     out clean
+
+(display "--- cons cells ---\n")
+(display "pair: ") (write (cons 1 2)) (display "\n")
+(display "fst: ") (write (fst (cons 1 2))) (display "\n")
+(display "rst: ") (write (rst (cons 1 2))) (display "\n")
+
+(display "--- proper lists ---\n")
+(display "list: ") (write (list 1 2 3)) (display "\n")
+(display "nested cons: ") (write (cons 1 (cons 2 (cons 3 nil)))) (display "\n")
+(display "second: ") (write (fst (rst (list 1 2 3)))) (display "\n")
+(display "nil?: ") (write (nil? nil)) (display "\n")
+
+(display "--- hand-rolled list functions ---\n")
+(defn (map-list f xs)
+  (if (nil? xs)
+    nil
+    (cons (f (fst xs)) (map-list f (rst xs)))))
+(display "map-list: ") (write (map-list (fn (x) (* x x)) (list 1 2 3 4))) (display "\n")
+
+(defn (fold-list f acc xs)
+  (if (nil? xs)
+    acc
+    (fold-list f (f acc (fst xs)) (rst xs))))
+(display "fold-list: ") (write (fold-list + 0 (list 1 2 3 4))) (display "\n")
+
+(defn (filter-list pred xs)
+  (if (nil? xs)
+    nil
+    (if (pred (fst xs))
+      (cons (fst xs) (filter-list pred (rst xs)))
+      (filter-list pred (rst xs)))))
+(display "filter-list: ") (write (filter-list (fn (x) (= (mod x 2) 0)) (list 1 2 3 4 5 6))) (display "\n")
+
+(defn (append-list a b)
+  (if (nil? a)
+    b
+    (cons (fst a) (append-list (rst a) b))))
+(display "append-list: ") (write (append-list (list 1 2) (list 3 4))) (display "\n")
+
+(defn (reverse-acc xs acc)
+  (if (nil? xs)
+    acc
+    (reverse-acc (rst xs) (cons (fst xs) acc))))
+(defn (reverse-list xs) (reverse-acc xs nil))
+(display "reverse-list: ") (write (reverse-list (list 1 2 3))) (display "\n")
+
+(defn (length-list xs)
+  (fold-list (fn (n x) (+ n 1)) 0 xs))
+(display "length-list: ") (write (length-list (list 1 2 3 4 5))) (display "\n")
+
+(defn (sum-list xs)
+  (fold-list (fn (acc x) (+ acc x)) 0 xs))
+(display "sum-list: ") (write (sum-list (list 1 2 3 4))) (display "\n")
+
+(display "--- records as lists ---\n")
+(def records (list (list 1 "a") (list 2 "b")))
+(display "records: ") (write records) (display "\n")
+(display "ids: ") (write (map-list (fn (r) (fst r)) records)) (display "\n")
+(display "names: ") (write (map-list (fn (r) (fst (rst r))) records)) (display "\n")
+(display "first id: ") (write (fst (fst records))) (display "\n")
+(display "first name: ") (write (fst (rst (fst records)))) (display "\n")
+(display "id sum: ") (write (sum-list (map-list (fn (r) (fst r)) records))) (display "\n")
+
+(display "--- maps ---\n")
+(def m :{ :name "skript" :version 1 :tags [:lisp :typed] })
+(display "m: ") (write m) (display "\n")
+(display "name: ") (write (map-get m :name)) (display "\n")
+(display "version: ") (write (map-get m :version)) (display "\n")
+(display "tags: ") (write (map-get m :tags)) (display "\n")
+(display "missing: ") (write (map-get m :missing)) (display "\n")
+(display "missing is nil: ") (write (nil? (map-get m :missing))) (display "\n")
+
+(display "--- map-set! updates in place ---\n")
+(display "old version: ") (write (map-set! m :version 2)) (display "\n")
+(display "m after: ") (write m) (display "\n")
+(display "version now: ") (write (map-get m :version)) (display "\n")
+(display "name kept: ") (write (map-get m :name)) (display "\n")
+
+(display "--- symbol keys ---\n")
+(def sm (hash-map 'a 1 'b 2))
+(display "sm: ") (write sm) (display "\n")
+(display "a: ") (write (map-get sm 'a)) (display "\n")
+(display "b: ") (write (map-get sm 'b)) (display "\n")
+(display ":a is a distinct key: ") (write (map-get sm :a)) (display "\n")
+
+(display "--- nested maps ---\n")
+(def pt :{ :point :{ :x 1 :y 2 } })
+(display "pt: ") (write pt) (display "\n")
+(display "x: ") (write (map-get (map-get pt :point) :x)) (display "\n")
+(display "y: ") (write (map-get (map-get pt :point) :y)) (display "\n")
+
+(display "done\n")

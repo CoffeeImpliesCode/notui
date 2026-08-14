@@ -1,0 +1,51 @@
+#!/usr/bin/env skript
+;; hello.pt — the classic first program as a guided tour.
+;; Shows: write output, recursive fibonacci, recursive factorial,
+;; string output, and nested calls. write round-trips values (strings
+;; print quoted); display prints labels and newlines raw.
+;; Run: ./zig-out/bin/skript demo/hello.pt
+
+(display "--- 1. greeting ---\n")
+(display "hello, world!\n")
+
+(display "--- 2. fibonacci ---\n")
+(defn (fib n)
+  (if (< n 2)
+      n
+      (+ (fib (- n 1)) (fib (- n 2)))))
+
+(defn (print-fibs n)
+  (if (< n 0)
+      nil
+      (begin
+        (print-fibs (- n 1))
+        (display "fib ") (write n) (display " = ") (write (fib n)) (display "\n"))))
+
+(print-fibs 10)
+
+(display "--- 3. factorial ---\n")
+(defn (fact n)
+  (if (< n 2)
+      1
+      (* n (fact (- n 1)))))
+
+(defn (print-facts n)
+  (if (< n 1)
+      nil
+      (begin
+        (print-facts (- n 1))
+        (display "fact ") (write n) (display " = ") (write (fact n)) (display "\n"))))
+
+(print-facts 10)
+
+(display "--- 4. nested calls ---\n")
+(display "fib(10) + fact(5) = ") (write (+ (fib 10) (fact 5))) (display "\n")
+(display "fact(fib(6)) = ") (write (fact (fib 6))) (display "\n")
+(display "fib(fact(3)) = ") (write (fib (fact 3))) (display "\n")
+
+(display "--- 5. string output ---\n")
+(display "plain string\n")
+(display "escaped tab:\t\n")
+(display "escaped newline:\n\n")
+
+(display "done\n")

@@ -1,0 +1,160 @@
+; ==============================================================================
+; API errors corpus — error system surface.
+; Run:  ./zig-out/bin/skript test/api/errors.pt
+; raise / try (2-arg fn-handler + catch sugar) / guard / error values.
+; Contract (probed on the current binary):
+;   - user `raise`  -> handler binds the RAW payload (e = the raised value)
+;   - system errors -> handler binds an ERROR VALUE (error? #t, error-name works)
+;   - guard no-match re-raises (payload preserved for user raises)
+; Every assertion on its own line; a failure raises -> non-zero exit.
+; ==============================================================================
+
+; ---- Shared check helpers (contract) ----
+(defn (fail-msg got want)
+  (begin (write "\nFAIL ") (write got) (write " != ") (write want) (write "\n") (raise "check-failed")))
+(defn (check-eq got want)
+  (if (equal? got want) (write ".") (fail-msg got want)))
+(defn (check-num got want)
+  (if (= got want) (write ".") (fail-msg got want)))
+
+; Read a value from a proper list of (symbol . value) pairs.
+(defn (alist-get fields key)
+  (if (nil? fields) nil
+      (if (equal? (fst (fst fields)) key)
+          (rst (fst fields))
+          (alist-get (rst fields) key))))
+(defn (alist-has? fields key)
+  (if (nil? fields) #f
+      (if (equal? (fst (fst fields)) key)
+          #t
+          (alist-has? (rst fields) key))))
+
+; ==============================================================================
+; raise / try with an fn handler: payload binding.
+; The handler is a literal (fn (e) ...); on a user raise it receives the RAW
+; payload value, not an error value.
+; ==============================================================================
+(check-eq (try (raise "boom") (fn (e) (list "caught" e))) (list "caught" "boom"))
+(check-num (try (raise 42) (fn (e) (+ e 1))) 43)
+(check-eq (try (raise :k) (fn (e) e)) :k)
+; no error: EXPR's value is the result; the handler never runs
+(check-num (try (+ 1 2) (fn (e) 99)) 3)
+
+; ==============================================================================
+; catch sugar: (try EXPR (catch VAR BODY)).
+; ==============================================================================
+(check-eq (try (raise "boom") (catch e (list "caught" e))) (list "caught" "boom"))
+(check-num (try 5 (catch e "never")) 5)
+(check-num (try (raise 7) (catch e (+ e 1))) 8)
+
+; ==============================================================================
+; nested try + handler-raise propagation to an enclosing try.
+; ==============================================================================
+(check-eq (try (try (raise "in") (catch e1 (list "c1" e1))) (catch e2 e2)) (list "c1" "in"))
+(check-eq (try (try (raise "inner") (fn (e) (raise "outer"))) (fn (e2) (list "got" e2))) (list "got" "outer"))
+(check-num (try (try (try (raise 1) (fn (e) (raise (+ e 1)))) (fn (e2) (raise (* e2 10)))) (fn (e3) e3)) 20)
+
+; ==============================================================================
+; system errors surface as caught error VALUES.
+; A handler around a system error (not a user raise) binds an @Error value:
+; error? is #t, error-name recovers the enum name.
+; ==============================================================================
+(check-eq (error? (try (fst 42) (fn (e) e))) #t)
+(check-eq (is-instance-of? @Error (try (fst 42) (catch e e))) #t)
+(check-eq (error-name (try (fst 42) (fn (e) e))) "TypeMismatch")
+(check-eq (error-name (try (+ 1 "a") (fn (e) e))) "ArityMismatch")
+(check-eq (error-name (try (fst nil) (catch e e))) "TypeMismatch")
+(check-eq (error? (try (fst 42) (catch e e))) #t)
+
+; ==============================================================================
+; guard: else clause, clause matching, system-error catch, success path,
+; no-match re-raise, clause-less guard.
+; ==============================================================================
+(check-eq (guard (e (else :caught)) (fst 42)) :caught)
+(check-eq (guard (e ((string? e) :string) (else :other)) (raise "hi")) :string)
+(check-eq (guard (e ((int? e) :int) ((string? e) :string)) (raise 7)) :int)
+(check-eq (guard (e ((number? e) :num) (else :else)) (+ 1 "a")) :else)
+(check-eq (guard (e ((error? e) :sys) (else :no)) (fst 42)) :sys)
+(check-num (guard (e ((error? e) :sys)) (+ 1 2)) 3)
+(check-eq (guard (e ((string? e) :str) (else :else)) (raise 3)) :else)
+; no clause matches -> guard re-raises; the outer try still gets the payload
+(check-eq (try (guard (e ((int? e) :int)) (raise "nope")) (fn (e2) (list "r" e2))) (list "r" "nope"))
+; clause-less guard: any error re-raises (payload preserved)
+(check-eq (try (guard (e) (raise "x")) (fn (e2) (list "re-raised" e2))) (list "re-raised" "x"))
+
+; ==============================================================================
+; error? totality: #f on every non-error value.
+; ==============================================================================
+(check-eq (error? 42) #f)
+(check-eq (error? "x") #f)
+(check-eq (error? nil) #f)
+(check-eq (error? (list 1 2)) #f)
+(check-eq (error? (list)) #f)
+
+; ==============================================================================
+; `error` alias: (error MSG) is raise sugar.
+; ==============================================================================
+(check-eq (try (error "boom") (fn (e) (list "caught" e))) (list "caught" "boom"))
+
+; Public reader locations and byte spans.
+(def parsed-location (source-location (read "(x)")))
+(check-num (alist-get parsed-location 'line) 1)
+(check-num (alist-get parsed-location 'col) 1)
+(def parsed-span (source-span (read "(x)")))
+(check-num (alist-get parsed-span 'start) 0)
+(check-num (alist-get parsed-span 'end) 3)
+(check-eq (alist-has? parsed-span 'file) #t)
+(check-eq (alist-get parsed-span 'file) nil)
+
+; A caught system error keeps its source position and named call frames.
+(defn (trace-leaf) (fst 42))
+(defn (trace-middle) (+ 1 (trace-leaf)))
+(def caught-trace-error (try (trace-middle) (catch e e)))
+(check-eq (error-name caught-trace-error) "TypeMismatch")
+(def caught-location (error-location caught-trace-error))
+(check-eq (int? (alist-get caught-location 'line)) #t)
+(check-eq (> (alist-get caught-location 'line) 0) #t)
+(check-eq (int? (alist-get caught-location 'col)) #t)
+(check-eq (> (alist-get caught-location 'col) 0) #t)
+(def caught-frames (error-trace caught-trace-error))
+(def leaf-frame (fst caught-frames))
+(def middle-frame (fst (rst caught-frames)))
+(check-eq (alist-get leaf-frame 'function) "trace-leaf")
+(check-eq (alist-get middle-frame 'function) "trace-middle")
+(check-eq (int? (alist-get leaf-frame 'line)) #t)
+(check-eq (> (alist-get leaf-frame 'line) 0) #t)
+(check-eq (int? (alist-get leaf-frame 'col)) #t)
+(check-eq (> (alist-get leaf-frame 'col) 0) #t)
+(check-eq (string? (alist-get leaf-frame 'file)) #t)
+(check-eq (int? (alist-get middle-frame 'line)) #t)
+(check-eq (> (alist-get middle-frame 'line) 0) #t)
+(check-eq (int? (alist-get middle-frame 'col)) #t)
+(check-eq (> (alist-get middle-frame 'col) 0) #t)
+(check-eq (string? (alist-get middle-frame 'file)) #t)
+(check-eq (alist-get middle-frame 'file) (alist-get leaf-frame 'file))
+
+; Raising a caught error value preserves its original location and call trace.
+(def rethrown-error (try (raise caught-trace-error) (catch e e)))
+(check-eq (error-name rethrown-error) "TypeMismatch")
+(check-eq (error-location rethrown-error) caught-location)
+(check-eq (error-trace rethrown-error) caught-frames)
+
+; ==============================================================================
+; An uncaught raise completes the child; exit-reason retains its payload,
+; while a system failure yields a rich error value. The scheduler survives:
+; (alive? (self)) stays #t and the corpus reaches ALL-OK.
+; ==============================================================================
+(def perr (spawn (fn () (raise 5))))
+(def pok  (spawn (fn () 42)))
+(sleep 40)
+(check-eq (alive? perr) #f)
+(check-eq (alive? pok) #f)
+(check-eq (alive? (self)) #t)
+
+; ==============================================================================
+; guard re-raise identity: no clause matches -> the ORIGINAL error propagates
+; (spec 05 §5.5), never a rewrap as error.Raised.
+; ==============================================================================
+(check-eq (error-name (try (guard (e ((int? e) :int)) (fst 42)) (catch e2 e2))) "TypeMismatch")
+
+(write "\nALL-OK\n")

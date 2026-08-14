@@ -1,0 +1,66 @@
+#!/usr/bin/env skript
+; vector-math.pt — tensors as vectors and matrices.
+; Demonstrates: iota, dot, map, reshape, trans, fold, where, map2,
+; tensor-get, plus int<->float conversion ((f64 x), (from-f64 x)).
+; Storage is COLUMN-WISE: runs of columns, so the leading-axis slices are
+; the contiguous units and the last axis varies fastest. O(1) reshape
+; reuses the flat as-is: (reshape (iota 4) [2 2]) keeps [0 1 2 3] and
+; prints as [[0 1] [2 3]] — the columns [0 1] and [2 3] are side by side.
+; Run: ./zig-out/bin/skript demo/vector-math.pt
+
+; ---- vectors: iota, dot, norm ----
+(display "--- vectors ---\n")
+(def v (iota 5))                    ; [0 1 2 3 4]
+(display "v = ") (write v) (display "\n")
+(display "dot v v = ") (write (dot v v)) (display "\n")
+; (dot v v) is an i64 (30). (f64 x) converts int -> float.
+(display "f64 of dot = ") (write (f64 (dot v v))) (display "\n")
+; sqrt dispatches on ints too (coerced to f64 internally).
+(display "norm (sqrt of dot) = ") (write (sqrt (from-f64 (dot v v)))) (display "\n")
+; (from-f64 x) is the reverse direction: float -> int, truncating.
+(display "from-f64 3.7 = ") (write (from-f64 3.7)) (display "\n")
+
+; ---- scaling a vector with map ----
+(display "--- scaling ---\n")
+(display "v * 2 = ") (write (map v (fn (x) (* x 2)))) (display "\n")
+
+; ---- matrices: reshape, transpose, product ----
+(display "--- matrices ---\n")
+(def m (reshape (iota 6) [2 3]))    ; 2 columns of dim 3, column-wise
+(display "m = ") (write m) (display "\n")
+(display "trans m = ") (write (trans m)) (display "\n")
+(def m2 (reshape (iota 4) [2 2]))
+(display "m2 = ") (write m2) (display "\n")
+(display "m2 * m2 = ") (write (dot m2 m2)) (display "\n")
+
+; ---- fold: sums along an axis ----
+(display "--- row / column sums ---\n")
+(display "fold m 1 + = ") (write (fold m 1 +)) (display "\n") ; each printed row
+(display "fold m 0 + = ") (write (fold m 0 +)) (display "\n") ; each printed column
+
+; ---- one-hot -> indices with where ----
+(display "--- one-hot / mask ---\n")
+(display "where [1 0 0 1 0] = ") (write (where [1 0 0 1 0])) (display "\n")
+
+; ---- moving average sketch: pair sums, then halve ----
+(display "--- moving average ---\n")
+(def sums (map2 [1 2 3 4] [2 3 4 5] +))
+(display "pair sums = ") (write sums) (display "\n")
+; Binary methods need MATCHING types: (* x 0.5) on an i64 element has no
+; instance, so convert each element to f64 first, then scale.
+(display "averages = ") (write (map sums (fn (x) (* (f64 x) 0.5)))) (display "\n")
+
+; ---- normalization: ints -> unit interval ----
+(display "--- normalization ---\n")
+(def xs [10 20 30 40])
+(display "xs / 100 = ") (write (map xs (fn (x) (/ (f64 x) 100.0)))) (display "\n")
+
+; ---- a tiny table: 3x2 matrix + tensor-get lookups ----
+(display "--- table lookups ---\n")
+(def tbl (reshape (iota 6) [3 2]))
+(display "tbl = ") (write tbl) (display "\n")
+(display "tbl[0 0] = ") (write (tensor-get tbl 0 0)) (display "\n")
+(display "tbl[1 1] = ") (write (tensor-get tbl 1 1)) (display "\n")
+(display "tbl[2 1] = ") (write (tensor-get tbl 2 1)) (display "\n")
+
+(display "done\n")

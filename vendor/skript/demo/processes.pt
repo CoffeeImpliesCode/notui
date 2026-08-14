@@ -1,0 +1,100 @@
+#!/usr/bin/env skript
+; processes.pt — the concurrency model
+; spawn / send / receive / self / alive? / sleep
+; every receive uses the 2-arg timeout form: (receive MS) -> message or :timeout
+; closures capture enclosing bindings, so workers reach the parent pid
+
+(display "--- spawn and rendezvous ---\n")
+; the spawned process sends :done back to the PARENT (captured lexically)
+(def parent (self))
+(def w (spawn (fn () (send parent :done))))
+(display "worker pid: ")
+(write w)
+(display "\n")
+(display "message: ")
+(write (receive 2000))
+(display "\n")
+
+(display "--- ping-pong ---\n")
+; B receives :ping from the parent and replies with (:pong :ping)
+(def b (spawn (fn () (send parent (list :pong (receive 2000))))))
+(send b :ping)
+(display "reply: ")
+(write (receive 2000))
+(display "\n")
+
+(display "--- worker pool ---\n")
+; three workers with staggered sleeps; results arrive in sleep order
+(defn (worker parent n ms) (sleep ms) (send parent (list :result n)))
+(spawn (fn () (worker parent 1 60)))
+(spawn (fn () (worker parent 2 30)))
+(spawn (fn () (worker parent 3 10)))
+(display "first: ")
+(write (receive 2000))
+(display "\n")
+(display "second: ")
+(write (receive 2000))
+(display "\n")
+(display "third: ")
+(write (receive 2000))
+(display "\n")
+
+(display "--- timeout ---\n")
+; the mailbox is empty, so the 2-arg receive gives up after 100 ms
+(display "result: ")
+(write (receive 100))
+(display "\n")
+
+(display "--- alive? lifecycle ---\n")
+(def lif (spawn (fn () (sleep 100) (send parent :done))))
+(display "alive while sleeping: ")
+(write (alive? lif))
+(display "\n")
+(display "finished message: ")
+(write (receive 2000))
+(display "\n")
+(display "alive after exit: ")
+(write (alive? lif))
+(display "\n")
+
+(display "--- echo server ---\n")
+; a recursive loop that echoes any payload back to the parent
+; case only sees keywords (the :quit / :timeout control messages);
+; non-keyword payloads take the plain echo path
+(defn (echo-loop parent)
+  (let ((msg (receive 2000)))
+    (if (Keyword? msg)
+      (case msg
+        ((:quit :timeout) (send parent :closed))
+        (else (begin
+                (send parent (list :echo msg))
+                (echo-loop parent))))
+      (begin
+        (send parent (list :echo msg))
+        (echo-loop parent)))))
+(def e (spawn (fn () (echo-loop parent))))
+(send e :ping)
+(display "echo keyword: ")
+(write (receive 2000))
+(display "\n")
+(send e [1 2 3])
+(display "echo tensor: ")
+(write (receive 2000))
+(display "\n")
+(send e (hash-map :k 1))
+(display "echo map: ")
+(write (receive 2000))
+(display "\n")
+(send e 42)
+(display "echo int: ")
+(write (receive 2000))
+(display "\n")
+(send e :quit)
+(display "server closed: ")
+(write (receive 2000))
+(display "\n")
+(display "server alive?: ")
+(write (alive? e))
+(display "\n")
+
+(display "done\n")

@@ -1,0 +1,126 @@
+; particles.pt — Interactive particle system demo
+;
+; Usage:  cat lib/raylib.pt particles.pt | zig build run -- -
+;
+; Controls:  LMB=burst  G=gravity  F=follow  R=reset  ESC=quit
+; =============================================================================
+
+(SetConfigFlags flag-msaa-4x-hint)
+(InitWindow 800 600 "Particles")
+(SetTargetFPS 120)
+(SetExitKey key-escape)
+
+; ---------------------------------------------------------------------------
+; Particle: (hash-map 'x x 'y y 'vx vx 'vy vy 'life life)
+; ---------------------------------------------------------------------------
+(defn part-x (p) (map-get p 'x))
+(defn part-y (p) (map-get p 'y))
+(defn part-vx (p) (map-get p 'vx))
+(defn part-vy (p) (map-get p 'vy))
+(defn part-life (p) (map-get p 'life))
+
+(defn set-part-x! (p v) (map-set! p 'x v) p)
+(defn set-part-y! (p v) (map-set! p 'y v) p)
+(defn set-part-vx! (p v) (map-set! p 'vx v) p)
+(defn set-part-vy! (p v) (map-set! p 'vy v) p)
+(defn set-part-life! (p v) (map-set! p 'life v) p)
+
+(defn make-particle (x y vx vy life)
+  (hash-map 'x x 'y y 'vx vx 'vy vy 'life life))
+
+(defn alive? (p) (> (part-life p) 0.0))
+
+; Update one particle in-place — returns the same particle
+(defn update-particle (p dt grav follow? mx my)
+  (if follow?
+    (begin
+      (set-part-x! p mx)
+      (set-part-y! p my)
+      (set-part-vx! p (* 200.0 (- (f64 (GetRandomValue 0 200)) 100.0)))
+      (set-part-vy! p 0.0)
+      (set-part-life! p (- (part-life p) dt))
+      p)
+    (begin
+      (set-part-x! p (+ (part-x p) (* (part-vx p) dt)))
+      (set-part-y! p (+ (part-y p) (* (part-vy p) dt)))
+      ; vx unchanged
+      (set-part-vy! p (- (part-vy p) (* grav dt)))
+      (set-part-life! p (- (part-life p) dt))
+      p)))
+
+; ---------------------------------------------------------------------------
+; Particle list operations (mutates particles in-place, filters dead)
+; ---------------------------------------------------------------------------
+(defn update-particles (ps dt grav follow? mx my)
+  (if (nil? ps) nil
+    (begin
+      (update-particle (fst ps) dt grav follow? mx my)
+      (if (alive? (fst ps))
+        (cons (fst ps) (update-particles (rst ps) dt grav follow? mx my))
+        (update-particles (rst ps) dt grav follow? mx my)))))
+
+(defn spawn-burst (n x y acc)
+  (if (= n 0) acc
+    (spawn-burst (- n 1) x y
+      (cons
+        (make-particle x y
+          (* 150.0 (- (f64 (GetRandomValue 0 200)) 100.0))
+          (* 150.0 (- (f64 (GetRandomValue 0 200)) 100.0))
+          (+ 1.0 (f64 (GetRandomValue 0 10))))
+        acc))))
+
+(defn draw-particles (ps)
+  (if (nil? ps) nil
+    (begin
+      (DrawCircle (part-x (fst ps)) (part-y (fst ps))
+        (* 2.5 (part-life (fst ps)))
+        (Fade pink (* 0.6 (part-life (fst ps)))))
+      (draw-particles (rst ps)))))
+
+; ---------------------------------------------------------------------------
+; Background starfield (flickers = twinkling stars) — draw body disabled
+; ---------------------------------------------------------------------------
+(defn starfield () nil)
+
+; ---------------------------------------------------------------------------
+; HUD overlay
+; ---------------------------------------------------------------------------
+(defn draw-hud (grav follow?)
+  (DrawFPS 10 10)
+  (DrawText (if grav "Gravity: ON" "Gravity: OFF") 10 30 10 (Fade white 0.8))
+  (DrawText (if follow? "Follow:  ON" "Follow:  OFF") 10 42 10 (Fade white 0.8))
+  (DrawText "LMB=burst  G=grav  F=follow  R=reset  ESC=quit" 10 580 10 (Fade white 0.4)))
+
+; ---------------------------------------------------------------------------
+; Main loop — state threaded through recursion
+; ---------------------------------------------------------------------------
+(defn mainloop (ps grav follow?)
+  (PollInputEvents)
+  (BeginDrawing)
+  (ClearBackground (rgba 0.02 0.02 0.06 1.0))
+  (starfield)
+  (draw-particles ps)
+  (DrawCircleV (GetMousePosition) 5.0 white)
+  (DrawCircleV (GetMousePosition) 20.0 (Fade skyblue 0.15))
+  (draw-hud grav follow?)
+  (EndDrawing)
+  (if (WindowShouldClose) #t
+    (mainloop
+      ; Next particle state
+      (if (IsMouseButtonPressed mouse-button-left)
+        (spawn-burst 20 (f64 (GetMouseX)) (f64 (GetMouseY))
+          (update-particles ps (f64 (GetFrameTime))
+            (if grav 9.81 0.0) follow?
+            (f64 (GetMouseX)) (f64 (GetMouseY))))
+        (if (IsKeyPressed key-r) nil
+          (update-particles ps (f64 (GetFrameTime))
+            (if grav 9.81 0.0) follow?
+            (f64 (GetMouseX)) (f64 (GetMouseY)))))
+      ; Toggle gravity
+      (if (IsKeyPressed key-g) (not grav) grav)
+      ; Toggle follow-cursor
+      (if (IsKeyPressed key-f) (not follow?) follow?))))
+
+(write "Particles — click to burst, G=gravity, F=follow, ESC=quit")
+(mainloop nil #t #f)
+(CloseWindow)

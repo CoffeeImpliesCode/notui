@@ -1,0 +1,603 @@
+; ==============================================================================
+; API semantics corpus — control flow + equality surface.
+; Run:  ./zig-out/bin/skript test/api/semantics.pt
+; Every assertion on its own line; a failure raises -> non-zero exit.
+; NOTE: numeric builtins (+ - * / < > = !=) are binary-only; all numeric
+; expressions below use at most 2 operands.
+; ==============================================================================
+
+; ---- Shared check helpers (contract) ----
+(defn (fail-msg got want)
+  (begin (write "\nFAIL ") (write got) (write " != ") (write want) (write "\n") (raise "check-failed")))
+(defn (check-eq got want)
+  (if (equal? got want) (write ".") (fail-msg got want)))
+(defn (check-num got want)
+  (if (= got want) (write ".") (fail-msg got want)))
+
+; ==============================================================================
+; Truthiness: only #f and nil (incl. empty list) are falsy.
+; ==============================================================================
+(check-num (if 0 1 2) 1)
+(check-num (if #f 1 2) 2)
+(check-num (if nil 1 2) 2)
+(check-num (if "" 1 2) 1)
+(check-num (if (list) 1 2) 2)
+(check-num (if 42 1 2) 1)
+(check-num (if "x" 1 2) 1)
+(check-num (if (list 1 2) 1 2) 1)
+
+; ---- R7RS 2-arg form (if TEST THEN): falsy -> nil ----
+(check-num (if 1 2) 2)
+(check-eq (if #f 5) nil)
+(check-eq (if nil 5) nil)
+(check-num (if 0 42) 42)
+(check-eq (if (= 1 1) (if #f "a") "c") nil)
+(check-eq (if #f (if #t "a" "b")) nil)
+
+; ==============================================================================
+; cond: (cond (TEST BODY...) ...) with (else BODY...) last.
+; ==============================================================================
+(check-num (cond (#t 1) (#t 2) (else 3)) 1)
+(check-num (cond (#f 10) (#t 20) (else 30)) 20)
+(check-num (cond (#f 1) (else 2)) 2)
+(check-eq (cond (#f 1)) nil)
+(check-eq (cond (#f 1) (#f 2)) nil)
+(check-eq (cond) nil)
+(check-eq (cond (#t)) #t)
+(check-num (cond (42)) 42)
+(check-num (cond (#f) (else 5)) 5)
+(check-num (cond (#t (+ 1 2) (* 3 4))) 12)
+(check-num (cond (#f 1) (#t 5 6 7)) 7)
+(check-eq (cond (#f "x") (else "y")) "y")
+
+; ==============================================================================
+; when / unless.
+; ==============================================================================
+(check-num (when #t 5) 5)
+(check-eq (when #f 5) nil)
+(check-eq (unless #t 5) nil)
+(check-num (unless #f 5) 5)
+(check-eq (when #t) nil)
+(check-eq (unless #f) nil)
+(check-num (when #t (+ 1 2) (* 2 3)) 6)
+(check-num (unless #f (+ 1 1) (* 2 3)) 6)
+(check-eq (when nil 5) nil)
+(check-num (unless nil 5) 5)
+
+; ==============================================================================
+; case: (case DISC (KEYS... BODY) ... (else BODY)).
+; ==============================================================================
+(check-eq (case 2 ((1 2) "low") (else "high")) "low")
+(check-num (case 7 ((7) 42) (else 0)) 42)
+(check-eq (case 99 ((1) "one") (else "other")) "other")
+(check-eq (case 9 ((1) "one")) nil)
+(check-num (case :a ((:a) 1) (else 2)) 1)
+(check-num (case :b ((:a) 1) (else 2)) 2)
+(check-eq (case "b" (("a") 1) (("b") 2) (else 3)) 2)
+(check-eq (case "c" (("a") 1) (("b") 2) (else 3)) 3)
+(check-eq (case (mod 5 2) ((0) "even") ((1) "odd") (else "?")) "odd")
+(check-eq (case (mod 4 2) ((0) "even") ((1) "odd") (else "?")) "even")
+
+; Error-case note (documented, not asserted live — try/catch unwind is on the
+; known-broken list, so an erroring expression aborts the run): an `else`
+; that is NOT the last clause, e.g. (case 1 (else "e") ((1) "one")), is a
+; compile error (error.Unimplemented) — regCase mirrors regCond and rejects
+; the clause that follows the else instead of silently dropping it.
+
+; ==============================================================================
+; if/else nesting.
+; ==============================================================================
+(check-eq (if #t (if #f "a" "b") "c") "b")
+(check-eq (if #f (if #t "a" "b") "c") "c")
+(check-eq (if (= 1 1) (if (= 2 2) (if (= 3 3) "deep" "x") "y") "z") "deep")
+(check-eq (if (= 1 2) (if (= 2 2) "a" "b") (if (= 3 3) "c" "d")) "c")
+(check-num (if (> 5 3) (+ 1 2) (* 3 4)) 3)
+(check-num (if (> 5 9) (+ 1 2) (* 3 4)) 12)
+
+; ==============================================================================
+; let: sequential bindings (let*), shadowing, 17 bindings.
+; ==============================================================================
+(check-num (let ((x 5)) x) 5)
+(check-num (let ((x 1) (y 2)) (+ x y)) 3)
+(check-num (let ((x 1)) (let ((x 2)) x)) 2)
+(check-num (let ((x 1) (y x)) y) 1)
+(check-num (let () 5) 5)
+(check-num (let ((a 1) (b 2) (c 3) (d 4) (e 5) (f 6) (g 7) (h 8) (i 9) (j 10) (k 11) (l 12) (m 13) (n 14) (o 15) (p 16) (q 17)) q) 17)
+(check-num (let ((a 1) (b 2) (c 3) (d 4) (e 5) (f 6) (g 7) (h 8) (i 9) (j 10) (k 11) (l 12) (m 13) (n 14) (o 15) (p 16) (q 17)) (+ a h)) 9)
+(check-num (let ((a 1) (b 2) (c 3) (d 4) (e 5) (f 6) (g 7) (h 8) (i 9) (j 10) (k 11) (l 12) (m 13) (n 14) (o 15) (p 16) (q 17)) (+ p q)) 33)
+
+; ==============================================================================
+; def / defn.
+; ==============================================================================
+(def g 5)
+(check-num g 5)
+(defn (sq x) (* x x))
+(check-num (sq 9) 81)
+(defn (sub a b) (- a b))
+(check-num (sub 10 4) 6)
+(defn (last-of a b) (sq a) b)
+(check-num (last-of 2 7) 7)
+(defn (mk3) 3)
+(check-num (mk3) 3)
+
+; ==============================================================================
+; fn closures + capture.
+; ==============================================================================
+(check-num ((fn (x) (* x x)) 6) 36)
+(defn (make-adder x) (fn (y) (+ x y)))
+(def add7 (make-adder 7))
+(check-num (add7 3) 10)
+(defn (f-capture x) (fn (y) x))
+(def f5 (f-capture 5))
+(check-num (f5 99) 5)
+(defn (double-apply f x) (f (f x)))
+(check-num (double-apply (fn (y) (* y 2)) 3) 12)
+
+; Error-case note (documented, not asserted live — try/catch unwind is on the
+; known-broken list, so an erroring expression aborts the run): a closure
+; called with MORE args than it declares is error.ArityMismatch now, e.g.
+; (defn (g a b) (- a b)) (g 10 3 99) — the extras are no longer silently
+; dropped. Exact arity is enforced at every call site (apply, .call,
+; .tail_call, .self_call, .tail_self_call, and the parity stack VM).
+
+; ==============================================================================
+; recursion (factorial).
+; ==============================================================================
+(defn (fact n) (if (= n 0) 1 (* n (fact (- n 1)))))
+(check-num (fact 0) 1)
+(check-num (fact 1) 1)
+(check-num (fact 5) 120)
+(check-num (fact 10) 3628800)
+
+; ==============================================================================
+; TCO: 100000-deep tail calls must not overflow.
+; ==============================================================================
+(defn (countdown n) (if (= n 0) "done" (countdown (- n 1))))
+(check-eq (countdown 100000) "done")
+(defn (sum-to n acc) (if (= n 0) acc (sum-to (- n 1) (+ acc n))))
+(check-num (sum-to 100000 0) 5000050000)
+
+; ==============================================================================
+; Higher-order: map with fn.
+; ==============================================================================
+(check-eq (map (list 1 2 3) (fn (x) (* x 2))) (list 2 4 6))
+(check-eq (map (list 1 2 3 4) (fn (x) (* x 10))) (list 10 20 30 40))
+(check-eq (map (list) (fn (x) x)) nil)
+(defn (dbl x) (* x 2))
+(check-eq (map (list 1 2 3) dbl) (list 2 4 6))
+
+; ==============================================================================
+; Equality: =, !=, equal? (deep, same-type).
+; ==============================================================================
+(check-eq (= "a" "a") #t)
+(check-eq (= "a" "b") #f)
+(check-eq (!= "a" "b") #t)
+(check-eq (!= "a" "a") #f)
+(check-eq (equal? (list 1 (list 2)) (list 1 (list 2))) #t)
+(check-eq (equal? (list 1) (list 2)) #f)
+(check-eq (equal? 1 1) #t)
+(check-eq (equal? (list 1 2) (list 1 2)) #t)
+(check-eq (equal? (list 1 2) (list 1 3)) #f)
+(check-eq (equal? 'x 'x) #t)
+(check-eq (equal? 'x 'y) #f)
+(check-eq (= 'x 'x) #t)
+(check-eq (equal? (list) nil) #t)
+(check-eq (equal? "a" "a") #t)
+(check-eq (equal? "a" "b") #f)
+(check-eq (equal? (list 1 "a" 's (list 2)) (list 1 "a" 's (list 2))) #t)
+
+; ==============================================================================
+; begin.
+; ==============================================================================
+(check-num (begin (+ 1 1) (+ 2 2) (* 3 4)) 12)
+(check-eq (begin) nil)
+(check-num (begin (defn (dbl2 x) (* x 2)) (dbl2 21)) 42)
+(check-eq (begin (when #f 1) (unless #t 2) "last") "last")
+
+; ==============================================================================
+; quote.
+; ==============================================================================
+(check-eq (quote (1 2 3)) (list 1 2 3))
+(check-eq '(1 2 3) (list 1 2 3))
+(check-eq (quote (a b c)) '(a b c))
+(check-eq 'foo (quote foo))
+(check-eq (equal? 'foo 'foo) #t)
+(defn (q-fn) '(1 2))
+(check-eq (q-fn) (list 1 2))
+
+; ==============================================================================
+; Source inspection: exact retained text and detached datum snapshots.
+; ==============================================================================
+(def phase1-source-text-before "unrelated-before")
+(def phase1-source-text-subject
+  (fn (phase1-source-text-value)
+    (+ phase1-source-text-value 7)))
+(def phase1-source-text-after "unrelated-after")
+(check-eq
+  (source-text phase1-source-text-subject)
+  "(fn (phase1-source-text-value)\n    (+ phase1-source-text-value 7))")
+(check-eq
+  (error-name
+    (try (source-text phase1-source-text-subject 1)
+         (catch phase1-source-text-limit-error phase1-source-text-limit-error)))
+  "Unsupported")
+(check-eq
+  (error-name
+    (try (source-text 42)
+         (catch phase1-source-text-type-error phase1-source-text-type-error)))
+  "TypeMismatch")
+(check-eq
+  (error-name
+    (try (source-text phase1-source-text-subject "one")
+         (catch phase1-source-text-limit-type-error phase1-source-text-limit-type-error)))
+  "TypeMismatch")
+
+(def phase1-source-datum-subject
+  (fn (phase1-source-datum-left phase1-source-datum-right)
+    (+ phase1-source-datum-left phase1-source-datum-right)))
+(def phase1-source-datum-view (source-datum phase1-source-datum-subject))
+(def phase1-source-datum-tail (rst phase1-source-datum-view))
+(def phase1-source-datum-params (fst phase1-source-datum-tail))
+(def phase1-source-datum-body (fst (rst phase1-source-datum-tail)))
+(check-eq (= (fst phase1-source-datum-view) 'fn) #t)
+(check-eq (= (fst phase1-source-datum-params) 'phase1-source-datum-left) #t)
+(check-eq (= (fst (rst phase1-source-datum-params)) 'phase1-source-datum-right) #t)
+(check-eq (rst (rst phase1-source-datum-params)) nil)
+(check-eq (= (fst phase1-source-datum-body) (quote +)) #t)
+(check-eq (= (fst (rst phase1-source-datum-body)) 'phase1-source-datum-left) #t)
+(check-eq
+  (= (fst (rst (rst phase1-source-datum-body))) 'phase1-source-datum-right)
+  #t)
+(check-eq (rst (rst (rst phase1-source-datum-body))) nil)
+(check-eq (rst (rst phase1-source-datum-tail)) nil)
+(check-eq
+  (error-name
+    (try (source-datum phase1-source-datum-subject 1)
+         (catch phase1-source-datum-limit-error phase1-source-datum-limit-error)))
+  "Unsupported")
+(check-eq
+  (error-name
+    (try (source-datum 42)
+         (catch phase1-source-datum-type-error phase1-source-datum-type-error)))
+  "TypeMismatch")
+(check-eq
+  (error-name
+    (try (source-datum phase1-source-datum-subject "one")
+         (catch phase1-source-datum-limit-type-error phase1-source-datum-limit-type-error)))
+  "TypeMismatch")
+
+; ==============================================================================
+; Bound-code inspection and Phase 2 binding/lowering semantics.
+; ==============================================================================
+(def phase2-bound-capture-payload 424242)
+(defn (phase2-make-bound-subject phase2-captured-value)
+  (fn (phase2-input)
+    (+ phase2-captured-value phase2-input)))
+(def phase2-bound-subject
+  (phase2-make-bound-subject phase2-bound-capture-payload))
+(check-num (phase2-bound-subject 8) 424250)
+
+(def phase2-bound-view (bound-code phase2-bound-subject))
+(check-eq (fst phase2-bound-view) :code-v1)
+(check-eq (string-includes? (format "~s" phase2-bound-view) "0x") #f)
+(check-eq (string-includes? (format "~s" phase2-bound-view) "424242") #f)
+(check-eq
+  (error-name
+    (try (bound-code phase2-bound-subject 1)
+         (catch phase2-bound-limit-error phase2-bound-limit-error)))
+  "Unsupported")
+
+(defn (phase2-make-generated-primal phase2-scale)
+  (fn (phase2-x)
+    (* phase2-scale (* phase2-x phase2-x))))
+(def phase2-generated-primal
+  (phase2-make-generated-primal 271828.0))
+(def phase2-generated-derivative (deriv phase2-generated-primal))
+(check-num (phase2-generated-derivative 3.0) 1630968.0)
+(def phase2-generated-bound-view
+  (bound-code phase2-generated-derivative))
+(check-eq (fst phase2-generated-bound-view) :code-v1)
+(check-eq (string-includes? (format "~s" phase2-generated-bound-view) "0x") #f)
+(check-eq
+  (string-includes? (format "~s" phase2-generated-bound-view) "271828")
+  #f)
+
+(def phase2-let-effects (hash-map :first 0 :second 0))
+(def phase2-let-result
+  (let ((phase2-let-base 5))
+    (map-set! phase2-let-effects :first 11)
+    (map-set! phase2-let-effects :second (+ phase2-let-base 7))
+    (+ phase2-let-base 40)))
+(check-num phase2-let-result 45)
+(check-num (map-get phase2-let-effects :first) 11)
+(check-num (map-get phase2-let-effects :second) 12)
+
+(defn (phase2-quote-subject phase2-quoted-name)
+  'phase2-quoted-name)
+(check-eq
+  (phase2-quote-subject "not-the-quoted-symbol")
+  'phase2-quoted-name)
+
+(defn (phase2-shadow-subject phase2-shadow-value)
+  (let ((phase2-shadow-value (+ phase2-shadow-value 1)))
+    (let ((phase2-shadow-value (* phase2-shadow-value 2)))
+      phase2-shadow-value)))
+(check-num (phase2-shadow-subject 4) 10)
+; ==============================================================================
+; source and/or short-circuit values and left-to-right effects.
+; ==============================================================================
+(check-eq (and) #t)
+(check-eq (or) #f)
+(check-eq (and 1 nil #t) nil)
+(check-eq (or #f nil #f) #f)
+(def phase1-and-or-effects (hash-map :and nil :or-first nil :or-late nil :left nil :right nil))
+(check-eq (and #f (map-set! phase1-and-or-effects :and 1)) #f)
+(check-eq (map-get phase1-and-or-effects :and) nil)
+(check-eq
+  (or (begin (map-set! phase1-and-or-effects :or-first 1) 'winner)
+      (map-set! phase1-and-or-effects :or-late 1))
+  'winner)
+(check-eq (map-get phase1-and-or-effects :or-late) nil)
+(check-eq
+  (and (begin (map-set! phase1-and-or-effects :left 7) #t)
+       (begin (map-set! phase1-and-or-effects :right (map-get phase1-and-or-effects :left)) 'last))
+  'last)
+(check-num (map-get phase1-and-or-effects :right) 7)
+(def phase1-and-or-identity (fn () nil))
+(check-eq (and #t phase1-and-or-identity) phase1-and-or-identity)
+(check-eq (or #f phase1-and-or-identity (raise "unreachable")) phase1-and-or-identity)
+(check-eq ((fn (f) (f #t #t)) and) #t)
+
+; ==============================================================================
+; letrec and letrec* prebind names, then initialize sequentially.
+; ==============================================================================
+(check-num (letrec ((a 1) (b (+ a 1))) b) 2)
+(check-eq
+  (error-name
+    (try (letrec ((a b) (b 7)) a)
+         (catch phase1-letrec-uninitialized phase1-letrec-uninitialized)))
+  "UninitializedBinding")
+(check-eq
+  (error-name
+    (try (letrec* ((a b) (b 7)) a)
+         (catch phase1-letrec-star-uninitialized phase1-letrec-star-uninitialized)))
+  "UninitializedBinding")
+(check-eq (letrec ((a nil) (b a)) b) nil)
+(check-eq (letrec* ((a nil) (b a)) b) nil)
+(def phase1-fast-lookup-parent 42)
+(check-eq (let ((phase1-fast-lookup-parent nil)) phase1-fast-lookup-parent) nil)
+(check-eq (let ((phase1-fast-lookup-parent #f)) phase1-fast-lookup-parent) #f)
+(check-eq
+  (error-name
+    (try (letrec ((phase1-fast-lookup-parent phase1-fast-lookup-parent))
+           phase1-fast-lookup-parent)
+         (catch phase1-fast-lookup-uninitialized phase1-fast-lookup-uninitialized)))
+  "UninitializedBinding")
+(check-eq
+  (error-name
+    (letrec ((saved-error
+              (try (fst 42)
+                   (catch phase1-saved-error phase1-saved-error))))
+      saved-error))
+  "TypeMismatch")
+(check-eq
+  (error-name
+    (let ((saved-error
+           (try (letrec ((a b) (b 7)) a)
+                (catch phase1-captured-uninitialized phase1-captured-uninitialized))))
+      saved-error))
+  "UninitializedBinding")
+(check-num (letrec* ((a 1) (b (+ a 1))) b) 2)
+(check-num (letrec ((a 1) (a 2)) a) 2)
+(check-num (letrec ((even? (fn (n) (if (= n 0) #t (odd? (- n 1)))))
+                    (odd? (fn (n) (if (= n 0) #f (even? (- n 1)))))
+                    (fact (fn (n) (if (= n 0) 1 (* n (fact (- n 1)))))))
+            (if (even? 20) (fact 6) 0))
+          720)
+(check-num (letrec ((read-late (fn () later)) (later 19)) (read-late)) 19)
+
+; ==============================================================================
+; fixed and dotted rest parameters.
+; ==============================================================================
+(check-num ((fn () 42)) 42)
+(check-eq ((fn rest rest)) nil)
+(check-eq (equal? ((fn rest rest) 1 2 3) (list 1 2 3)) #t)
+(check-num ((fn (first . rest) first) 8) 8)
+(check-eq ((fn (first . rest) rest) 8) nil)
+(check-eq (equal? ((fn (first . rest) rest) 8 9 10) (list 9 10)) #t)
+(defn (phase1-tail-rest n . rest)
+  (if (= n 0) rest (phase1-tail-rest (- n 1) 1 2 3)))
+(check-eq (equal? (phase1-tail-rest 10000 1 2 3) (list 1 2 3)) #t)
+(defn (phase1-rest-capture-maker prefix . rest)
+  (fn () (list prefix rest)))
+(check-eq
+  (equal? ((phase1-rest-capture-maker 4 5 6)) (list 4 (list 5 6)))
+  #t)
+(check-eq
+  (error-name
+    (try ((fn (required) required))
+         (catch phase1-fixed-underflow phase1-fixed-underflow)))
+  "ArityMismatch")
+(check-eq
+  (error-name
+    (try ((fn (fixed) fixed) 1 2)
+         (catch phase1-fixed-overflow phase1-fixed-overflow)))
+  "ArityMismatch")
+(check-eq
+  (error-name
+    (try ((fn (required . rest) required))
+         (catch phase1-rest-underflow phase1-rest-underflow)))
+  "ArityMismatch")
+
+; ==============================================================================
+; Lexical assignment: set! mutates the nearest binding without binding a name.
+; ==============================================================================
+(def phase1-set-top 1)
+(check-num (set! phase1-set-top (+ phase1-set-top 1)) 2)
+(check-num phase1-set-top 2)
+(check-num
+  (let ((phase1-set-shadow 1))
+    (begin
+      (set! phase1-set-shadow 5)
+      phase1-set-shadow))
+  5)
+(def phase1-set-shadow 9)
+(check-num
+  (let ((phase1-set-shadow 1))
+    (let ((phase1-set-shadow 5))
+      (set! phase1-set-shadow 7))
+    phase1-set-shadow)
+  1)
+(check-num phase1-set-shadow 9)
+(defn (phase1-set-parameter phase1-set-value)
+  (begin (set! phase1-set-value 42) phase1-set-value))
+(check-num (phase1-set-parameter 7) 42)
+(defn (phase1-make-counter phase1-counter-value)
+  (fn ()
+    (begin
+      (set! phase1-counter-value (+ phase1-counter-value 1))
+      phase1-counter-value)))
+(def phase1-counter (phase1-make-counter 0))
+(check-num (phase1-counter) 1)
+(check-num (phase1-counter) 2)
+(defn (phase1-make-nested-counter phase1-nested-counter-value)
+  (fn () (fn ()
+    (begin
+      (set! phase1-nested-counter-value (+ phase1-nested-counter-value 1))
+      phase1-nested-counter-value))))
+(def phase1-nested-counter ((phase1-make-nested-counter 10)))
+(check-num (phase1-nested-counter) 11)
+(check-num (phase1-nested-counter) 12)
+(check-eq
+  (error-name
+    (try (set! phase1-set-unbound 3)
+         (catch phase1-set-unbound-error phase1-set-unbound-error)))
+  "Unbound")
+(check-num
+  (try (raise 4)
+       (catch phase1-set-catch-value
+         (begin
+           (set! phase1-set-catch-value 8)
+           phase1-set-catch-value)))
+  8)
+(def phase1-set-catch-counter
+  (try (raise 10)
+       (catch phase1-set-captured-value
+         (fn ()
+           (begin
+             (set! phase1-set-captured-value (+ phase1-set-captured-value 1))
+             phase1-set-captured-value)))))
+(check-num (phase1-set-catch-counter) 11)
+(check-num (phase1-set-catch-counter) 12)
+(defn (phase1-set-type-guard phase1-type-value)
+  (if (int? phase1-type-value)
+      (begin
+        (set! phase1-type-value "not-an-integer")
+        (+ phase1-type-value 1))
+      "not-an-integer"))
+(check-eq
+  (error-name
+    (try (phase1-set-type-guard 7)
+         (catch phase1-set-type-error phase1-set-type-error)))
+  "ArityMismatch")
+(defn (phase1-set-tail phase1-tail-count phase1-tail-value)
+  (if (= phase1-tail-count 0)
+      (set! phase1-tail-value 99)
+      (phase1-set-tail (- phase1-tail-count 1) phase1-tail-value)))
+(check-num (phase1-set-tail 20000 0) 99)
+
+; ==============================================================================
+; do: sequential init, pre-body test, parallel steps, and lexical scope.
+; ==============================================================================
+(check-num (do ((phase1-do-i 0 (+ phase1-do-i 1)))
+               ((= phase1-do-i 5) phase1-do-i))
+  5)
+(check-num
+  (do ((phase1-do-a 0 (+ phase1-do-a 1))
+       (phase1-do-b 100 phase1-do-a))
+      ((= phase1-do-a 3) phase1-do-b))
+  2)
+(check-num
+  (do ((phase1-do-first 1)
+       (phase1-do-second (+ phase1-do-first 1)))
+      (#t phase1-do-second))
+  2)
+(check-num (do ((phase1-do-fixed 5)) ((= phase1-do-fixed 5) phase1-do-fixed)) 5)
+(check-eq
+  (do ((phase1-do-no-result 0 (+ phase1-do-no-result 1)))
+      ((= phase1-do-no-result 2))
+      )
+  nil)
+(check-num (do () (#t 42)) 42)
+(check-num
+  (do ((phase1-do-nil 0 (+ phase1-do-nil 1)))
+      ((if (= phase1-do-nil 2) 5 nil) phase1-do-nil))
+  2)
+(def phase1-do-effects (hash-map :sum 0))
+(check-num
+  (do ((phase1-do-body-i 0 (+ phase1-do-body-i 1)))
+      ((= phase1-do-body-i 3) (map-get phase1-do-effects :sum))
+    (map-set! phase1-do-effects :sum
+      (+ (map-get phase1-do-effects :sum) phase1-do-body-i)))
+  3)
+(check-eq
+  (equal?
+    (let ((phase1-do-shadow 9))
+      (list
+        (do ((phase1-do-shadow 0 (+ phase1-do-shadow 1)))
+            ((= phase1-do-shadow 2) phase1-do-shadow))
+        phase1-do-shadow))
+    (list 2 9))
+  #t)
+(defn (phase1-do-tail phase1-do-tail-count)
+  (do ((phase1-do-loop 0 (+ phase1-do-loop 1)))
+      ((= phase1-do-loop 1)
+        (if (= phase1-do-tail-count 0)
+            "done"
+            (phase1-do-tail (- phase1-do-tail-count 1))))))
+(check-eq (phase1-do-tail 10000) "done")
+
+; ==============================================================================
+; eval: compile a datum in the current or explicit namespace.
+; ==============================================================================
+(check-num (eval '(+ 1 2)) 3)
+(check-num ((fn (evaluate-form) (evaluate-form '(+ 4 5))) eval) 9)
+(check-eq (equal? (eval (read "(list 1 2 3)")) (list 1 2 3)) #t)
+(def phase1-eval-persistent 0)
+(check-num (eval '(def phase1-eval-persistent 17)) 17)
+(check-num phase1-eval-persistent 17)
+(check-num
+  (let ((phase1-eval-visible 5))
+    (eval 'phase1-eval-visible))
+  5)
+(check-num
+  (let ((phase1-eval-local-scope 1))
+    (begin
+      (eval '(def phase1-eval-local-definition 6))
+      phase1-eval-local-definition))
+  6)
+(check-eq
+  (error-name
+    (try phase1-eval-local-definition
+         (catch phase1-eval-local-error phase1-eval-local-error)))
+  "Unbound")
+(def phase1-eval-target (load "fixtures/eval-target.pt"))
+(check-eq (namespace? phase1-eval-target) #t)
+(check-num (eval 'phase1-eval-target-initial phase1-eval-target) 7)
+(check-num (:phase1-eval-target-initial phase1-eval-target) 7)
+(check-eq
+  (error-name (eval '(def phase1-eval-explicit-value 31) phase1-eval-target))
+  "Denied")
+(check-eq
+  (error-name
+    (try phase1-eval-explicit-value
+         (catch phase1-eval-no-leak phase1-eval-no-leak)))
+  "Unbound")
+(check-eq (error-name (eval '(phase1-eval-missing 1))) "Unbound")
+(check-eq (error-name (eval '(+ 1 2 3))) "ArityMismatch")
+(check-eq
+  (try (eval '(+ 1 2) 3)
+       (catch phase1-eval-ns-error (error-name phase1-eval-ns-error)))
+  "TypeMismatch")
+
+(write "\nALL-OK\n")

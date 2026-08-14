@@ -1,0 +1,106 @@
+#!/usr/bin/env skript
+;; control.pt — control flow and closures.
+;; Shows: if, let (multi-binding + shadowing), case with else, begin,
+;; and/or/not, quote, closures, higher-order functions over cons lists,
+;; nested closures carrying recursive state, and tail recursion.
+;; Labels print raw via display; write round-trips values (strings
+;; quoted). Run: ./zig-out/bin/skript demo/control.pt
+
+(display "--- 1. if ---\n")
+(display "true branch: ") (write (if (> 3 2) "bigger" "smaller")) (display "\n")
+(display "false branch: ") (write (if (< 3 2) "bigger" "smaller")) (display "\n")
+(display "nested if: ") (write (if (< 3 2) "no" (if (> 5 4) "yes" "no"))) (display "\n")
+
+(display "--- 2. let ---\n")
+(let ((a 1) (b 2) (c 3)) (begin (display "a + b + c = ") (write (+ (+ a b) c)) (display "\n")))
+(let ((x 1))
+  (begin
+    (let ((x 2) (y x))
+      (begin
+        (display "inner x = ") (write x) (display ", y sees the new x = ") (write y) (display "\n")))
+    (display "outer x = ") (write x) (display "\n")))
+
+(display "--- 3. case ---\n")
+(defn (describe n)
+  (case n
+    ((0) "zero")
+    ((1) "one")
+    ((2 3) "two or three")
+    (else "many")))
+(display "describe 0: ") (write (describe 0)) (display "\n")
+(display "describe 3: ") (write (describe 3)) (display "\n")
+(display "describe 9: ") (write (describe 9)) (display "\n")
+
+(display "--- 4. begin / and / or / not ---\n")
+(display "begin returns last: ") (write (begin 1 2 3)) (display "\n")
+(display "and: ") (write (and (> 2 1) (< 3 5))) (display "\n")
+(display "or: ") (write (or #f (< 1 2))) (display "\n")
+(display "not: ") (write (not (= 1 2))) (display "\n")
+
+(display "--- 5. quote ---\n")
+(display "quoted symbol: ") (write 'foo) (display "\n")
+(display "quoted list: ") (write (quote (1 2))) (display "\n")
+
+(display "--- 6. closures ---\n")
+(defn (make-adder n) (fn (x) (+ x n)))
+(def add5 (make-adder 5))
+(display "add5(3) = ") (write (add5 3)) (display "\n")
+(display "add5(10) = ") (write (add5 10)) (display "\n")
+(def add1 (make-adder 1))
+(display "add1(100) = ") (write (add1 100)) (display "\n")
+
+(display "--- 7. higher-order functions ---\n")
+(defn (map-list f xs)
+  (if (nil? xs)
+      nil
+      (cons (f (fst xs)) (map-list f (rst xs)))))
+
+(defn (fold-list f acc xs)
+  (if (nil? xs)
+      acc
+      (fold-list f (f acc (fst xs)) (rst xs))))
+
+(defn (filter-list pred xs)
+  (if (nil? xs)
+      nil
+      (if (pred (fst xs))
+          (cons (fst xs) (filter-list pred (rst xs)))
+          (filter-list pred (rst xs)))))
+
+(display "map square: ") (write (map-list (fn (x) (* x x)) (list 1 2 3 4))) (display "\n")
+(display "fold sum: ") (write (fold-list (fn (a b) (+ a b)) 0 (list 1 2 3 4 5))) (display "\n")
+(display "filter evens: ") (write (filter-list (fn (x) (= 0 (mod x 2))) (list 1 2 3 4 5 6))) (display "\n")
+
+(display "--- 8. nested closures ---\n")
+(defn (curry-add a) (fn (b) (fn (c) (+ (+ a b) c))))
+(display "curry-add(1)(2)(3) = ") (write (((curry-add 1) 2) 3)) (display "\n")
+
+(defn (make-accumulator total)
+  (fn (xs)
+    (if (nil? xs)
+        total
+        ((make-accumulator (+ total (fst xs))) (rst xs)))))
+
+(def acc0 (make-accumulator 0))
+(display "acc0(1 2 3 4) = ") (write (acc0 (list 1 2 3 4))) (display "\n")
+(def acc100 (make-accumulator 100))
+(display "acc100(1 2) = ") (write (acc100 (list 1 2))) (display "\n")
+
+(display "--- 9. tail recursion ---\n")
+(defn (countdown n)
+  (if (< n 1)
+      (display "lift off!\n")
+      (begin
+        (write n) (display " ")
+        (countdown (- n 1)))))
+
+(countdown 5)
+
+(defn (sum-to n acc)
+  (if (< n 1)
+      acc
+      (sum-to (- n 1) (+ acc n))))
+
+(display "sum-to(1000000) = ") (write (sum-to 1000000 0)) (display "\n")
+
+(display "done\n")

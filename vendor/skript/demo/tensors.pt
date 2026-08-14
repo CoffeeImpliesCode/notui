@@ -1,0 +1,101 @@
+#!/usr/bin/env skript
+; tensors.pt — the tensor tour
+;
+; Every proto tensor operation in one guided tour: literals,
+; introspection, reshape, reductions, transforms, restructure,
+; combining ops, equality, inner types, and a data-analysis finale.
+;
+; Tensors are column-major (the FIRST axis varies fastest), so the
+; printed rows of chunk/zip/reshape/outer/trans are strided — the
+; comments below call out each place this shows.
+;
+; Labels print raw via display: section headers and "\n" come out as
+; real line breaks; write still round-trips values (strings quoted).
+
+(display "--- literals ---\n")
+(display "flat tensor: ") (write [1 2 3]) (display "\n")
+(display "nested tensor: ") (write [[1 2] [3 4]]) (display "\n")
+(display "empty tensor: ") (write []) (display "\n")
+; inner types: f64 and string elements round-trip through the printer.
+(display "f64 tensor: ") (write [1.5 2.5]) (display "\n")
+(display "string tensor: ") (write ["a" "bb"]) (display "\n")
+
+(display "--- introspection ---\n")
+(display "shape of [1 2 3]: ") (write (tensor-shape [1 2 3])) (display "\n")
+(display "shape of [[1 2] [3 4]]: ") (write (tensor-shape [[1 2] [3 4]])) (display "\n")
+(display "rank of [[1 2] [3 4]]: ") (write (tensor-rank [[1 2] [3 4]])) (display "\n")
+(display "len of [[1 2] [3 4]] (leading axis): ") (write (tensor-len [[1 2] [3 4]])) (display "\n")
+(display "len of []: ") (write (tensor-len [])) (display "\n")
+(display "tensor-get [10 20 30] 1: ") (write (tensor-get [10 20 30] 1)) (display "\n")
+; column-major: index (1,0) is flat offset 1*1 + 0*2 = 1; the flat
+; data is [1 3 2 4], so the element is 3 (row 1, column 0).
+(display "tensor-get [[1 2] [3 4]] 1 0: ") (write (tensor-get [[1 2] [3 4]] 1 0)) (display "\n")
+
+(display "--- generation & reshape ---\n")
+(display "iota 5: ") (write (iota 5)) (display "\n")
+; column-major fill: row 0 = 0 2 4, row 1 = 1 3 5 (strided by 2).
+(display "reshape (iota 6) [2 3]: ") (write (reshape (iota 6) [2 3])) (display "\n")
+; the shape argument may be a rank-1 i64 tensor or a cons list.
+(display "reshape (iota 6) (2 3): ") (write (reshape (iota 6) (list 2 3))) (display "\n")
+
+(display "--- reductions ---\n")
+(display "fold [1 2 3 4] +: ") (write (fold [1 2 3 4] +)) (display "\n")
+(display "scan [1 2 3] +: ") (write (scan [1 2 3] +)) (display "\n")
+(display "max [3 1 2]: ") (write (max [3 1 2])) (display "\n")
+(display "min [3 1 2]: ") (write (min [3 1 2])) (display "\n")
+(display "fold [[1 2] [3 4]] 0 + (column sums): ") (write (fold [[1 2] [3 4]] 0 +)) (display "\n")
+(display "fold [[1 2] [3 4]] 1 + (row sums): ") (write (fold [[1 2] [3 4]] 1 +)) (display "\n")
+
+(display "--- transforms ---\n")
+(display "map squares: ") (write (map [1 2 3] (fn (x) (* x x)))) (display "\n")
+(display "keep > 2: ") (write (keep [1 2 3 4] (fn (x) (> x 2)))) (display "\n")
+(display "uniq [1 1 2 2 2 3]: ") (write (uniq [1 1 2 2 2 3])) (display "\n")
+(display "where [0 5 0 7] (nonzero indices): ") (write (where [0 5 0 7])) (display "\n")
+(display "diff [1 3 6 10]: ") (write (diff [1 3 6 10])) (display "\n")
+
+(display "--- restructure ---\n")
+; column-major ravel: [1 3 2 4] (first axis varies fastest).
+(display "flat [[1 2] [3 4]]: ") (write (flat [[1 2] [3 4]])) (display "\n")
+(display "trans [[1 2] [3 4]]: ") (write (trans [[1 2] [3 4]])) (display "\n")
+(display "rev [1 2 3]: ") (write (rev [1 2 3])) (display "\n")
+(display "rot 1 [1 2 3]: ") (write (rot 1 [1 2 3])) (display "\n")
+(display "rot -1 [1 2 3]: ") (write (rot -1 [1 2 3])) (display "\n")
+; column-major quirk: the chunk axis becomes the printed row, so
+; chunk 0 = [1 3] (elements 1,3) and chunk 1 = [2 4].
+(display "chunk 2 [1 2 3 4]: ") (write (chunk 2 [1 2 3 4])) (display "\n")
+(display "take 2 [1 2 3 4]: ") (write (take 2 [1 2 3 4])) (display "\n")
+(display "drop 2 [1 2 3 4]: ") (write (drop 2 [1 2 3 4])) (display "\n")
+(display "cat [1 2] [3 4]: ") (write (cat [1 2] [3 4])) (display "\n")
+; part splits by predicate: fst = passing, rst = failing.
+(display "part [1 2 3 4] (> 2):\n")
+(let ((p (part [1 2 3 4] (fn (x) (> x 2)))))
+  (begin
+    (display "  passing: ") (write (fst p)) (display "\n")
+    (display "  failing: ") (write (rst p)) (display "\n")))
+
+(display "--- combining ---\n")
+; outer is the table product; column-major: [[3 4 5] [6 8 10]].
+(display "outer [1 2] [3 4 5] *: ") (write (outer [1 2] [3 4 5] *)) (display "\n")
+(display "dot [1 2 3] [4 5 6]: ") (write (dot [1 2 3] [4 5 6])) (display "\n")
+; matrix multiply via dot: [[19 22] [43 50]].
+(display "dot [[1 2] [3 4]] [[5 6] [7 8]]: ") (write (dot [[1 2] [3 4]] [[5 6] [7 8]])) (display "\n")
+; column-major quirk: the pair axis is the LAST axis, so pairs print
+; as columns: [[1 5] [4 3] [2 6]] = pairs (1,4) (2,5) (3,6).
+(display "zip [1 2 3] [4 5 6]: ") (write (zip [1 2 3] [4 5 6])) (display "\n")
+(display "map2 [1 2 3] [4 5 6] +: ") (write (map2 [1 2 3] [4 5 6] +)) (display "\n")
+
+(display "--- equality ---\n")
+(display "(= [1 2] [1 2]): ") (write (= [1 2] [1 2])) (display "\n")
+(display "(= [1 2] [1 3]): ") (write (= [1 2] [1 3])) (display "\n")
+(display "(= [[1 2] [3 4]] [[1 2] [3 4]]): ") (write (= [[1 2] [3 4]] [[1 2] [3 4]])) (display "\n")
+
+(display "--- data analysis mini-pipeline ---\n")
+; squares of 1..5, then reduce/scan/filter over the result.
+(def squares (map [1 2 3 4 5] (fn (x) (* x x))))
+(display "squares: ") (write squares) (display "\n")
+(display "sum of squares: ") (write (fold squares +)) (display "\n")
+(display "running sum of squares: ") (write (scan squares +)) (display "\n")
+(display "largest square: ") (write (max squares)) (display "\n")
+(display "squares > 10: ") (write (keep squares (fn (x) (> x 10)))) (display "\n")
+
+(display "done\n")

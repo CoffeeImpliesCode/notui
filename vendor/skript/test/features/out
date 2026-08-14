@@ -1,0 +1,363 @@
+
+=== Numeric Literals ===
+PASS: int 42
+PASS: int -5
+PASS: int +7
+PASS: int 0
+PASS: float 3.14
+PASS: float 1e7
+PASS: float 2.5e3
+PASS: float 1e-3
+
+=== Boolean & Null ===
+PASS: #t
+PASS: #f
+PASS: null is falsy
+
+=== Arithmetic ===
+PASS: i64 +
+PASS: i64 -
+PASS: i64 *
+PASS: i64 /
+PASS: i64 nested
+PASS: i64 chain
+PASS: f64 +
+PASS: f64 -
+PASS: f64 *
+PASS: f64 /
+PASS: f64 nested
+
+=== Comparisons ===
+PASS: i64 =
+PASS: i64 !=
+PASS: i64 !=
+PASS: i64 >
+PASS: i64 <
+PASS: i64 <
+PASS: i64 >=
+PASS: i64 <=
+PASS: i64 >=
+PASS: f64 =
+PASS: f64 =
+PASS: f64 !=
+PASS: f64 !=
+PASS: f64 >
+PASS: f64 >
+PASS: f64 <
+PASS: f64 >=
+PASS: f64 <=
+
+=== Boolean Logic ===
+PASS: and #t #t
+PASS: and #t #f
+PASS: and #f #t
+PASS: and #f #f
+PASS: or #t #f
+PASS: or #f #t
+PASS: or #f #f
+PASS: not #t
+PASS: not #f
+PASS: @bool.and
+PASS: @bool.and
+PASS: @bool.or
+PASS: @bool.or
+PASS: @bool.not
+PASS: @bool.not
+
+=== Definitions & Functions ===
+PASS: def value
+PASS: defn identity
+PASS: defn identity float
+PASS: defn add-two
+PASS: defn polynomial
+PASS: fib 1
+PASS: fib 2
+PASS: fib 3
+PASS: fib 10
+PASS: fib-iter 0
+PASS: fib-iter 1
+PASS: fib-iter 5
+PASS: fib-iter 10
+PASS: fib-iter 20
+PASS: fact 0
+PASS: fact 1
+PASS: fact 5
+PASS: fact 10
+PASS: closure add5
+PASS: closure add10
+PASS: closure captures outer var
+
+=== Control Flow ===
+PASS: if #t
+PASS: if #f
+PASS: if (= 3.0 3.0)
+PASS: if (= 2.0 3.0) 0 42
+PASS: nested if
+PASS: begin (implicit)
+
+=== Case Expressions ===
+PASS: case basic
+PASS: case else
+PASS: case second
+PASS: case no match
+PASS: case complex
+PASS: case nested
+PASS: case single key
+PASS: case computed key
+
+=== Pairs & Lists ===
+PASS: fst cons
+PASS: rst cons
+PASS: fst list
+PASS: rst list car
+PASS: empty list
+PASS: nested fst
+PASS: nested last
+
+=== Type Predicates ===
+PASS: Bool? #t
+PASS: Bool? 42
+PASS: i64? 42
+PASS: i64? 3.14
+PASS: f64? 3.14
+PASS: String? hello
+PASS: Type? Type
+PASS: is-instance-of? Bool #t
+PASS: is-instance-of? f64 1.0
+PASS: is-instance-of? Bool 1
+PASS: @is-instance-of? Bool #t
+PASS: @is-instance-of? f64 1.0
+PASS: @is-instance-of? Bool 1
+PASS: is-core-type? Bool
+PASS: is-core-type? f64
+PASS: is-core-type? 42
+PASS: type 42 is Type
+PASS: type 3.14 is Type
+
+=== Math Functions ===
+PASS: sqrt 4
+PASS: sqrt 9
+PASS: sin 0
+PASS: cos 0
+PASS: tan 0
+PASS: asin 1.0
+PASS: acos 0.0
+PASS: atan 1.0
+PASS: atan2 1.0 1.0
+PASS: sinh 0.5
+PASS: cosh 0.5
+PASS: tanh 0.5
+PASS: exp 0
+PASS: exp 1
+PASS: log 1
+PASS: log e
+PASS: log2 8
+PASS: log10 100
+PASS: pow 2^3
+PASS: pow 4^0.5
+PASS: hypot 3 4
+PASS: floor 3.7
+PASS: ceil 3.7
+PASS: round 3.7
+PASS: trunc 3.7
+PASS: abs -3
+PASS: min 2 5
+PASS: max 2 5
+PASS: sign 3
+PASS: sign 0
+PASS: sign -5
+PASS: sin^2+cos^2=1
+PASS: cosh^2-sinh^2=1
+
+=== Constants ===
+PASS: pi
+PASS: f64.pi
+PASS: tau
+PASS: f64.tau
+
+=== Integer-Specific Ops ===
+PASS: @i64.neg
+PASS: @i64.abs
+PASS: @i64.sign -42
+PASS: @i64.sign 0
+PASS: @i64.sign 42
+PASS: @i64.rem 14 3
+PASS: @i64.mod 14 3
+PASS: @i64.rem -7 3
+PASS: @i64.mod -7 3
+PASS: @i64.pow 2^10
+PASS: @i64.pow 3^3
+PASS: @i64.shl 1<<3
+PASS: @i64.shr 32>>3
+PASS: @i64.from-f64 42.0
+PASS: @i64.clamp below
+PASS: @i64.clamp in
+PASS: @i64.clamp above
+PASS: @i64.is-odd? 3
+PASS: @i64.is-odd? 4
+PASS: @i64.is-even? 4
+PASS: @i64.is-even? 3
+
+=== Float-Specific Ops ===
+PASS: deg->rad 180
+PASS: rad->deg pi
+PASS: f64.nextafter >
+PASS: f64.prevbefore <
+PASS: f64.expm1 0
+PASS: f64.log1p 0
+PASS: f64.is-nan? 0
+PASS: f64.is-inf? 0
+PASS: f64.is-finite? 0
+PASS: f64.is-zero? 0.0
+PASS: f64.is-zero? 1.0
+PASS: f64.clamp below
+PASS: f64.clamp in
+PASS: f64.clamp above
+
+=== Complex Numbers ===
+PASS: @c64.re 1+2i
+PASS: @c64.im 1+2i
+PASS: @c64.re 3.0-4.5i
+PASS: @c64.im 3.0-4.5i
+PASS: @c64.re 5i
+PASS: @c64.im 5i
+PASS: @c64.re -5i
+PASS: @c64.im -5i
+PASS: @c64.re -1+2i
+PASS: @c64.im -1+2i
+PASS: c64.abs 3+4i
+PASS: c64.abs 0-5i
+PASS: c64.abs -3+4i
+PASS: c64.cart is c64
+PASS: c64.cart abs
+PASS: c64.cart norm
+PASS: @c64.re (+ 1+2i 3+2i)
+PASS: @c64.im (+ 1+2i 3+2i)
+PASS: is-instance-of? c64 for complex 3 4
+PASS: @c64.re (conj 1+2i)
+PASS: @c64.im (conj 1+2i)
+PASS: re 1+2i
+PASS: im 1+2i
+
+=== Strings ===
+PASS: basic string
+PASS: empty string
+PASS: escape \n
+PASS: escape \t
+PASS: escape \r
+PASS: escape \"
+PASS: escape \\
+PASS: escape hex \x41
+PASS: escape unicode \u{1f600}
+
+=== Float Constructors ===
+PASS: f32 construct
+PASS: f16 construct
+PASS: f64 construct zero
+
+=== Bytecode & Disassembly ===
+PASS: disasm! returns string
+
+=== Edge Cases ===
+PASS: f64 div by zero inf
+PASS: f64 sqrt 0
+PASS: f64 sqrt -1 nan
+PASS: f64 (- 0.0 3.0)
+PASS: abs (- 0.0 3.0)
+PASS: i64 (- 0 3)
+
+=== Truthiness ===
+PASS: else is truthy
+
+=== Sequential Eval ===
+PASS: redef sum
+
+=== f32 & f16 Types ===
+PASS: f32? (f32 1.0)
+PASS: f32 add
+PASS: f32 sqrt
+PASS: f32 eq
+PASS: f32 gt
+PASS: f16? (f16 1.0)
+PASS: f16 add
+
+=== rgba ===
+PASS: rgba red packed
+PASS: rgba green packed
+PASS: rgba blue packed
+PASS: rgba black
+
+=== Complex Ops ===
+PASS: @c64.add
+PASS: @c64.sub
+PASS: @c64.mul
+PASS: @c64.eq
+PASS: @c64.ne
+PASS: @c64.is-zero? 0+0i
+PASS: @c64.is-zero? 1+1i
+PASS: @c64.is-finite? 1+2i
+PASS: @c32.re from cart
+PASS: @c32.im from cart
+
+=== More Float Ops ===
+PASS: @f64.fract 3.7
+PASS: @f64.mod 7.5 3.0
+PASS: @f64.rem 7.5 3.0
+PASS: @f64.blend
+PASS: @f64.is-odd? 3
+PASS: @f64.is-even? 4
+
+=== Method Dispatch Coverage ===
+PASS: i64 = via method
+PASS: i64 = via method
+PASS: i64 < via method
+PASS: i64 > via method
+PASS: shl method
+PASS: shr method
+PASS: fract method
+PASS: mod method
+PASS: clamp method
+PASS: is-odd? method
+PASS: is-even? method
+PASS: re (conj 1+2i)
+PASS: im (conj 1+2i)
+
+=== f64 avg ===
+PASS: @f64.avg
+
+=== Integer Type Families ===
+PASS: i8.add
+PASS: i8.neg
+PASS: i16.add
+PASS: i16.sub
+PASS: i32.add
+PASS: i32.neg
+PASS: u8.add
+PASS: u16.add
+PASS: u32.add
+PASS: u64.add
+
+=== More f32 & f16 Ops ===
+PASS: f32.sin 0
+PASS: f32.cos 0
+PASS: f32.pow 2 3
+PASS: f32.fract
+PASS: f32.is-nan? 0
+PASS: f16.sin 0
+PASS: f16.cos 0
+
+=== Complex Expansions ===
+PASS: c64.mag
+PASS: c64.polar re
+PASS: c64.polar im
+PASS: c64.is-zero? 0+0i
+PASS: c64.is-nan? 1+2i
+PASS: c64.is-inf? 1+2i
+PASS: c64.is-finite? 1+2i
+PASS: c64.fract re
+PASS: c64.expm1 0+0i
+PASS: c64.log1p 0+0i
+
+=== All tests complete ===
+Check above for any FAIL lines.
+=> (null)

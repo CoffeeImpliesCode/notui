@@ -1,0 +1,68 @@
+#!/usr/bin/env -S skript
+
+; (def a 1)
+; (write (+ a 2))
+
+; (defn (b y)
+;   (fn (x) (+ x y)))
+
+; (def c (b 5.0))
+
+; (write ((b 6) 5))
+; (write (c 5))
+
+(defn (show-disasm! f) (write (disasm! f)))
+
+(defn (fib n)
+  (if (<= n 2)
+      1
+      (+ (fib (- n 1)) (fib (- n 2)))))
+
+; (defn (fib-fast n)
+;   (if (@f64.lte n 2)
+;       1
+;       (@f64.add (fib-fast (@f64.sub n 1)) (fib-fast (@f64.sub n 2)))))
+
+(defn (fib-iter-inner a b n)
+  (if (= n 0)
+      a
+      (fib-iter-inner b (+ a b) (- n 1))))
+(defn (fib-iter n)
+  (fib-iter-inner 0 1 n))
+
+(show-disasm! fib-iter)
+(show-disasm! fib-iter-inner)
+
+; (write (fib-iter 5))
+; (write (f32 1))
+(write (fib 35))
+; (write (fib-iter 70))
+; (show-disasm! fib-iter)
+; (show-disasm! fib-iter-inner)
+; (write (fib-fast 35))
+
+; (print-disasm! fib-iter)
+
+
+
+; (defn (fact n)
+;   (if (<= n 1)
+;       1
+;       (* n (fact (- n 1)))))
+
+; (defn (pythagoras x)
+;   (+ (* (sin x) (sin x))
+;      (* (cos x) (cos x))))
+
+; (write (pythagoras pi))
+; (write (atan2 1 1.5))
+; (write (approx? 1 2 0.0001))
+
+; (write (fact 10))
+; (write (+ (* 4 5) 2))
+; (write (+ 3 4))
+; (write (cons 1 2))
+; (write (fst (cons 1 2)))
+; (write (rst (cons 1 2)))
+; (write (list (cons 1 0) 2 3 4))
+; (write (list 1))

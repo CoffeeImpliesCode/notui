@@ -1,0 +1,22 @@
+; ============================================================================
+; API corpus: portable bytes and I/O.
+; The host-I/O edge cases run in the intrinsic unit tests with injected readers
+; and temporary files. This program checks the language-level bytevector API.
+; ============================================================================
+
+(defn (fail-msg got want)
+  (begin (write "\nFAIL ") (write got) (write " != ") (write want) (write "\n") (raise "check-failed")))
+(defn (check-eq got want)
+  (if (equal? got want) (write ".") (fail-msg got want)))
+(defn (check-num got want)
+  (if (= got want) (write ".") (fail-msg got want)))
+
+(def bytes (ByteVector (u8 0) (u8 65) (u8 255)))
+(check-eq (bytevector? bytes) #t)
+(check-num (bytevector-length bytes) 3)
+(check-num (bytevector-ref bytes 0) 0)
+(check-num (bytevector-ref bytes 1) 65)
+(check-num (bytevector-ref bytes 2) 255)
+(check-num (bytevector-length (ByteVector)) 0)
+
+(write "\nALL-OK\n")

@@ -1,0 +1,644 @@
+#!/usr/bin/env -S skript
+
+; ==============================================================================
+; Comprehensive Skript Test Suite
+;
+; Run via:     skript test/test.pt
+;
+; Note: `display` prints each arg on its own line (adds \n per call).
+; So tests output:  label  result
+; ==============================================================================
+
+; ---- Test Helpers ----
+; A test-eq that compares values and prints label + result
+(defn (test-eq label expected actual)
+  (if (= expected actual)
+    (display "PASS: " label "\n")
+    (display "FAIL: " label " expected " expected " got " actual "\n")))
+
+(defn (test-true label val)
+  (if val
+    (display "PASS: " label "\n")
+    (display "FAIL: " label " expected #t got " val "\n")))
+
+(defn (test-false label val)
+  (if (@bool.not val)
+    (display "PASS: " label "\n")
+    (display "FAIL: " label " expected #f got " val "\n")))
+
+(defn (test-approx label expected actual tolerance)
+  (if (approx? expected actual tolerance)
+    (display "PASS: " label "\n")
+    (display "FAIL: " label " expected " expected " got " actual "\n")))
+
+(defn (section label)
+  (display "\n=== " label " ===\n"))
+
+; ==============================================================================
+; SECTION 1: Numeric Literals
+; ==============================================================================
+(section "Numeric Literals")
+
+(test-eq "int 42" 42 42)
+(test-eq "int -5" -5 -5)
+(test-eq "int +7" 7 +7)
+(test-eq "int 0" 0 0)
+
+(test-eq "float 3.14" 3.14 3.14)
+(test-eq "float 1e7" 1e7 1e7)
+(test-eq "float 2.5e3" 2500.0 2.5e3)
+(test-eq "float 1e-3" 0.001 1e-3)
+
+; ==============================================================================
+; SECTION 2: Boolean & Null
+; ==============================================================================
+(section "Boolean & Null")
+
+(test-true "#t" #t)
+(test-false "#f" #f)
+(test-false "null is falsy" null)
+
+; ==============================================================================
+; SECTION 3: Arithmetic
+; ==============================================================================
+(section "Arithmetic")
+
+(test-eq "i64 +" 7 (+ 3 4))
+(test-eq "i64 -" 1 (- 3 2))
+(test-eq "i64 *" 12 (* 3 4))
+(test-eq "i64 /" 3 (/ 6 2))
+(test-eq "i64 nested" 10 (+ (* 2 3) 4))
+(test-eq "i64 chain" 10 (+ (+ 1 2) (+ 3 4)))
+
+(test-eq "f64 +" 7.0 (+ 3.0 4.0))
+(test-eq "f64 -" 1.0 (- 3.0 2.0))
+(test-eq "f64 *" 12.0 (* 3.0 4.0))
+(test-eq "f64 /" 2.0 (/ 6.0 3.0))
+(test-eq "f64 nested" 7.0 (+ (* 2.0 3.0) 1.0))
+
+; ==============================================================================
+; SECTION 4: Comparisons
+; ==============================================================================
+(section "Comparisons")
+
+(test-true "i64 ="    (= 3 3))
+(test-false "i64 !="  (!= 3 3))
+(test-true "i64 !="   (!= 3 4))
+(test-true "i64 >"    (> 3 2))
+(test-false "i64 <"   (< 3 2))
+(test-true "i64 <"    (< 2 3))
+(test-true "i64 >="   (>= 3 3))
+(test-true "i64 <="   (<= 3 3))
+(test-false "i64 >="  (>= 2 3))
+
+(test-true "f64 ="   (= 3.0 3.0))
+(test-false "f64 ="  (= 3.0 4.0))
+(test-true "f64 !="  (!= 3.0 4.0))
+(test-false "f64 !=" (!= 3.0 3.0))
+(test-true "f64 >"   (> 3.0 2.0))
+(test-false "f64 >"  (> 2.0 3.0))
+(test-true "f64 <"   (< 2.0 3.0))
+(test-true "f64 >="  (>= 3.0 3.0))
+(test-true "f64 <="  (<= 3.0 3.0))
+
+; ==============================================================================
+; SECTION 5: Boolean Logic
+; ==============================================================================
+(section "Boolean Logic")
+
+(test-true "and #t #t" (and #t #t))
+(test-false "and #t #f" (and #t #f))
+(test-false "and #f #t" (and #f #t))
+(test-false "and #f #f" (and #f #f))
+
+(test-true "or #t #f"  (or #t #f))
+(test-true "or #f #t"  (or #f #t))
+(test-false "or #f #f" (or #f #f))
+
+(test-false "not #t"   (not #t))
+(test-true "not #f"    (not #f))
+
+(test-true "@bool.and" (@bool.and #t #t))
+(test-false "@bool.and" (@bool.and #t #f))
+(test-true "@bool.or"  (@bool.or #f #t))
+(test-false "@bool.or" (@bool.or #f #f))
+(test-true "@bool.not" (@bool.not #f))
+(test-false "@bool.not" (@bool.not #t))
+
+; ==============================================================================
+; SECTION 6: Definitions & Functions
+; ==============================================================================
+(section "Definitions & Functions")
+
+(def my-val 42)
+(test-eq "def value" 42 my-val)
+
+(defn (identity x) x)
+(test-eq "defn identity" 42 (identity 42))
+(test-eq "defn identity float" 3.14 (identity 3.14))
+
+(defn (add-two a b) (+ a b))
+(test-eq "defn add-two" 5 (add-two 2 3))
+
+(defn (math-example x) (+ (+ (* x x) (* 2 x)) 1))
+(test-eq "defn polynomial" 9 (math-example 2))
+
+; recursive fib
+(defn (fib n)
+  (if (<= n 2) 1 (+ (fib (- n 1)) (fib (- n 2)))))
+
+(test-eq "fib 1" 1 (fib 1))
+(test-eq "fib 2" 1 (fib 2))
+(test-eq "fib 3" 2 (fib 3))
+(test-eq "fib 10" 55 (fib 10))
+
+; iterative fib — compiled to bytecode (tail call)
+(defn (fib-iter-inner a b n)
+  (if (= n 0) a (fib-iter-inner b (+ a b) (- n 1))))
+(defn (fib-iter n) (fib-iter-inner 0 1 n))
+
+(test-eq "fib-iter 0"  0 (fib-iter 0))
+(test-eq "fib-iter 1"  1 (fib-iter 1))
+(test-eq "fib-iter 5"  5 (fib-iter 5))
+(test-eq "fib-iter 10" 55 (fib-iter 10))
+(test-eq "fib-iter 20" 6765 (fib-iter 20))
+
+; factorial
+(defn (fact n) (if (<= n 1) 1 (* n (fact (- n 1)))))
+
+(test-eq "fact 0" 1 (fact 0))
+(test-eq "fact 1" 1 (fact 1))
+(test-eq "fact 5" 120 (fact 5))
+(test-eq "fact 10" 3628800 (fact 10))
+
+; lexical closures
+(defn (make-adder x) (fn (y) (+ x y)))
+(def add5 (make-adder 5))
+(test-eq "closure add5" 9 (add5 4))
+
+(def add10 (make-adder 10))
+(test-eq "closure add10" 15 (add10 5))
+
+; closure capturing free variable (fixed bug)
+(defn (f x) (fn (y) x))
+(def f5 (f 5))
+(test-eq "closure captures outer var" 5 (f5 99))
+
+; ==============================================================================
+; SECTION 7: Control Flow
+; ==============================================================================
+(section "Control Flow")
+
+(test-eq "if #t" 1 (if #t 1 2))
+(test-eq "if #f" 2 (if #f 1 2))
+(test-true "if (= 3.0 3.0)" (if (= 3.0 3.0) #t #f))
+(test-eq "if (= 2.0 3.0) 0 42" 42 (if (= 2.0 3.0) 0 42))
+(test-eq "nested if" 3 (if (= 1.0 1.0) (if (= 2.0 2.0) 3 4) 5))
+
+(defn (test-begin x)
+  (def tmp (+ x 1))
+  (def result (* tmp 2))
+  result)
+(test-eq "begin (implicit)" 22 (test-begin 10))
+
+; ==============================================================================
+; SECTION 8: Case Expressions
+; ==============================================================================
+(section "Case Expressions")
+
+(test-eq "case basic" 100 (case 2 ((1 2 3) 100)))
+(test-eq "case else" 200 (case 99 ((1 2 3) 100) (else 200)))
+(test-eq "case second" 20.0 (case 15.0 ((1.0 2.0) 10.0) ((10.0 15.0 20.0) 20.0) (else 999.0)))
+; case with no match returns null (falsy)
+(test-false "case no match" (case 42 ((1 2 3) 100)))
+(test-true "case complex" (case 3+4i ((1+2i 3+4i) #t) (else #f)))
+(test-eq "case nested" 10 (case 1 ((1) (case 2 ((2) 10) (else 20))) (else 30)))
+(test-eq "case single key" 42 (case 7 ((7) 42) (else 0)))
+(test-eq "case computed key" 100 (case 5 ((1 (+ 2 3) 7) 100) (else 0)))
+
+; ==============================================================================
+; SECTION 9: Pairs & Lists
+; ==============================================================================
+(section "Pairs & Lists")
+
+(def my-cons (cons 1 2))
+(test-eq "fst cons" 1 (fst my-cons))
+(test-eq "rst cons" 2 (rst my-cons))
+
+(def my-list (list 1 2 3))
+(test-eq "fst list" 1 (fst my-list))
+(test-eq "rst list car" 2 (fst (rst my-list)))
+
+; empty list should be null (falsy)
+(test-false "empty list" (list))
+
+(def nested (list (list 1 2) (list 3 4)))
+(test-eq "nested fst" 1 (fst (fst nested)))
+(test-eq "nested last" 4 (fst (rst (fst (rst nested)))))
+
+; ==============================================================================
+; SECTION 10: Type Predicates
+; ==============================================================================
+(section "Type Predicates")
+
+(test-true "Bool? #t" (Bool? #t))
+(test-false "Bool? 42" (Bool? 42))
+(test-true "i64? 42" (i64? 42))
+(test-false "i64? 3.14" (i64? 3.14))
+(test-true "f64? 3.14" (f64? 3.14))
+(test-true "String? hello" (String? "hello"))
+(test-true "Type? Type" (Type? Type))
+
+(test-true "is-instance-of? Bool #t" (is-instance-of? Bool #t))
+(test-true "is-instance-of? f64 1.0" (is-instance-of? f64 1.0))
+(test-false "is-instance-of? Bool 1" (is-instance-of? Bool 1))
+
+(test-true "@is-instance-of? Bool #t" (@is-instance-of? @Bool #t))
+(test-true "@is-instance-of? f64 1.0" (@is-instance-of? @f64 1.0))
+(test-false "@is-instance-of? Bool 1" (@is-instance-of? @Bool 1))
+
+(test-true "is-core-type? Bool" (is-core-type? Bool))
+(test-true "is-core-type? f64" (is-core-type? f64))
+(test-false "is-core-type? 42" (is-core-type? 42))
+
+; type returns a type value
+(test-true "type 42 is Type" (Type? (type 42)))
+(test-true "type 3.14 is Type" (Type? (type 3.14)))
+
+; ==============================================================================
+; SECTION 11: Math Functions
+; ==============================================================================
+(section "Math Functions")
+
+(test-eq "sqrt 4" 2.0 (sqrt 4.0))
+(test-eq "sqrt 9" 3.0 (sqrt 9.0))
+(test-eq "sin 0" 0.0 (sin 0.0))
+(test-eq "cos 0" 1.0 (cos 0.0))
+(test-eq "tan 0" 0.0 (tan 0.0))
+
+(test-approx "asin 1.0" (/ @f64.tau 4.0) (asin 1.0) 0.0001)
+(test-approx "acos 0.0" (/ @f64.tau 4.0) (acos 0.0) 0.0001)
+(test-approx "atan 1.0" (/ @f64.pi 4.0) (atan 1.0) 0.0001)
+(test-approx "atan2 1.0 1.0" (/ @f64.pi 4.0) (atan2 1.0 1.0) 0.0001)
+
+(test-approx "sinh 0.5" 0.521095 (sinh 0.5) 0.0001)
+(test-approx "cosh 0.5" 1.127626 (cosh 0.5) 0.0001)
+(test-approx "tanh 0.5" 0.462117 (tanh 0.5) 0.0001)
+
+(test-approx "exp 0" 1.0 (exp 0.0) 0.0001)
+(test-approx "exp 1" 2.718282 (exp 1.0) 0.0001)
+(test-approx "log 1" 0.0 (log 1.0) 0.0001)
+(test-approx "log e" 1.0 (log (exp 1.0)) 0.0001)
+(test-approx "log2 8" 3.0 (log2 8.0) 0.0001)
+(test-approx "log10 100" 2.0 (log10 100.0) 0.0001)
+
+(test-eq "pow 2^3" 8.0 (pow 2.0 3.0))
+(test-eq "pow 4^0.5" 2.0 (pow 4.0 0.5))
+(test-eq "hypot 3 4" 5.0 (hypot 3.0 4.0))
+
+(test-eq "floor 3.7" 3.0 (floor 3.7))
+(test-eq "ceil 3.7" 4.0 (ceil 3.7))
+(test-eq "round 3.7" 4.0 (round 3.7))
+(test-eq "trunc 3.7" 3.0 (trunc 3.7))
+
+(test-eq "abs -3" 3.0 (abs -3.0))
+(test-eq "min 2 5" 2.0 (min 2.0 5.0))
+(test-eq "max 2 5" 5.0 (max 2.0 5.0))
+(test-eq "sign 3" 1.0 (sign 3.0))
+(test-eq "sign 0" 0.0 (sign 0.0))
+(test-eq "sign -5" -1.0 (sign -5.0))
+
+(test-approx "sin^2+cos^2=1" 1.0 (+ (pow (sin 0.5) 2.0) (pow (cos 0.5) 2.0)) 0.0001)
+(test-approx "cosh^2-sinh^2=1" 1.0 (- (pow (cosh 0.5) 2.0) (pow (sinh 0.5) 2.0)) 0.0001)
+
+; ==============================================================================
+; SECTION 12: Constants
+; ==============================================================================
+(section "Constants")
+
+(test-approx "pi" 3.14159 pi 0.001)
+(test-approx "f64.pi" 3.14159 f64.pi 0.001)
+(test-approx "tau" 6.28318 tau 0.001)
+(test-approx "f64.tau" 6.28318 f64.tau 0.001)
+
+; ==============================================================================
+; SECTION 13: Integer-Specific Ops
+; ==============================================================================
+(section "Integer-Specific Ops")
+
+(test-eq "@i64.neg" -5 (@i64.neg 5))
+(test-eq "@i64.abs" 5 (@i64.abs -5))
+(test-eq "@i64.sign -42" -1 (@i64.sign -42))
+(test-eq "@i64.sign 0" 0 (@i64.sign 0))
+(test-eq "@i64.sign 42" 1 (@i64.sign 42))
+(test-eq "@i64.rem 14 3" 2 (@i64.rem 14 3))
+(test-eq "@i64.mod 14 3" 2 (@i64.mod 14 3))
+(test-eq "@i64.rem -7 3" -1 (@i64.rem -7 3))
+(test-eq "@i64.mod -7 3" 2 (@i64.mod -7 3))
+(test-eq "@i64.pow 2^10" 1024 (@i64.pow 2 10))
+(test-eq "@i64.pow 3^3" 27 (@i64.pow 3 3))
+(test-eq "@i64.shl 1<<3" 8 (@i64.shl 1 3))
+(test-eq "@i64.shr 32>>3" 4 (@i64.shr 32 3))
+(test-eq "@i64.from-f64 42.0" 42 (@i64.from-f64 42.0))
+(test-eq "@i64.clamp below" 5 (@i64.clamp 3 5 10))
+(test-eq "@i64.clamp in" 8 (@i64.clamp 8 5 10))
+(test-eq "@i64.clamp above" 10 (@i64.clamp 12 5 10))
+
+(test-true "@i64.is-odd? 3"  (@i64.is-odd? 3))
+(test-false "@i64.is-odd? 4" (@i64.is-odd? 4))
+(test-true "@i64.is-even? 4" (@i64.is-even? 4))
+(test-false "@i64.is-even? 3" (@i64.is-even? 3))
+
+; ==============================================================================
+; SECTION 14: Float-Specific Ops
+; ==============================================================================
+(section "Float-Specific Ops")
+
+(test-approx "deg->rad 180" @f64.pi (deg->rad 180.0) 0.0001)
+(test-approx "rad->deg pi" 180.0 (rad->deg @f64.pi) 0.0001)
+
+(test-true "f64.nextafter >" (> (@f64.nextafter 1.0 2.0) 1.0))
+(test-true "f64.prevbefore <" (< (@f64.prevbefore 1.0) 1.0))
+
+(test-approx "f64.expm1 0" 0.0 (@f64.expm1 0.0) 0.0001)
+(test-approx "f64.log1p 0" 0.0 (@f64.log1p 0.0) 0.0001)
+
+(test-false "f64.is-nan? 0" (@f64.is-nan? 0.0))
+(test-false "f64.is-inf? 0" (@f64.is-inf? 0.0))
+(test-true "f64.is-finite? 0" (@f64.is-finite? 0.0))
+(test-true "f64.is-zero? 0.0" (@f64.is-zero? 0.0))
+(test-false "f64.is-zero? 1.0" (@f64.is-zero? 1.0))
+
+(test-eq "f64.clamp below" 0.0 (@f64.clamp -1.0 0.0 1.0))
+(test-eq "f64.clamp in" 0.5 (@f64.clamp 0.5 0.0 1.0))
+(test-eq "f64.clamp above" 1.0 (@f64.clamp 2.0 0.0 1.0))
+
+; ==============================================================================
+; SECTION 15: Complex Numbers
+; ==============================================================================
+(section "Complex Numbers")
+
+(test-eq "@c64.re 1+2i" 1.0 (@c64.re 1+2i))
+(test-eq "@c64.im 1+2i" 2.0 (@c64.im 1+2i))
+(test-eq "@c64.re 3.0-4.5i" 3.0 (@c64.re 3.0-4.5i))
+(test-eq "@c64.im 3.0-4.5i" -4.5 (@c64.im 3.0-4.5i))
+(test-eq "@c64.re 5i" 0.0 (@c64.re 5i))
+(test-eq "@c64.im 5i" 5.0 (@c64.im 5i))
+(test-eq "@c64.re -5i" 0.0 (@c64.re -5i))
+(test-eq "@c64.im -5i" -5.0 (@c64.im -5i))
+(test-eq "@c64.re -1+2i" -1.0 (@c64.re -1+2i))
+(test-eq "@c64.im -1+2i" 2.0 (@c64.im -1+2i))
+
+(test-approx "c64.abs 3+4i" 5.0 (@c64.abs 3+4i) 0.0001)
+(test-approx "c64.abs 0-5i" 5.0 (@c64.abs 0-5i) 0.0001)
+(test-approx "c64.abs -3+4i" 5.0 (@c64.abs -3+4i) 0.0001)
+
+(def z1 (@c64.cart 3.0 4.0))
+(test-true "c64.cart is c64" (is-instance-of? c64 z1))
+(test-approx "c64.cart abs" 5.0 (@c64.abs z1) 0.0001)
+(test-approx "c64.cart norm" 25.0 (@c64.norm z1) 0.0001)
+
+(test-eq "@c64.re (+ 1+2i 3+2i)" 4.0 (@c64.re (+ 1+2i 3+2i)))
+(test-eq "@c64.im (+ 1+2i 3+2i)" 4.0 (@c64.im (+ 1+2i 3+2i)))
+
+(test-true "is-instance-of? c64 for complex 3 4" (is-instance-of? c64 (complex 3.0 4.0)))
+
+(def z-conj (c64.conj 1+2i))
+(test-eq "@c64.re (conj 1+2i)" 1.0 (@c64.re z-conj))
+(test-eq "@c64.im (conj 1+2i)" -2.0 (@c64.im z-conj))
+
+; method dispatch for re/im
+(test-eq "re 1+2i" 1.0 (re 1+2i))
+(test-eq "im 1+2i" 2.0 (im 1+2i))
+
+; ==============================================================================
+; SECTION 16: String Literals & Escapes
+; ==============================================================================
+(section "Strings")
+
+(test-true "basic string" (String? "hello"))
+(test-true "empty string" (String? ""))
+(test-true "escape \\n" (String? "hello\nworld"))
+(test-true "escape \\t" (String? "tab\there"))
+(test-true "escape \\r" (String? "carriage\rreturn"))
+(test-true "escape \\\"" (String? "quote\"here"))
+(test-true "escape \\\\" (String? "back\\slash"))
+(test-true "escape hex \\x41" (String? "hex\x41"))
+(test-true "escape unicode \\u{1f600}" (String? "unicode\u{1f600}"))
+
+; NOTE: `'symbol` (quote) syntax is parsed but `quote` is not bound.
+; Symbol literal creation is deferred.
+
+; ==============================================================================
+; SECTION 18: Float Constructors
+; ==============================================================================
+(section "Float Constructors")
+
+(test-true "f32 construct" (f32? (f32 3.14)))
+(test-true "f16 construct" (f16? (f16 3.14)))
+(test-eq "f64 construct zero" 0.0 (@f64))
+
+; ==============================================================================
+; SECTION 19: Bytecode & Disassembly
+; ==============================================================================
+(section "Bytecode & Disassembly")
+
+(defn (tiny x) (+ x 1))
+(test-true "disasm! returns string" (String? (disasm! tiny)))
+
+; NOTE: Custom method dispatch via `apply` (interpreted mode) has a bug where
+; args[0] is not replaced before re-dispatch. Pre-defined methods (+ = etc.)
+; work correctly via evalIr (compiled mode). Test deferred until fix.
+
+; ==============================================================================
+; SECTION 21: Edge Cases
+; ==============================================================================
+(section "Edge Cases")
+
+(test-true "f64 div by zero inf" (@f64.is-inf? (@f64.div 1.0 0.0)))
+(test-eq "f64 sqrt 0" 0.0 (@f64.sqrt 0.0))
+(test-true "f64 sqrt -1 nan" (@f64.is-nan? (@f64.sqrt -1.0)))
+(test-eq "f64 (- 0.0 3.0)" -3.0 (- 0.0 3.0))
+(test-approx "abs (- 0.0 3.0)" 3.0 (abs (- 0.0 3.0)) 0.0001)
+(test-eq "i64 (- 0 3)" -3 (- 0 3))
+
+; ==============================================================================
+; SECTION 22: else is truthy
+; ==============================================================================
+(section "Truthiness")
+
+(test-true "else is truthy" else)
+
+; ==============================================================================
+; SECTION 23: Re-definition (Sequential Eval)
+; ==============================================================================
+(section "Sequential Eval")
+
+(def redef-x 10)
+(def redef-x (+ redef-x 5))
+(test-eq "redef sum" 15 redef-x)
+
+; ==============================================================================
+; SECTION 24: f32 & f16
+; ==============================================================================
+(section "f32 & f16 Types")
+
+(test-true "f32? (f32 1.0)" (f32? (f32 1.0)))
+(test-eq "f32 add" (f32 7.0) (@f32.add (f32 3.0) (f32 4.0)))
+(test-eq "f32 sqrt" (f32 3.0) (@f32.sqrt (f32 9.0)))
+(test-true "f32 eq" (@f32.eq (f32 3.0) (f32 3.0)))
+(test-true "f32 gt" (@f32.gt (f32 5.0) (f32 3.0)))
+(test-true "f16? (f16 1.0)" (f16? (f16 1.0)))
+(test-eq "f16 add" (f16 7.0) (@f16.add (f16 3.0) (f16 4.0)))
+
+; ==============================================================================
+; SECTION 25: rgba Utility
+; ==============================================================================
+(section "rgba")
+
+(test-true "rgba red packed" (@u32.eq (@rgba 1.0 0.0 0.0 1.0) 4278190335))
+(test-true "rgba green packed" (@u32.eq (@rgba 0.0 1.0 0.0 1.0) 4278255360))
+(test-true "rgba blue packed" (@u32.eq (@rgba 0.0 0.0 1.0 1.0) 4294901760))
+(test-true "rgba black" (@u32.eq (@rgba 0.0 0.0 0.0 0.0) 0))
+
+; ==============================================================================
+; SECTION 26: More Complex Ops
+; ==============================================================================
+(section "Complex Ops")
+
+; c64 arithmetic
+(test-eq "@c64.add" 4.0+6.0i (@c64.add 1+2i 3+4i))
+(test-eq "@c64.sub" 2.0+4.0i (@c64.sub 5+6i 3+2i))
+(test-eq "@c64.mul" -5.0+10.0i (@c64.mul 1+2i 3+4i))
+
+; c64 equality
+(test-true "@c64.eq" (@c64.eq 1+2i 1+2i))
+(test-false "@c64.ne" (@c64.ne 1+2i 1+2i))
+
+; c64 predicates
+(test-true "@c64.is-zero? 0+0i" (@c64.is-zero? 0+0i))
+(test-false "@c64.is-zero? 1+1i" (@c64.is-zero? 1+1i))
+(test-true "@c64.is-finite? 1+2i" (@c64.is-finite? 1+2i))
+
+; c32 cartesian
+(test-eq "@c32.re from cart" (f32 3.0) (@c32.re (@c32.cart (f32 3.0) (f32 4.0))))
+(test-eq "@c32.im from cart" (f32 4.0) (@c32.im (@c32.cart (f32 3.0) (f32 4.0))))
+
+; ==============================================================================
+; SECTION 27: More Float-Specific Ops
+; ==============================================================================
+(section "More Float Ops")
+
+(test-approx "@f64.fract 3.7" 0.7 (@f64.fract 3.7) 0.0001)
+(test-eq "@f64.mod 7.5 3.0" 1.5 (@f64.mod 7.5 3.0))
+(test-eq "@f64.rem 7.5 3.0" 1.5 (@f64.rem 7.5 3.0))
+(test-eq "@f64.blend" 5.0 (@f64.blend 0.0 10.0 0.5))
+(test-true "@f64.is-odd? 3" (@f64.is-odd? 3.0))
+(test-true "@f64.is-even? 4" (@f64.is-even? 4.0))
+
+; ==============================================================================
+; SECTION 28: Prelude Method Dispatch (further coverage)
+; ==============================================================================
+(section "Method Dispatch Coverage")
+
+; integer comparisons via method
+(test-true "i64 = via method" (= 3 3))
+(test-false "i64 = via method" (= 3 4))
+(test-true "i64 < via method" (< 2 3))
+(test-true "i64 > via method" (> 5 3))
+
+; shl / shr as methods
+(test-eq "shl method" 8 (shl 1 3))
+(test-eq "shr method" 4 (shr 32 3))
+
+; fract / mod / rem as methods
+(test-approx "fract method" 0.7 (fract 3.7) 0.0001)
+(test-eq "mod method" 1.5 (mod 7.5 3.0))
+(test-eq "clamp method" 5.0 (clamp 3.0 5.0 10.0))
+
+; is-odd? / is-even? via method
+(test-true "is-odd? method" (is-odd? 3))
+(test-false "is-even? method" (is-even? 3))
+
+; complex conj via method
+(test-eq "re (conj 1+2i)" 1.0 (re (c64.conj 1+2i)))
+(test-eq "im (conj 1+2i)" -2.0 (im (c64.conj 1+2i)))
+
+; ==============================================================================
+; SECTION 29: f64 avg
+; ==============================================================================
+(section "f64 avg")
+
+(test-eq "@f64.avg" 2.5 (@f64.avg (list 1.0 2.0 3.0 4.0)))
+
+; ==============================================================================
+; SECTION 30: Integer Type Families (i8, i16, i32, u8, u16, u32, u64)
+; ==============================================================================
+(section "Integer Type Families")
+
+; i8
+(test-true "i8.add" (@i8.eq (@i8.add 3 4) 7))
+(test-true "i8.neg" (@i8.eq (@i8.neg 5) -5))
+
+; i16
+(test-true "i16.add" (@i16.eq (@i16.add 3 4) 7))
+(test-true "i16.sub" (@i16.eq (@i16.sub 4 3) 1))
+
+; i32
+(test-true "i32.add" (@i32.eq (@i32.add 3 4) 7))
+(test-true "i32.neg" (@i32.eq (@i32.neg 5) -5))
+
+; u8
+(test-true "u8.add" (@u8.eq (@u8.add 3 4) 7))
+
+; u16
+(test-true "u16.add" (@u16.eq (@u16.add 3 4) 7))
+
+; u32
+(test-true "u32.add" (@u32.eq (@u32.add 3 4) 7))
+
+; u64
+(test-true "u64.add" (@u64.eq (@u64.add 3 4) 7))
+
+; ==============================================================================
+; SECTION 31: More Float Ops (f32 & f16)
+; ==============================================================================
+(section "More f32 & f16 Ops")
+
+; f32
+(test-eq "f32.sin 0" (f32 0.0) (@f32.sin (f32 0.0)))
+(test-eq "f32.cos 0" (f32 1.0) (@f32.cos (f32 0.0)))
+(test-eq "f32.pow 2 3" (f32 8.0) (@f32.pow (f32 2.0) (f32 3.0)))
+(test-approx "f32.fract" (f32 0.7) (@f32.fract (f32 3.7)) (f32 0.001))
+(test-false "f32.is-nan? 0" (@f32.is-nan? (f32 0.0)))
+
+; f16
+(test-eq "f16.sin 0" (f16 0.0) (@f16.sin (f16 0.0)))
+(test-eq "f16.cos 0" (f16 1.0) (@f16.cos (f16 0.0)))
+
+; ==============================================================================
+; SECTION 32: Complex Number Expansions (c64 mag, polar, more predicates)
+; ==============================================================================
+(section "Complex Expansions")
+
+; c64 mag/polar
+(test-approx "c64.mag" 5.0 (@c64.mag 3+4i) 0.0001)
+(test-approx "c64.polar re" 3.0 (@c64.re (@c64.polar 5.0 0.9272952180016122)) 0.001)
+(test-approx "c64.polar im" 4.0 (@c64.im (@c64.polar 5.0 0.9272952180016122)) 0.001)
+
+; c64 predicates
+(test-true "c64.is-zero? 0+0i" (@c64.is-zero? 0+0i))
+(test-false "c64.is-nan? 1+2i" (@c64.is-nan? 1+2i))
+(test-false "c64.is-inf? 1+2i" (@c64.is-inf? 1+2i))
+(test-true "c64.is-finite? 1+2i" (@c64.is-finite? 1+2i))
+
+; c64 advanced ops
+(test-approx "c64.fract re" 0.7 (@c64.re (@c64.fract 3.7+2.2i)) 0.001)
+(test-eq "c64.expm1 0+0i" 0+0i (@c64.expm1 0+0i))
+(test-eq "c64.log1p 0+0i" 0+0i (@c64.log1p 0+0i))
+
+; ==============================================================================
+; Summary
+; ==============================================================================
+(display "\n=== All tests complete ===\n")
+(display "Check above for any FAIL lines.\n")

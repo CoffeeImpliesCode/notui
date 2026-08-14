@@ -1,0 +1,241 @@
+; ==============================================================================
+; API corpus: string module — end-to-end coverage of every string op.
+; Mostly byte-level v1 semantics: lengths/find/split/byte-ref are byte-based;
+; the char-aware ops (string-reverse, substring, string->list/list->string) are
+; UTF-8 codepoint based. trim + string->symbol share the " \t\n\r" set.
+;
+; Each assertion lives on its own line so failures pinpoint the op.
+; A failed check raises -> non-zero exit -> the orchestrator flags the file.
+; ==============================================================================
+
+(defn (fail-msg got want)
+  (begin (write "\nFAIL ") (write got) (write " != ") (write want) (write "\n") (raise "check-failed")))
+(defn (check-eq got want)
+  (if (equal? got want) (write ".") (fail-msg got want)))
+(defn (check-num got want)
+  (if (= got want) (write ".") (fail-msg got want)))
+
+; --- string-append: 2+ args, empty ------------------------------------------
+(check-eq (string-append "a" "b" "c") "abc")
+(check-eq (string-append "ab" "cd" "e") "abcde")
+(check-eq (string-append) "")
+(check-eq (string-append "" "x") "x")
+(check-eq (string-append "x" "") "x")
+(check-eq (string-append "a" "b") "ab")
+
+; --- string-length: empty/ascii/multibyte ------------------------------------
+(check-num (string-length "abc") 3)
+(check-num (string-length "") 0)
+(check-num (string-length "hello world") 11)
+(check-num (string-length "a") 1)
+(check-num (string-length "\u{e9}") 2)
+; A byte count, not Unicode scalar or grapheme count.
+(check-num (string-length "e\u{301}") 3)
+
+; --- string=? / string!= / string<? / string>? / string<=? / string>=? --------
+(check-eq (string=? "abc" "abc") #t)
+(check-eq (string=? "abc" "abd") #f)
+(check-eq (string=? "a" "a" "a") #t)
+(check-eq (string=? "a" "a" "b") #f)
+(check-eq (string=? "" "") #t)
+(check-eq (string!= "abc" "abd") #t)
+(check-eq (string!= "abc" "abc") #f)
+(check-eq (string!= "a" "b" "b") #f)
+(check-eq (string!= "" "a") #t)
+(check-eq (string<? "abc" "abd") #t)
+(check-eq (string<? "abc" "abc") #f)
+(check-eq (string<? "a" "b" "c") #t)
+(check-eq (string<? "a" "c" "b") #f)
+(check-eq (string<? "" "a") #t)
+(check-eq (string>? "b" "a") #t)
+(check-eq (string>? "a" "b") #f)
+(check-eq (string>? "c" "b" "a") #t)
+(check-eq (string>? "a" "a") #f)
+(check-eq (string<=? "abc" "abc" "abd") #t)
+(check-eq (string<=? "b" "a") #f)
+(check-eq (string<=? "abc" "abc") #t)
+(check-eq (string>=? "b" "b") #t)
+(check-eq (string>=? "a" "b") #f)
+(check-eq (string>=? "b" "b" "a") #t)
+
+; --- string-upcase / string-downcase: mixed case, digits ----------------------
+(check-eq (string-upcase "hello") "HELLO")
+(check-eq (string-upcase "Hello123!") "HELLO123!")
+(check-eq (string-upcase "") "")
+(check-eq (string-upcase "abc 9 x") "ABC 9 X")
+(check-eq (string-downcase "HELLO") "hello")
+(check-eq (string-downcase "AbC 9") "abc 9")
+(check-eq (string-downcase "ABC!1") "abc!1")
+(check-eq (string-downcase (string-upcase "MixedCase")) "mixedcase")
+(check-eq (string-upcase "\u{e9}") "\u{e9}")
+
+; --- string-find: found / not-found -------------------------------------------
+(check-num (string-find "hello world" "world") 6)
+(check-num (string-find "hello" "lo") 3)
+(check-num (string-find "abc" "abc") 0)
+(check-num (string-find "aaaa" "aa") 0)
+(check-num (string-find "abc" "") 0)
+(check-num (string-find "h\u{e9}llo" "l") 3)
+(check-eq (string-find "abc" "z") nil)
+(check-eq (string-find "abc" "abcd") nil)
+
+; --- string-replace: all occurrences, absent pattern --------------------------
+(check-eq (string-replace "aaa" "a" "b") "bbb")
+(check-eq (string-replace "abcabc" "bc" "X") "aXaX")
+(check-eq (string-replace "hello" "x" "y") "hello")
+(check-eq (string-replace "aaa" "aa" "b") "ba")
+(check-eq (string-replace "abc" "b" "") "ac")
+(check-eq (string-replace "ababab" "ab" "cd") "cdcdcd")
+
+; --- string-split: multi-char sep, trailing sep, no sep -----------------------
+(check-eq (string-split "a,b,c" ",") (list "a" "b" "c"))
+(check-eq (string-split "a::b::c" "::") (list "a" "b" "c"))
+(check-eq (string-split "a,b," ",") (list "a" "b" ""))
+(check-eq (string-split ",a" ",") (list "" "a"))
+(check-eq (string-split "a,,b" ",") (list "a" "" "b"))
+(check-eq (string-split "abc" ",") (list "abc"))
+(check-eq (string-split "" ",") (list ""))
+
+; --- string-join: list, empty list --------------------------------------------
+(check-eq (string-join (list "a" "b" "c") ",") "a,b,c")
+(check-eq (string-join (list "a" "b") "") "ab")
+(check-eq (string-join (list) ",") "")
+(check-eq (string-join (list "only") "-") "only")
+(check-eq (string-join (list "") ",") "")
+(check-eq (string-join (list "x" "y" "z") "::") "x::y::z")
+
+; --- string-trim / trim-left / trim-right: edges, inner spaces kept -----------
+(check-eq (string-trim "  hi  ") "hi")
+(check-eq (string-trim "h i") "h i")
+(check-eq (string-trim "\t\n") "")
+(check-eq (string-trim " \t hi \r\n ") "hi")
+(check-eq (string-trim "x") "x")
+(check-eq (string-trim-left "  hi") "hi")
+(check-eq (string-trim-left "  h i  ") "h i  ")
+(check-eq (string-trim-left "\t\nhi") "hi")
+(check-eq (string-trim-right "hi  ") "hi")
+(check-eq (string-trim-right "  h i  ") "  h i")
+(check-eq (string-trim-right "hi\r\n") "hi")
+
+; --- string-includes? / starts-with? / ends-with? ------------------------------
+(check-eq (string-includes? "hello" "ell") #t)
+(check-eq (string-includes? "hello" "x") #f)
+(check-eq (string-includes? "hello" "") #t)
+(check-eq (string-includes? "abc" "abc") #t)
+(check-eq (string-includes? "abc" "abcd") #f)
+(check-eq (string-starts-with? "hello" "he") #t)
+(check-eq (string-starts-with? "hello" "lo") #f)
+(check-eq (string-starts-with? "hello" "") #t)
+(check-eq (string-starts-with? "abc" "abc") #t)
+(check-eq (string-ends-with? "hello" "lo") #t)
+(check-eq (string-ends-with? "hello" "he") #f)
+(check-eq (string-ends-with? "hello" "") #t)
+(check-eq (string-ends-with? "abc" "abc") #t)
+
+; --- string-reverse: ascii + codepoint-aware (valid UTF-8 preserved) --------
+(check-eq (string-reverse "abc") "cba")
+(check-eq (string-reverse "") "")
+(check-eq (string-reverse "a") "a")
+(check-eq (string-reverse "hello world") "dlrow olleh")
+(check-eq (string-reverse "a\nb") "b\na")
+(check-eq (string-reverse (string-reverse "abcde")) "abcde")
+(check-eq (string-reverse "h\u{e9}llo") "oll\u{e9}h")
+(check-eq (string-reverse (string-reverse "h\u{e9}llo")) "h\u{e9}llo")
+(check-eq (string-reverse "\u{e9}") "\u{e9}")
+(check-eq (string-reverse "a\u{e9}b") "b\u{e9}a")
+
+; --- substring: start/end, full range (codepoint-indexed) --------------------
+(check-eq (substring "hello" 1 3) "el")
+(check-eq (substring "hello" 0 5) "hello")
+(check-eq (substring "hello" 3 3) "")
+(check-eq (substring "hello" 2 5) "llo")
+(check-eq (substring "hello" 0 0) "")
+(check-eq (substring "hello" 3 5) "lo")
+(check-eq (substring "h\u{e9}llo" 1 3) "\u{e9}l")
+(check-eq (substring "h\u{e9}llo" 0 4) "h\u{e9}ll")
+(check-eq (substring "h\u{e9}llo" 2 5) "llo")
+(check-eq (substring "h\u{e9}llo" 5 5) "")
+; Codepoint positions do not combine grapheme clusters.
+(check-eq (substring "e\u{301}x" 1 2) "\u{301}")
+
+; --- string-byte-ref: valid index ----------------------------------------------
+(check-num (string-byte-ref "abc" 0) 97)
+(check-num (string-byte-ref "abc" 1) 98)
+(check-num (string-byte-ref "abc" 2) 99)
+(check-num (string-byte-ref "\u{e9}" 0) 195)
+(check-num (string-byte-ref "\u{e9}" 1) 169)
+
+; --- number->string: ints incl. negative, floats, radix 2/8/16, complex --------
+(check-eq (number->string 42) "42")
+(check-eq (number->string -7) "-7")
+(check-eq (number->string 0) "0")
+(check-eq (number->string 255) "255")
+(check-eq (number->string -9223372036854775808) "-9223372036854775808")
+(check-eq (number->string 8 2) "1000")
+(check-eq (number->string 64 8) "100")
+(check-eq (number->string 255 16) "ff")
+(check-eq (number->string -255 16) "-ff")
+(check-eq (number->string 3.14) "3.14")
+(check-eq (number->string 42.0) "42.0")
+(check-eq (number->string -2.5) "-2.5")
+(check-eq (number->string 0.5) "0.5")
+(check-eq (number->string 1+2i) "1.0+2.0i")
+
+; --- string->number: decimal, radix, negative, garbage -> nil ------------------
+(check-num (string->number "42") 42)
+(check-num (string->number "-17") -17)
+(check-num (string->number "+17") 17)
+(check-num (string->number "ff" 16) 255)
+(check-num (string->number "-ff" 16) -255)
+(check-num (string->number "101" 2) 5)
+(check-num (string->number "77" 8) 63)
+(check-num (string->number "3.14") 3.14)
+(check-num (string->number "1e3") 1000.0)
+(check-num (string->number "  42  ") 42)
+(check-eq (string->number "abc") nil)
+(check-eq (string->number "") nil)
+(check-eq (string->number "   ") nil)
+(check-eq (string->number "ff") nil)
+(check-eq (string->number "0x10") nil)
+(check-eq (string->number "3.14" 16) nil)
+(check-eq (string->number "99999999999999999999") nil)
+
+; --- string->list / list->string: codepoint bridge to collections -------------
+(check-eq (string->list "abc") (list 97 98 99))
+(check-eq (string->list "") (list))
+(check-eq (string->list "ab") (list 97 98))
+(check-eq (string->list "h\u{e9}") (list 104 233))
+(check-eq (string->list "a\u{e9}b") (list 97 233 98))
+(check-eq (list->string (list 104 105)) "hi")
+(check-eq (list->string (list 97 98 99)) "abc")
+(check-eq (list->string (list)) "")
+(check-eq (list->string (string->list "h\u{e9}llo")) "h\u{e9}llo")
+(check-eq (list->string (list 233)) "\u{e9}")
+
+; --- format / printf -----------------------------------------------------------
+(check-eq (format "~a" "hi") "hi")
+(check-eq (format "~s" "hi") "\"hi\"")
+(check-eq (format "~v" "x") "\"x\"")
+(check-eq (format "~a ~a" 42 "x") "42 x")
+(check-eq (format "~s" 'sym) "'sym")
+(check-eq (format "~a~n~a" "a" "b") "a\nb")
+(check-eq (format "~%") "\n")
+(check-eq (format "~~a") "~a")
+(check-eq (format "~a" 42) "42")
+(check-eq (format "~a" 42.0) "42.0")
+(check-eq (format "~a" #t) "#t")
+(check-eq (format "~s" (list 1 2)) "(1 2)")
+(check-eq (format "before ~a after" "x") "before x after")
+(check-eq (format "literal bytes" 1) "literal bytes")
+(check-eq (format "~a ~a ~a" 1 2 3) "1 2 3")
+
+; --- string->symbol + symbol->string round-trip --------------------------------
+(check-eq (symbol->string 'foo) "foo")
+(check-eq (symbol->string (string->symbol "bar")) "bar")
+(check-eq (symbol->string (string->symbol "abc")) "abc")
+(check-eq (string->symbol "a") (string->symbol "a"))
+(check-eq (symbol->string (string->symbol "  foo  ")) "foo")
+(check-eq (symbol->string (string->symbol "123")) "123")
+(check-eq (symbol->string (string->symbol "hello world")) "hello world")
+
+(write "\nALL-OK\n")

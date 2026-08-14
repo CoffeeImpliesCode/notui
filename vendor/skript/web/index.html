@@ -1,0 +1,2751 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>skript pad</title>
+<style>
+  /* ---- tokens: slate ramp (bqnpad-inspired), dark default ---- */
+  :root {
+    --bg: hsl(200, 7%, 8.8%);
+    --bg-subtle: hsl(195, 7.1%, 11%);
+    --bg-ui: hsl(197, 6.8%, 13.6%);
+    --bg-ui-hover: hsl(198, 6.6%, 15.8%);
+    --bg-active: hsl(199, 6.4%, 17.9%);
+    --border: hsl(201, 6.2%, 20.5%);
+    --border-strong: hsl(203, 6%, 24.3%);
+    --text: hsl(210, 6%, 93%);
+    --text-dim: hsl(206, 6%, 63%);
+    --accent: hsl(209, 100%, 60.6%);
+    --accent-strong: hsl(209, 100%, 66.1%);
+    --on-accent: hsl(210, 40%, 8%);
+    --error: #dc3c43;
+    --error-bg: hsl(0, 55%, 14%);
+    --num: hsl(150, 45%, 58%);
+    --str: hsl(39, 100%, 57%);
+    --kw: hsl(210, 100%, 66.1%);
+    --typ: hsl(206, 100%, 62%);
+    --syn: hsl(212, 40%, 72%);
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    --paren0: #e06c75;
+    --paren1: #d19a66;
+    --paren2: #e5c07b;
+    --paren3: #98c379;
+    --paren4: #61afef;
+    --paren5: #c678dd;
+    --radius: 8px;
+    --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  [data-theme="light"] {
+    --bg: hsl(206, 30%, 98.8%);
+    --bg-subtle: hsl(210, 16.7%, 97.6%);
+    --bg-ui: hsl(209, 13.3%, 95.3%);
+    --bg-ui-hover: hsl(209, 12.2%, 93.2%);
+    --bg-active: hsl(208, 11.7%, 91.1%);
+    --border: hsl(208, 11.3%, 88.9%);
+    --border-strong: hsl(207, 11.1%, 85.9%);
+    --text: hsl(206, 24%, 9%);
+    --text-dim: hsl(206, 6%, 43.5%);
+    --accent: hsl(206, 100%, 50%);
+    --accent-strong: hsl(211, 100%, 43.2%);
+    --on-accent: #fff;
+    --error: #b4231f;
+    --error-bg: hsl(0, 65%, 95%);
+    --num: hsl(152, 65%, 26%);
+    --str: hsl(30, 100%, 30%);
+    --kw: hsl(211, 100%, 43.2%);
+    --typ: hsl(206, 100%, 38%);
+    --syn: hsl(212, 45%, 40%);
+    --paren0: #c0362c;
+    --paren1: #b26a00;
+    --paren2: #8a6d00;
+    --paren3: #2e7d32;
+    --paren4: #1565c0;
+    --paren5: #6a1b9a;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.5;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  ::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+
+  /* ---- header ---- */
+  .app-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+    padding: 0.6rem 1rem;
+    background: var(--bg-subtle);
+    border-bottom: 1px solid var(--border);
+    flex: none;
+  }
+  .app-header__left { display: flex; align-items: baseline; gap: 0.5rem; min-width: 0; }
+  .app-header h1 {
+    font-size: 16px;
+    font-weight: 650;
+    letter-spacing: 0.01em;
+    margin: 0;
+    white-space: nowrap;
+  }
+  .app-header .wordmark { color: var(--accent-strong); }
+  .app-header__sub { color: var(--text-dim); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .app-header__right { display: flex; align-items: center; gap: 0.5rem; flex: none; }
+
+  .status {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    padding: 0.2rem 0.6rem;
+    border-radius: 999px;
+    border: 1px solid var(--border-strong);
+    color: var(--text-dim);
+    background: var(--bg-ui);
+  }
+  .status.ok { color: var(--num); border-color: color-mix(in srgb, var(--num) 35%, var(--border)); }
+  .status.err { color: var(--error); border-color: color-mix(in srgb, var(--error) 45%, var(--border)); background: var(--error-bg); }
+
+  .btn {
+    font-family: var(--sans);
+    font-size: 12px;
+    font-weight: 550;
+    color: var(--text);
+    background: var(--bg-ui);
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    padding: 0.35rem 0.75rem;
+    cursor: pointer;
+    transition: background-color 150ms var(--ease), border-color 150ms var(--ease);
+  }
+  .btn:hover { background: var(--bg-ui-hover); }
+  .btn:active { background: var(--bg-active); }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .btn--primary {
+    background: var(--accent);
+    border-color: transparent;
+    color: var(--on-accent);
+    font-weight: 600;
+  }
+  .btn--primary:hover { background: var(--accent-strong); }
+  .btn--primary:disabled, .btn:disabled { opacity: 0.45; cursor: default; }
+  .btn--primary:disabled:hover, .btn:disabled:hover { background: var(--bg-ui); }
+  .btn--primary:disabled:hover { background: var(--accent); }
+  .btn--ghost { background: transparent; border-color: transparent; color: var(--text-dim); }
+  .btn--ghost:hover { background: var(--bg-ui); color: var(--text); border-color: transparent; }
+
+  /* ---- workspace ---- */
+  .workspace {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ---- notebook ---- */
+  .cells {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 1rem 1.25rem 0.5rem;
+  }
+  .cell {
+    margin-bottom: 1rem;
+    animation: cell-in 150ms var(--ease);
+  }
+  @keyframes cell-in {
+    from { opacity: 0; transform: translateY(3px); }
+    to { opacity: 1; transform: none; }
+  }
+  .cell__source {
+    display: flex;
+    gap: 0.6rem;
+    font-family: var(--mono);
+    font-size: 13.5px;
+    line-height: 1.55;
+    background: var(--bg-ui);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.55rem 0.75rem;
+  }
+  .cell__source code { white-space: pre-wrap; word-break: break-word; min-width: 0; }
+  .cell__source code { flex: 1; }
+  .cell__rerun { flex: none; align-self: flex-start; padding: 0.15rem 0.35rem; font-size: 11px; }
+  .cell__stale { color: var(--text-dim); font-family: var(--sans); font-size: 11px; margin-bottom: 0.25rem; }
+  .cell__prompt { color: var(--accent-strong); flex: none; user-select: none; }
+  .cell__output {
+    margin: 0.35rem 0 0;
+    font-family: var(--mono);
+    font-size: 13.5px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: var(--bg-subtle);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.55rem 0.75rem;
+  }
+  .cell__output .err { color: var(--error); }
+  .widget { margin: 0.35rem 0; }
+  .widget__canvas { display: block; max-width: 100%; image-rendering: pixelated; border-radius: var(--radius); }
+  .widget__controls { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.3rem; }
+  .widget__controls input[type="range"] { flex: 1; min-width: 0; }
+  .tok-paren-0 { color: var(--paren0); }
+  .tok-paren-1 { color: var(--paren1); }
+  .tok-paren-2 { color: var(--paren2); }
+  .tok-paren-3 { color: var(--paren3); }
+  .tok-paren-4 { color: var(--paren4); }
+  .tok-paren-5 { color: var(--paren5); }
+  .tok-paren-0.match, .tok-paren-1.match, .tok-paren-2.match,
+  .tok-paren-3.match, .tok-paren-4.match, .tok-paren-5.match,
+  .tok-paren.match {
+    background: color-mix(in srgb, var(--accent) 32%, transparent);
+    border-radius: 3px;
+  }
+  .widget__wave { display: block; max-width: 100%; margin-top: 0.3rem; }
+  .widget-src { font-size: 12px; color: var(--text-dim); }
+  .widget-src code { white-space: pre-wrap; word-break: break-word; }
+  .tok-cmt, .tok-paren { color: var(--text-dim); }
+  .tok-num { color: var(--num); }
+  .tok-str { color: var(--str); }
+  .tok-kw { color: var(--kw); }
+  .tok-typ { color: var(--typ); }
+  .tok-lit { color: var(--str); }
+  .tok-intr { color: var(--kw); }
+  .tok-sym { color: var(--syn); }
+
+  /* ---- welcome / empty state ---- */
+  .welcome {
+    max-width: 46rem;
+    margin: 2rem auto 2.5rem;
+    text-align: center;
+    padding: 0 1rem;
+  }
+  .welcome__title { font-size: 18px; font-weight: 650; margin: 0 0 0.4rem; }
+  .welcome__body { color: var(--text-dim); font-size: 13.5px; margin: 0 auto 1.25rem; max-width: 34rem; }
+  .welcome__examples { display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: center; }
+  .example {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--syn);
+    background: var(--bg-ui);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.35rem 0.7rem;
+    cursor: pointer;
+    transition: border-color 150ms var(--ease), color 150ms var(--ease), background-color 150ms var(--ease);
+  }
+  .example:hover { border-color: var(--accent); color: var(--accent-strong); background: var(--bg-ui-hover); }
+  .example:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* ---- composer ---- */
+  .composer {
+    flex: none;
+    padding: 0.75rem 1.25rem 0.9rem;
+    background: var(--bg-subtle);
+    border-top: 1px solid var(--border);
+  }
+  .editor {
+    position: relative;
+    background: var(--bg-ui);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    max-height: 9.3rem;
+    overflow-y: auto;
+    transition: border-color 150ms var(--ease);
+  }
+  .editor:focus-within { border-color: var(--accent); }
+  .editor__mirror {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    margin: 0;
+    padding: 0.6rem 0.75rem;
+    font-family: var(--mono);
+    font-size: 13.5px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-word;
+    pointer-events: none;
+    color: var(--text);
+    visibility: hidden;
+  }
+  .editor__mirror.is-visible { visibility: visible; }
+  .editor__input {
+    display: block;
+    width: 100%;
+    min-height: 2.6rem;
+    overflow: hidden;
+    resize: none;
+    border: none;
+    outline: none;
+    background: transparent;
+    color: transparent;
+    caret-color: var(--text);
+    padding: 0.6rem 0.75rem;
+    font-family: var(--mono);
+    font-size: 13.5px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-word;
+    position: relative;
+    z-index: 1;
+  }
+  .editor__input::placeholder { color: transparent; }
+  .editor__input.is-plain { color: var(--text); }
+  .editor__input.is-plain::placeholder { color: var(--text-dim); }
+
+  .preview {
+    min-height: 1.35rem;
+    margin: 0.35rem 0.25rem 0;
+    font-family: var(--mono);
+    font-size: 13.5px;
+    line-height: 1.5;
+    color: var(--text-dim);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .preview .err { color: var(--error); }
+  .preview--empty { color: var(--text-dim); opacity: 0.6; }
+
+  .composer__bar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem 0.75rem;
+    margin-top: 0.5rem;
+  }
+  .hint { color: var(--text-dim); font-size: 12px; margin: 0; }
+  kbd {
+    font-family: var(--mono);
+    font-size: 11px;
+    background: var(--bg-ui);
+    border: 1px solid var(--border-strong);
+    border-bottom-width: 2px;
+    border-radius: 4px;
+    padding: 0.05rem 0.35rem;
+  }
+
+  /* ---- completion popup ---- */
+  .composer { position: relative; }
+  .completion-popup {
+    position: absolute;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    min-width: 8.5rem;
+    max-height: 190px;
+    overflow-y: auto;
+    padding: 4px;
+    background: var(--bg-ui);
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    font-family: var(--mono);
+    font-size: 13.5px;
+    line-height: 1.4;
+  }
+  .completion-popup button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    padding: 3px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .completion-popup button:hover { background: var(--bg-ui-hover); }
+  .completion-popup button.selected {
+    background: var(--accent);
+    color: var(--on-accent);
+  }
+
+  /* ---- docs sidepanel ---- */
+  .workspace { flex-direction: row; }
+  .main-col {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .docs-panel {
+    flex: none;
+    width: 19rem;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    border-left: 1px solid var(--border);
+    background: var(--bg-raised);
+  }
+  body.docs-hidden .docs-panel { display: none; }
+  .docs-panel__head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    padding: 0.6rem 0.75rem 0.4rem;
+    font-size: 12px;
+    font-weight: 650;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+  .docs-count { font-weight: 400; text-transform: none; }
+  .docs-search {
+    margin: 0 0.75rem 0.5rem;
+    padding: 0.35rem 0.5rem;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text);
+    background: var(--bg-ui);
+    border-radius: 6px;
+  }
+  .docs-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 0 0.75rem 0.75rem;
+    font-size: 13px;
+  }
+  .docs-body details { margin-bottom: 0.25rem; }
+  .docs-body summary {
+    cursor: pointer;
+    font-weight: 650;
+    color: var(--text);
+    padding: 0.2rem 0;
+  }
+  .docs-body summary .n { color: var(--text-dim); font-weight: 400; }
+  .doc {
+    display: flex;
+    gap: 0.5rem;
+    align-items: baseline;
+    padding: 0.1rem 0;
+  }
+  .doc button {
+    flex: none;
+    border: none;
+    background: transparent;
+    color: var(--accent-strong);
+    font-family: var(--mono);
+    font-size: 12.5px;
+    padding: 0;
+    cursor: pointer;
+    text-align: left;
+  }
+  .doc button:hover { text-decoration: underline; }
+  .doc span { color: var(--text-dim); font-size: 12px; }
+  @media (max-width: 900px) {
+    .docs-panel {
+      position: absolute;
+      right: 0;
+      top: 0;
+      bottom: 0;
+      z-index: 30;
+      box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);
+    }
+  }
+</style>
+</head>
+<body>
+<header class="app-header">
+  <div class="app-header__left">
+    <h1><span class="wordmark">skript</span> pad</h1>
+    <span class="app-header__sub">typed lisp · register VM · in your browser</span>
+  </div>
+  <div class="app-header__right">
+    <span id="status" class="status" role="status">loading…</span>
+    <button id="clear" class="btn btn--ghost" type="button" title="Clear all cells">Clear</button>
+    <button id="docs-toggle" class="btn btn--ghost" type="button" title="Toggle reference panel">Docs</button>
+    <button id="theme" class="btn btn--ghost" type="button" title="Toggle light/dark theme">Light</button>
+  </div>
+</header>
+<main class="workspace">
+  <div class="main-col">
+  <div id="cells" class="cells" aria-live="polite">
+    <div id="welcome" class="welcome" hidden>
+      <p class="welcome__title">Welcome to the skript pad</p>
+      <p class="welcome__body">Type an expression — it evaluates live below as soon as the brackets balance. Press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> to commit it as a cell.</p>
+      <div class="welcome__examples">
+        <button class="example" type="button">(+ 1 2)</button>
+        <button class="example" type="button">(fold [1 2 3 4] +)</button>
+        <button class="example" type="button">(reshape (iota 12) [3 4])</button>
+        <button class="example" type="button">(map [1 2 3] (fn (x) (* x x)))</button>
+        <button class="example" type="button">(defn (fib n) (if (&lt; n 2) n (+ (fib (- n 1)) (fib (- n 2))))) (fib 15)</button>
+      </div>
+    </div>
+  </div>
+  <div class="composer">
+    <div class="editor">
+      <pre class="editor__mirror" id="mirror" aria-hidden="true"><code id="mirror-code"></code></pre>
+      <textarea id="input" class="editor__input" rows="1" spellcheck="false" aria-label="skript code input" placeholder="(+ 1 2)"></textarea>
+    </div>
+    <div id="preview" class="preview" aria-live="polite"></div>
+    <div class="composer__bar">
+      <button id="run" class="btn btn--primary" type="button">Run</button>
+      <p class="hint"><kbd>Ctrl</kbd>+<kbd>Enter</kbd> run · plain <kbd>Enter</kbd> newline · <kbd>↑</kbd>/<kbd>↓</kbd> history</p>
+    </div>
+  </div>
+  </div>
+  <aside id="docs-panel" class="docs-panel" aria-label="function reference">
+    <div class="docs-panel__head"><span>Reference</span><span id="docs-count" class="docs-count"></span></div>
+    <input id="docs-search" class="docs-search" type="search" placeholder="filter reference&hellip;" aria-label="filter reference">
+    <div id="docs-body" class="docs-body"></div>
+  </aside>
+</main>
+<script>
+"use strict";
+/* ================= worker eval ================= */
+// Long synchronous skriptPad evals run inside a Web Worker so they never
+// block the page. The wasm side of this contract lives in web/worker.js.
+var ASSET_REVISION = "__SKRIPT_ASSET_REVISION__";
+var worker = null;
+var workerReady = false;
+var workerFailed = false;
+var workerFailure = null;
+var nextEvalId = 1;
+var pendingEvalCount = 0;
+var evalSinks = {}; // evalId -> { onOut: fn(text), onDone: fn(rc) }
+
+function errorText(value) {
+    if (value && value.message) return String(value.message);
+    return String(value || "unknown worker error");
+}
+function reportCallbackFailure(value) {
+    setStatus("err", "evaluation callback failed: " + errorText(value));
+}
+
+function finishEval(id, rc, message, skipOut) {
+    var sink = evalSinks[id];
+    if (!sink) return false;
+    delete evalSinks[id];
+    if (pendingEvalCount > 0) pendingEvalCount--;
+    var text = message ? "error: " + message + "\n" :
+        (rc !== 0 && !sink.sawOutput ? "error: evaluation failed\n" : null);
+    var callbackError = skipOut ? message : null;
+    if (text && !skipOut) {
+        try { sink.onOut(text); } catch (e) { callbackError = e; }
+    }
+    try { sink.onDone(rc); } catch (e) { if (!callbackError) callbackError = e; }
+    if (callbackError) reportCallbackFailure(callbackError);
+    else if (pendingEvalCount === 0 && workerReady && !workerFailed) setStatus("ok", "ready");
+    return true;
+}
+
+function failWorker(message) {
+    var text = errorText(message);
+    workerReady = false;
+    workerFailed = true;
+    workerFailure = text;
+    if (worker) {
+        try { worker.terminate(); } catch (e) {}
+    }
+    if (runBtn) runBtn.disabled = true;
+    setStatus("err", text);
+    var ids = Object.keys(evalSinks);
+    for (var i = 0; i < ids.length; i++) finishEval(ids[i], 1, text);
+}
+
+function handleWorkerMessage(e) {
+    var msg = e && e.data;
+    if (!msg || typeof msg !== "object" || typeof msg.type !== "string") {
+        failWorker("invalid worker message");
+        return;
+    }
+    switch (msg.type) {
+        case "ready":
+            if (workerFailed || workerReady) {
+                failWorker("duplicate worker startup message");
+                return;
+            }
+            workerReady = true;
+            if (runBtn) runBtn.disabled = false;
+            setStatus("ok", "ready");
+            try { bootAfterReady(); } catch (err) { failWorker("startup failed: " + errorText(err)); }
+            break;
+        case "out":
+            if (typeof msg.id !== "number" || typeof msg.text !== "string") {
+                failWorker("invalid worker output message");
+                return;
+            }
+            if (evalSinks[msg.id]) {
+                if (msg.text.length > 0) evalSinks[msg.id].sawOutput = true;
+                try { evalSinks[msg.id].onOut(msg.text); } catch (err) {
+                    finishEval(msg.id, 1, errorText(err), true);
+                }
+            }
+            break;
+        case "done":
+            if (typeof msg.id !== "number" || typeof msg.rc !== "number") {
+                failWorker("invalid worker completion message");
+                return;
+            }
+            finishEval(msg.id, msg.rc, null);
+            break;
+        case "error":
+            if (msg.id !== undefined && msg.id !== null) {
+                if (typeof msg.id !== "number" || typeof msg.message !== "string") {
+                    failWorker("invalid worker error message");
+                    return;
+                }
+                finishEval(msg.id, 1, msg.message);
+            } else {
+                failWorker(msg.message || "worker startup failed");
+            }
+            break;
+        case "title":
+            if (typeof msg.text !== "string") {
+                failWorker("invalid worker title message");
+                return;
+            }
+            document.title = msg.text;
+            break;
+        default:
+            failWorker("unknown worker message: " + msg.type);
+    }
+}
+
+function startWorker() {
+    try {
+        worker = new Worker("worker.js?v=" + encodeURIComponent(ASSET_REVISION));
+        worker.onmessage = handleWorkerMessage;
+        worker.onerror = function (e) {
+            failWorker(e && e.message ? e.message : "worker runtime failed");
+        };
+        worker.onmessageerror = function () {
+            failWorker("worker message could not be decoded");
+        };
+    } catch (e) {
+        failWorker(errorText(e));
+    }
+}
+
+// Evaluate `src` in the worker. `onOut(text)` receives every streamed output
+// chunk (write/display output and the final result line); `onDone(rc)` fires
+// once with skriptPad's return code (0 ok / 1 error).
+function runEval(src, onOut, onDone) {
+    var id = nextEvalId++;
+    var sink = { onOut: onOut, onDone: onDone, sawOutput: false };
+    if (workerFailed || !worker || !workerReady) {
+        var callbackError = null;
+        try { sink.onOut("error: worker is not ready\n"); } catch (e) { callbackError = e; }
+        try { sink.onDone(1); } catch (e) { if (!callbackError) callbackError = e; }
+        if (callbackError) reportCallbackFailure(callbackError);
+        return id;
+    }
+    evalSinks[id] = sink;
+    pendingEvalCount++;
+    setStatus("busy", "evaluating…");
+    try {
+        worker.postMessage({ type: "eval", id: id, src: String(src) });
+    } catch (e) {
+        finishEval(id, 1, errorText(e));
+        failWorker("worker request failed: " + errorText(e));
+    }
+    return id;
+}
+
+startWorker();
+
+var TOKEN_RE = /(;.*$)|("(?:\\.|[^"\\])*")|(#[bBoOdDxX][0-9a-fA-F_]+)|(\d+(?:\.\d*)?(?:[eE][+-]?\d+)?i?|\.\d+(?:[eE][+-]?\d+)?i?)|([()\[\]{}])|([^\s()\[\]{}";]+)/gm;
+
+function esc(s) {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+function span(cls, text) { return '<span class="' + cls + '">' + esc(text) + "</span>"; }
+
+/* ================= syntax highlighting ================= */
+var SPECIAL = {
+    "def": 1, "defn": 1, "fn": 1, "if": 1, "case": 1, "begin": 1,
+    "let": 1, "cond": 1, "quote": 1, "set!": 1, "import": 1, "module": 1,
+};
+var TYPES = {
+    "i8": 1, "i16": 1, "i32": 1, "i64": 1, "u8": 1, "u16": 1, "u32": 1, "u64": 1,
+    "f8": 1, "f16": 1, "f32": 1, "f64": 1, "c8": 1, "c16": 1, "c32": 1, "c64": 1,
+    "Bool": 1, "Null": 1, "Symbol": 1, "Keyword": 1, "Tensor": 1, "Map": 1,
+    "Process": 1, "String": 1, "Type": 1, "Int": 1, "Float": 1,
+};
+var PAREN_OPEN = { "(": ")", "[": "]", "{": "}" };
+var PAREN_CLOSE = { ")": "(", "]": "[", "}": "{" };
+
+function stringEnd(src, start) {
+    var i = start + 1;
+    while (i < src.length) {
+        if (src.charAt(i) === "\\") {
+            if (i + 1 >= src.length) return { end: src.length, complete: false };
+            i += 2;
+        } else if (src.charAt(i) === '"') {
+            return { end: i + 1, complete: true };
+        } else {
+            i++;
+        }
+    }
+    return { end: src.length, complete: false };
+}
+
+function lineCommentEnd(src, start) {
+    var end = src.indexOf("\n", start);
+    return end === -1 ? src.length : end;
+}
+
+function blockCommentEnd(src, start) {
+    var depth = 1;
+    var i = start + 2;
+    while (i < src.length) {
+        if (src.slice(i, i + 2) === "#|") {
+            depth++;
+            i += 2;
+        } else if (src.slice(i, i + 2) === "|#") {
+            depth--;
+            i += 2;
+            if (depth === 0) return { end: i, complete: true };
+        } else {
+            i++;
+        }
+    }
+    return { end: src.length, complete: false };
+}
+
+function readerTriviaEnd(src, start) {
+    var i = start;
+    while (i < src.length) {
+        var c = src.charAt(i);
+        if (/\s/.test(c)) {
+            i++;
+        } else if (c === ";") {
+            i = lineCommentEnd(src, i);
+        } else if (i === 0 && src.slice(0, 2) === "#!") {
+            i = lineCommentEnd(src, i);
+        } else if (src.slice(i, i + 2) === "#|") {
+            var block = blockCommentEnd(src, i);
+            if (!block.complete) return block;
+            i = block.end;
+        } else {
+            break;
+        }
+    }
+    return { end: i, complete: true };
+}
+
+// Return the end of one reader datum. This is used only to keep delimiters
+// inside #; datum comments out of balance and pairing calculations.
+function datumEnd(src, start) {
+    var trivia = readerTriviaEnd(src, start);
+    if (!trivia.complete) return trivia;
+    var i = trivia.end;
+    if (i >= src.length) return { end: i, complete: false };
+
+    if (src.slice(i, i + 2) === "#;") {
+        var commented = datumEnd(src, i + 2);
+        if (!commented.complete) return commented;
+        return datumEnd(src, commented.end);
+    }
+    if (src.charAt(i) === "'") return datumEnd(src, i + 1);
+    if (src.charAt(i) === '"') return stringEnd(src, i);
+
+    var close = null;
+    if (src.slice(i, i + 2) === ":{") {
+        close = "}";
+        i += 2;
+    } else if (PAREN_OPEN[src.charAt(i)]) {
+        close = PAREN_OPEN[src.charAt(i)];
+        i++;
+    }
+    if (close !== null) {
+        while (true) {
+            trivia = readerTriviaEnd(src, i);
+            if (!trivia.complete) return trivia;
+            i = trivia.end;
+            if (i >= src.length) return { end: i, complete: false };
+            if (src.charAt(i) === close) return { end: i + 1, complete: true };
+            if (PAREN_CLOSE[src.charAt(i)]) return { end: i + 1, complete: false };
+            var child = datumEnd(src, i);
+            if (!child.complete) return child;
+            i = child.end;
+        }
+    }
+    if (PAREN_CLOSE[src.charAt(i)]) return { end: i + 1, complete: false };
+
+    i++;
+    while (i < src.length && !/[\s()[\]{};"]/.test(src.charAt(i))) i++;
+    return { end: i, complete: true };
+}
+
+function isReaderBoundary(src, index) {
+    if (index === 0) return true;
+    var prev = src.charAt(index - 1);
+    return /\s/.test(prev) || PAREN_OPEN[prev] !== undefined ||
+        PAREN_CLOSE[prev] !== undefined || prev === "'" || prev === '"' ||
+        prev === ";" || src.slice(index - 2, index) === "|#";
+}
+
+// Scan once for lexical exclusions, typed delimiter pairs, and balance.
+// A mismatched closer is left unmatched and does not pop a usable opener.
+function scanSyntax(src) {
+    var pairs = [];
+    var levels = [];
+    var spans = [];
+    var opens = [];
+    var balanced = true;
+    var i = 0;
+    while (i < src.length) {
+        var c = src.charAt(i);
+        if (c === '"') {
+            var str = stringEnd(src, i);
+            spans.push({ start: i, end: str.end, cls: "tok-str" });
+            if (!str.complete) balanced = false;
+            i = str.end;
+            continue;
+        }
+        if (c === ";") {
+            var lineEnd = lineCommentEnd(src, i);
+            spans.push({ start: i, end: lineEnd, cls: "tok-cmt" });
+            i = lineEnd;
+            continue;
+        }
+        if (i === 0 && src.slice(0, 2) === "#!") {
+            lineEnd = lineCommentEnd(src, i);
+            spans.push({ start: i, end: lineEnd, cls: "tok-cmt" });
+            i = lineEnd;
+            continue;
+        }
+        if (src.slice(i, i + 2) === "#|" && isReaderBoundary(src, i)) {
+            var block = blockCommentEnd(src, i);
+            spans.push({ start: i, end: block.end, cls: "tok-cmt" });
+            if (!block.complete) balanced = false;
+            i = block.end;
+            continue;
+        }
+        if (src.slice(i, i + 2) === "#;" && isReaderBoundary(src, i)) {
+            var ignored = datumEnd(src, i + 2);
+            spans.push({ start: i, end: ignored.end, cls: "tok-cmt" });
+            if (!ignored.complete) balanced = false;
+            i = ignored.end;
+            continue;
+        }
+        if (PAREN_OPEN[c]) {
+            var level = opens.length;
+            levels[i] = level;
+            opens.push({ index: i, open: c, close: PAREN_OPEN[c], level: level });
+        } else if (PAREN_CLOSE[c]) {
+            var top = opens.length > 0 ? opens[opens.length - 1] : null;
+            if (top && top.close === c) {
+                opens.pop();
+                pairs[top.index] = i;
+                pairs[i] = top.index;
+                levels[i] = top.level;
+            } else {
+                balanced = false;
+            }
+        }
+        i++;
+    }
+    if (opens.length !== 0) balanced = false;
+    return { pairs: pairs, levels: levels, spans: spans, balanced: balanced };
+}
+function highlightCode(src, start, end, syntax, match) {
+    var out = "";
+    var m;
+    var last = start;
+    TOKEN_RE.lastIndex = start;
+    while ((m = TOKEN_RE.exec(src)) !== null) {
+        if (m.index >= end) break;
+        if (TOKEN_RE.lastIndex > end) {
+            out += esc(src.slice(last, end));
+            return out;
+        }
+        out += esc(src.slice(last, m.index));
+        if (m[1] !== undefined) out += span("tok-cmt", m[1]);
+        else if (m[2] !== undefined) out += span("tok-str", m[2]);
+        else if (m[3] !== undefined) out += span("tok-num", m[3]);
+        else if (m[4] !== undefined) out += span("tok-num", m[4]);
+        else if (m[5] !== undefined) {
+            var level = syntax.levels[m.index];
+            var cls = level === undefined ? "tok-paren" : "tok-paren-" + (level % 6);
+            if (match && (m.index === match.a || m.index === match.b)) cls += " match";
+            out += span(cls, m[5]);
+        } else {
+            var s = m[6];
+            if (s === "#t" || s === "#f") out += span("tok-lit", s);
+            else if (s.charAt(0) === ":") out += span("tok-intr", s);
+            else if (SPECIAL[s]) out += span("tok-kw", s);
+            else if (TYPES[s]) out += span("tok-typ", s);
+            else out += span("tok-sym", s);
+        }
+        last = TOKEN_RE.lastIndex;
+    }
+    out += esc(src.slice(last, end));
+    return out;
+}
+
+function highlight(src, match) {
+    var syntax = scanSyntax(src);
+    var out = "";
+    var last = 0;
+    for (var i = 0; i < syntax.spans.length; i++) {
+        var lexical = syntax.spans[i];
+        out += highlightCode(src, last, lexical.start, syntax, match);
+        out += span(lexical.cls, src.slice(lexical.start, lexical.end));
+        last = lexical.end;
+    }
+    out += highlightCode(src, last, src.length, syntax, match);
+    return out;
+}
+
+// Returns {a, b} offsets of the typed pair at the caret, or null.
+function matchParenAt(src, caret) {
+    var pairs = scanSyntax(src).pairs;
+    var index = null;
+    if (caret > 0 && pairs[caret - 1] !== undefined) index = caret - 1;
+    else if (pairs[caret] !== undefined) index = caret;
+    return index === null ? null : { a: index, b: pairs[index] };
+}
+
+function isBalanced(src) {
+    return scanSyntax(src).balanced;
+}
+/* ================= notebook ================= */
+var cells = [];       // {src, out, revision, stale, el}
+var currentCell = null;
+var STORE_KEY = "skript.pad.cells.v1";
+var THEME_KEY = "skript.pad.theme";
+var cellsEl = document.getElementById("cells");
+var welcomeEl = document.getElementById("welcome");
+var inputEl = document.getElementById("input");
+var mirrorCodeEl = document.getElementById("mirror-code");
+var mirrorEl = document.getElementById("mirror");
+var previewEl = document.getElementById("preview");
+var runBtn = document.getElementById("run");
+var clearBtn = document.getElementById("clear");
+var themeBtn = document.getElementById("theme");
+var statusEl = document.getElementById("status");
+var composerEl = document.querySelector(".composer");
+var editorEl = document.querySelector(".editor");
+
+function setStatus(cls, text) {
+    if (!statusEl) return;
+    statusEl.className = "status" + (cls ? " " + cls : "");
+    statusEl.textContent = text;
+}
+if (workerFailure) {
+    if (runBtn) runBtn.disabled = true;
+    setStatus("err", workerFailure);
+}
+function renderCellOutput(cell) {
+    var pre = cell.el.querySelector(".cell__output");
+    stopWidgets(pre);
+    pre.classList.toggle("is-stale", !!cell.stale);
+    pre.innerHTML = (cell.stale ? '<div class="cell__stale">stale output — run again to refresh</div>' : "") +
+        renderOutput(cell.out);
+    hydrateWidgets(pre);
+    pre.scrollTop = pre.scrollHeight;
+}
+function writeCellOut(cell, text) {
+    if (!cell) return;
+    cell.out += text;
+    renderCellOutput(cell);
+    if (cell.el.scrollIntoView) cell.el.scrollIntoView({ block: "nearest" });
+}
+// Canonical text comes from print.zig: (widget image H W C COLORMAP N...),
+// (widget video F H W C FPS N...), (widget audio NCHAN N RATE S...).
+// Anything malformed falls back to plain escaped text (never throws).
+var widgetSeq = 0;
+var widgetStore = {};
+// 16-entry colormap tables, lerped at paint time. gray is direct (no table).
+var WIDGET_MAPS = {
+    viridis: [[68,1,84],[72,28,110],[69,48,125],[63,64,134],[56,80,139],[48,97,141],[41,112,142],[35,127,142],[31,141,141],[31,158,137],[47,179,124],[80,196,106],[121,209,81],[165,219,54],[211,226,44],[253,231,37]],
+    plasma: [[13,8,135],[60,9,168],[94,12,183],[123,18,187],[148,28,183],[172,41,172],[193,55,157],[211,71,139],[226,88,120],[238,106,101],[247,126,82],[252,147,63],[253,170,45],[250,193,39],[244,217,69],[240,249,33]],
+    inferno: [[0,0,4],[28,16,68],[54,23,106],[79,30,130],[105,37,144],[131,45,145],[157,54,136],[182,64,122],[205,75,106],[225,88,89],[241,103,70],[251,121,51],[254,144,32],[253,170,39],[249,199,82],[252,255,164]],
+    magma: [[0,0,4],[29,17,71],[55,24,109],[80,30,135],[105,37,150],[130,45,158],[155,54,157],[180,65,151],[203,77,140],[224,92,125],[240,110,106],[251,130,88],[253,153,69],[252,178,53],[250,204,48],[252,255,164]]
+};
+// Active video frame timers. Re-rendering a cell replaces its canvas nodes,
+// so callers stop timers under a root via stopWidgets before swapping HTML.
+var widgetTimers = [];
+function stopWidgets(root) {
+    if (!root || !root.contains) return;
+    for (var i = widgetTimers.length - 1; i >= 0; i--) {
+        if (root.contains(widgetTimers[i].box)) {
+            if (widgetTimers[i].timer) clearInterval(widgetTimers[i].timer);
+            widgetTimers.splice(i, 1);
+        }
+    }
+}
+function widgetInt(tok) {
+    if (!/^-?\d+$/.test(tok)) return NaN;
+    var value = Number(tok);
+    return isFinite(value) && Math.floor(value) === value ? value : NaN;
+}
+var WIDGET_FLOAT_RE = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
+function widgetFloat(tok) {
+    if (/^[+-]?nan(?:\.0)?$/.test(tok)) return 0;
+    if (/^-inf(?:\.0)?$/.test(tok)) return 0;
+    if (/^\+?inf(?:\.0)?$/.test(tok)) return 1;
+    if (!WIDGET_FLOAT_RE.test(tok)) return NaN;
+    var value = Number(tok);
+    if (value !== value) return NaN;
+    if (value === Infinity) return 1;
+    if (value === -Infinity) return 0;
+    return value;
+}
+function widgetAudioValue(tok) {
+    if (!WIDGET_FLOAT_RE.test(tok)) return NaN;
+    var value = Number(tok);
+    return isFinite(value) ? value : NaN;
+}
+// Image/video sample: integer tokens clip to 0..255, float tokens clip to
+// 0..1 then scale. Non-finite floats follow the native display contract.
+function widgetByte(tok) {
+    if (/[.eE]/.test(tok) || /^[+-]?(?:nan|inf)(?:\.0)?$/.test(tok)) {
+        var f = widgetFloat(tok);
+        if (f !== f) return NaN;
+        if (f < 0) f = 0;
+        if (f > 1) f = 1;
+        return Math.round(f * 255);
+    }
+    var value = widgetInt(tok);
+    if (value !== value) return NaN;
+    if (value < 0) value = 0;
+    if (value > 255) value = 255;
+    return value;
+}
+function parseWidgetImage(toks) {
+    if (toks.length < 7) return null;
+    var h = widgetInt(toks[2]), w = widgetInt(toks[3]), c = widgetInt(toks[4]);
+    if (!(h >= 1 && w >= 1) || (c !== 1 && c !== 3 && c !== 4)) return null;
+    if (h > 1024 || w > 1024) return null;
+    var lut = null;
+    if (c === 1) {
+        if (toks[5] === "gray") lut = null;
+        else {
+            lut = WIDGET_MAPS[toks[5]];
+            if (!lut) return null;
+        }
+    } else if (toks[5] !== "rgb") {
+        return null;
+    }
+    var data = toks.slice(6);
+    if (data.length !== h * w * c) return null;
+    var bytes = new Array(data.length);
+    for (var i = 0; i < data.length; i++) {
+        var b = widgetByte(data[i]);
+        if (b !== b) return null;
+        bytes[i] = b;
+    }
+    return { kind: "image", h: h, w: w, c: c, lut: lut, data: bytes };
+}
+function parseWidgetVideo(toks) {
+    if (toks.length < 8) return null;
+    var f = widgetInt(toks[2]), h = widgetInt(toks[3]);
+    var w = widgetInt(toks[4]), c = widgetInt(toks[5]);
+    if (!(f >= 1 && h >= 1 && w >= 1) || (c !== 1 && c !== 3 && c !== 4)) return null;
+    if (h > 1024 || w > 1024) return null;
+    var fps = widgetInt(toks[6]);
+    if (!(fps >= 1)) return null;
+    var data = toks.slice(7);
+    if (data.length !== f * h * w * c || data.length > 4000000) return null;
+    var bytes = new Array(data.length);
+    for (var i = 0; i < data.length; i++) {
+        var b = widgetByte(data[i]);
+        if (b !== b) return null;
+        bytes[i] = b;
+    }
+    return { kind: "video", f: f, h: h, w: w, c: c, fps: fps, lut: null, data: bytes };
+}
+function parseWidgetAudio(toks) {
+    if (toks.length < 5) return null;
+    var nchan = widgetInt(toks[2]), n = widgetInt(toks[3]);
+    if (!(nchan >= 1 && n >= 1 && nchan <= 32) || nchan * n > 2000000) return null;
+    var rate = widgetInt(toks[4]);
+    if (!(rate >= 8000 && rate <= 96000)) return null;
+    var data = toks.slice(5);
+    if (data.length !== nchan * n) return null;
+    var samples = new Array(data.length);
+    for (var i = 0; i < data.length; i++) {
+        var v = widgetAudioValue(data[i]);
+        if (v !== v) return null;
+        samples[i] = v;
+    }
+    return { kind: "audio", nchan: nchan, n: n, rate: rate, data: samples };
+}
+// Returns a widget spec, or null when the line is not a well-formed widget.
+function parseWidgetLine(line) {
+    var t = line.replace(/\s+$/, "");
+    if (t.indexOf("(widget ") !== 0) return null;
+    var toks = t.split(/\s+/);
+    if (toks.length < 3 || toks[0] !== "(widget") return null;
+    var last = toks[toks.length - 1];
+    if (last.charAt(last.length - 1) !== ")") return null;
+    last = last.slice(0, -1);
+    if (!last) return null;
+    toks[toks.length - 1] = last;
+    if (toks[1] === "image") return parseWidgetImage(toks);
+    if (toks[1] === "video") return parseWidgetVideo(toks);
+    if (toks[1] === "audio") return parseWidgetAudio(toks);
+    return null;
+}
+function widgetPaintFrame(ctx, spec, f) {
+    var img = ctx.createImageData(spec.w, spec.h);
+    var px = img.data;
+    var n = spec.w * spec.h;
+    var base = (f || 0) * n * spec.c;
+    var lut = spec.lut;
+    for (var p = 0; p < n; p++) {
+        var o = base + p * spec.c;
+        var q = p * 4;
+        if (spec.c === 1) {
+            if (!lut) {
+                px[q] = spec.data[o];
+                px[q + 1] = spec.data[o];
+                px[q + 2] = spec.data[o];
+                px[q + 3] = 255;
+            } else {
+                var t = spec.data[o] / 255 * 15;
+                var i0 = Math.floor(t);
+                var fr = t - i0;
+                var i1 = i0 + 1 > 15 ? 15 : i0 + 1;
+                var c0 = lut[i0], c1 = lut[i1];
+                px[q] = Math.round(c0[0] + (c1[0] - c0[0]) * fr);
+                px[q + 1] = Math.round(c0[1] + (c1[1] - c0[1]) * fr);
+                px[q + 2] = Math.round(c0[2] + (c1[2] - c0[2]) * fr);
+                px[q + 3] = 255;
+            }
+        } else {
+            px[q] = spec.data[o];
+            px[q + 1] = spec.data[o + 1];
+            px[q + 2] = spec.data[o + 2];
+            px[q + 3] = spec.c === 4 ? spec.data[o + 3] : 255;
+        }
+    }
+    ctx.putImageData(img, 0, 0);
+}
+function widgetBuildImage(box, spec) {
+    var canvas = document.createElement("canvas");
+    canvas.width = spec.w;
+    canvas.height = spec.h;
+    canvas.className = "widget__canvas";
+    box.appendChild(canvas);
+    widgetPaintFrame(canvas.getContext("2d"), spec, 0);
+}
+function widgetBuildVideo(box, spec) {
+    var canvas = document.createElement("canvas");
+    canvas.width = spec.w;
+    canvas.height = spec.h;
+    canvas.className = "widget__canvas";
+    box.appendChild(canvas);
+    var ctx = canvas.getContext("2d");
+    var bar = document.createElement("div");
+    bar.className = "widget__controls";
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn btn--ghost";
+    btn.textContent = "pause";
+    var scrub = document.createElement("input");
+    scrub.type = "range";
+    scrub.min = "0";
+    scrub.max = String(spec.f - 1);
+    scrub.value = "0";
+    scrub.setAttribute("aria-label", "frame");
+    bar.appendChild(btn);
+    bar.appendChild(scrub);
+    box.appendChild(bar);
+    var frame = 0;
+    var entry = { timer: null, box: box };
+    widgetTimers.push(entry);
+    var step = Math.max(1, Math.round(1000 / spec.fps));
+    function show(f) {
+        frame = f;
+        widgetPaintFrame(ctx, spec, f);
+        scrub.value = String(f);
+    }
+    function play() {
+        if (entry.timer) return;
+        entry.timer = setInterval(function () { show((frame + 1) % spec.f); }, step);
+        btn.textContent = "pause";
+    }
+    function pause() {
+        if (entry.timer) clearInterval(entry.timer);
+        entry.timer = null;
+        btn.textContent = "play";
+    }
+    btn.addEventListener("click", function () { if (entry.timer) pause(); else play(); });
+    scrub.addEventListener("input", function () { show(Number(scrub.value) || 0); });
+    show(0);
+    play();
+}
+function widgetPaintWave(canvas, spec) {
+    var ctx = canvas.getContext("2d");
+    var W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = "#888";
+    var mid = H / 2;
+    for (var x = 0; x < W; x++) {
+        var i0 = Math.floor(x / W * spec.n);
+        var i1 = Math.floor((x + 1) / W * spec.n);
+        if (i1 <= i0) i1 = i0 + 1;
+        var lo = 1, hi = -1;
+        for (var c = 0; c < spec.nchan; c++) {
+            for (var i = i0; i < i1 && i < spec.n; i++) {
+                var v = spec.data[c * spec.n + i];
+                if (v < lo) lo = v;
+                if (v > hi) hi = v;
+            }
+        }
+        if (hi < lo) { lo = 0; hi = 0; }
+        var y0 = Math.round(mid - hi * (mid - 1));
+        var y1 = Math.round(mid - lo * (mid - 1));
+        ctx.fillRect(x, y0 < y1 ? y0 : y1, 1, Math.abs(y1 - y0) || 1);
+    }
+}
+function widgetBuildAudio(box, spec) {
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn btn--ghost";
+    btn.textContent = "play";
+    box.appendChild(btn);
+    var wave = document.createElement("canvas");
+    wave.width = 260;
+    wave.height = 64;
+    wave.className = "widget__wave";
+    box.appendChild(wave);
+    widgetPaintWave(wave, spec);
+    var ac = null;
+    var src = null;
+    btn.addEventListener("click", function () {
+        try {
+            var AC = window.AudioContext || window.webkitAudioContext;
+            if (!AC) { btn.disabled = true; return; }
+            if (!ac) ac = new AC();
+            if (ac.state === "suspended") ac.resume();
+            if (src) {
+                try { src.stop(); } catch (e) {}
+                src = null;
+                btn.textContent = "play";
+                return;
+            }
+            var buf = ac.createBuffer(spec.nchan, spec.n, spec.rate);
+            for (var c = 0; c < spec.nchan; c++) {
+                var ch = buf.getChannelData(c);
+                for (var i = 0; i < spec.n; i++) ch[i] = spec.data[c * spec.n + i];
+            }
+            var cur = ac.createBufferSource();
+            cur.buffer = buf;
+            cur.connect(ac.destination);
+            cur.onended = function () {
+                if (src === cur) { src = null; btn.textContent = "play"; }
+            };
+            src = cur;
+            cur.start();
+            btn.textContent = "stop";
+        } catch (e) { btn.disabled = true; }
+    });
+}
+// Paint every widget placeholder under root. Called right after each
+// innerHTML assignment that went through renderOutput.
+function hydrateWidgets(root) {
+    if (!root || !root.querySelectorAll) return;
+    var nodes = root.querySelectorAll("div.widget[data-wid]");
+    for (var k = 0; k < nodes.length; k++) {
+        var box = nodes[k];
+        var id = box.getAttribute("data-wid");
+        var spec = widgetStore[id];
+        if (!spec) continue;
+        delete widgetStore[id];
+        box.removeAttribute("data-wid");
+        try {
+            if (spec.kind === "image") widgetBuildImage(box, spec);
+            else if (spec.kind === "video") widgetBuildVideo(box, spec);
+            else widgetBuildAudio(box, spec);
+        } catch (e) {
+            box.textContent = "widget render failed";
+        }
+    }
+}
+function renderOutput(text) {
+    // Style lines that carry a runtime error red (skriptPad streams "error: …").
+    // Lines that parse as canonical widgets become live widgets; the raw
+    // line is kept in a collapsed <details>. Malformed widget text stays
+    // plain escaped text.
+    var lines = text.split("\n");
+    var html = "";
+    for (var i = 0; i < lines.length; i++) {
+        var line = lines[i];
+        var spec = parseWidgetLine(line.replace(/\s+$/, ""));
+        if (spec) {
+            var id = ++widgetSeq;
+            widgetStore[id] = spec;
+            html += '<div class="widget" data-wid="' + id + '"></div>' +
+                '<details class="widget-src"><summary>source</summary><code>' +
+                esc(line) + "</code></details>" +
+                (i < lines.length - 1 ? "\n" : "");
+        } else if (line.indexOf("error:") === 0) html += '<span class="err">' + esc(line) + "</span>\n";
+        else html += esc(line) + (i < lines.length - 1 ? "\n" : "");
+    }
+    return html;
+}
+function addCell(src, out, meta) {
+    meta = meta || {};
+    var wrap = document.createElement("div");
+    wrap.className = "cell";
+    wrap.innerHTML =
+        '<div class="cell__source"><span class="cell__prompt">&raquo;</span><code>' +
+        highlight(src) + '</code><button class="cell__rerun btn btn--ghost" type="button">Run again</button></div>' +
+        '<pre class="cell__output"></pre>';
+    cellsEl.appendChild(wrap);
+    var cell = {
+        src: src,
+        out: out || "",
+        revision: typeof meta.revision === "string" ? meta.revision : null,
+        stale: !!meta.stale,
+        el: wrap,
+    };
+    cells.push(cell);
+    currentCell = cell;
+    wrap.querySelector(".cell__rerun").addEventListener("click", function () {
+        rerunCell(cell);
+    });
+    renderCellOutput(cell);
+    return cell;
+}
+function rerunCell(cell) {
+    if (!cell || !workerReady) {
+        setStatus("err", workerFailure || "worker is not ready");
+        return;
+    }
+    var button = cell.el.querySelector(".cell__rerun");
+    if (button) button.disabled = true;
+    var nextOut = "";
+    var wasStale = cell.stale;
+    runEval(cell.src, function (text) { nextOut += text; }, function (rc) {
+        if (button) button.disabled = false;
+        if (rc === 0) {
+            cell.out = nextOut;
+            cell.revision = ASSET_REVISION;
+            cell.stale = false;
+        } else if (nextOut) {
+            cell.out += nextOut;
+            cell.stale = wasStale;
+        }
+        renderCellOutput(cell);
+        persistCells();
+    });
+}
+function hideWelcome() {    if (welcomeEl) welcomeEl.hidden = true;
+}
+function persistCells() {
+    try {
+        localStorage.setItem(STORE_KEY, JSON.stringify(cells.map(function (c) {
+            return {
+                src: c.src,
+                out: c.out,
+                revision: c.revision,
+                stale: !!c.stale,
+            };
+        })));
+    } catch (e) { /* quota / private mode: notebook is session-only */ }
+}
+function restoreCells() {
+    var raw = null;
+    try { raw = localStorage.getItem(STORE_KEY); } catch (e) {}
+    if (!raw) return false;
+    var list;
+    try { list = JSON.parse(raw); } catch (e) { return false; }
+    var notebookRevision = null;
+    if (Array.isArray(list)) {
+        // Legacy storage is a bare cell array.
+    } else if (list && Array.isArray(list.cells)) {
+        notebookRevision = typeof list.revision === "string" ? list.revision : null;
+        list = list.cells;
+    } else {
+        return false;
+    }
+    list.forEach(function (saved) {
+        if (!saved || typeof saved.src !== "string") return;
+        var revision = typeof saved.revision === "string" ? saved.revision : notebookRevision;
+        var stale = !!saved.stale || revision !== ASSET_REVISION;
+        addCell(saved.src, typeof saved.out === "string" ? saved.out : "", {
+            revision: revision,
+            stale: stale,
+        });
+    });
+    return cells.length > 0;
+}
+function clearCells() {
+    stopWidgets(cellsEl);
+    cells.forEach(function (c) { c.el.remove(); });
+    cells = [];
+    currentCell = null;
+    try { localStorage.removeItem(STORE_KEY); } catch (e) {}
+    welcomeEl.hidden = false;
+    inputEl.focus();
+}
+
+/* ================= input mirror + preview ================= */
+
+var previewTimer = null;
+function schedulePreview() {
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(runPreview, 300);
+}
+function renderMirror() {
+    var src = inputEl.value;
+    var hasContent = src.length > 0;
+    var match = null;
+    if (inputEl.selectionStart === inputEl.selectionEnd) {
+        match = matchParenAt(src, inputEl.selectionStart);
+    }
+    mirrorCodeEl.innerHTML = highlight(src, match) + (hasContent && src[src.length - 1] === "\n" ? " " : "");
+    mirrorEl.classList.toggle("is-visible", hasContent);
+    inputEl.classList.toggle("is-plain", !hasContent);
+}
+function runPreview() {
+    var src = inputEl.value;
+    if (!src.trim()) {
+        previewEl.textContent = "";
+        previewEl.classList.remove("preview--empty");
+        return;
+    }
+    if (!isBalanced(src)) {
+        previewEl.textContent = "";
+        return;
+    }
+    if (!workerReady) return;
+    var out = "";
+    runEval(src, function (t) { out += t; }, function (rc) {
+        stopWidgets(previewEl);
+        previewEl.innerHTML = renderOutput(out);
+        hydrateWidgets(previewEl);
+        if (rc !== 0) {
+            // ensure an error is visible even if skriptPad printed nothing
+            if (!/error:/.test(out)) previewEl.innerHTML = '<span class="err">error: ' + esc("eval failed") + "</span>";
+        }
+    });
+}
+
+/* ================= completion ================= */
+// Mirrors the native REPL (third_party/zigzag/src/components/code_area.zig):
+// a passive popup listing candidates for the word ending at the caret.
+// Tab picks a candidate (Space then accepts); without a Tab the popup is
+// passive and Space types a literal space.
+var COMPLETIONS = (function () {
+    var seen = {};
+    var list = [];
+    [
+        // special forms, prelude names, and every runtime registry name
+        // (special forms: begin, case, cond, def, defn, fn, guard, if, let, quote, raise, try, unless, when)
+        "!=",
+        "*",
+        "+",
+        "-",
+        "/",
+        "<",
+        "<=",
+        "=",
+        ">",
+        ">=",
+        "Bool",
+        "CBool",
+        "CDouble",
+        "CFloat",
+        "CInt",
+        "CString",
+        "CUint",
+        "CVoid",
+        "Keyword",
+        "Opaque",
+        "String",
+        "Symbol",
+        "Tensor",
+        "Type",
+        "abs",
+        "acos",
+        "acosh",
+        "ad.gradient-call",
+        "ad.value-gradient-call",
+        "alive?",
+        "and",
+        "append",
+        "approx?",
+        "asin",
+        "asinh",
+        "atan",
+        "atan2",
+        "atanh",
+        "audio",
+        "autodiff.cotangent-add",
+        "autodiff.cotangent-zero",
+        "autodiff.hook-result",
+        "autodiff.register-rule",
+        "autodiff.register-space",
+        "autodiff.register-tree",
+        "autodiff.runtime-owned-output",
+        "autodiff.scalar",
+        "autodiff.scalar-adjoint",
+        "autodiff.tensor",
+        "autodiff.tensor-linear-apply",
+        "autodiff.tensor-linear-transpose",
+        "autodiff.tensor-nested",
+        "begin",
+        "blend",
+        "bool.and",
+        "bool.not",
+        "bool.or",
+        "bound-code",
+        "c16",
+        "c16.abs",
+        "c16.acos",
+        "c16.acosh",
+        "c16.add",
+        "c16.arg",
+        "c16.asin",
+        "c16.asinh",
+        "c16.atan",
+        "c16.atanh",
+        "c16.blend",
+        "c16.cart",
+        "c16.clamp",
+        "c16.conj",
+        "c16.cos",
+        "c16.cosh",
+        "c16.div",
+        "c16.eq",
+        "c16.exp",
+        "c16.expm1",
+        "c16.fract",
+        "c16.im",
+        "c16.is-finite?",
+        "c16.is-inf?",
+        "c16.is-nan?",
+        "c16.is-zero?",
+        "c16.log",
+        "c16.log1p",
+        "c16.mag",
+        "c16.mod",
+        "c16.mul",
+        "c16.ne",
+        "c16.neg",
+        "c16.norm",
+        "c16.polar",
+        "c16.pow",
+        "c16.re",
+        "c16.rem",
+        "c16.remap",
+        "c16.sin",
+        "c16.sinh",
+        "c16.sqrt",
+        "c16.sub",
+        "c16.tan",
+        "c16.tanh",
+        "c16.unblend",
+        "c32",
+        "c32.abs",
+        "c32.acos",
+        "c32.acosh",
+        "c32.add",
+        "c32.arg",
+        "c32.asin",
+        "c32.asinh",
+        "c32.atan",
+        "c32.atanh",
+        "c32.blend",
+        "c32.cart",
+        "c32.clamp",
+        "c32.conj",
+        "c32.cos",
+        "c32.cosh",
+        "c32.div",
+        "c32.eq",
+        "c32.exp",
+        "c32.expm1",
+        "c32.fract",
+        "c32.im",
+        "c32.is-finite?",
+        "c32.is-inf?",
+        "c32.is-nan?",
+        "c32.is-zero?",
+        "c32.log",
+        "c32.log1p",
+        "c32.mag",
+        "c32.mod",
+        "c32.mul",
+        "c32.ne",
+        "c32.neg",
+        "c32.norm",
+        "c32.polar",
+        "c32.pow",
+        "c32.re",
+        "c32.rem",
+        "c32.remap",
+        "c32.sin",
+        "c32.sinh",
+        "c32.sqrt",
+        "c32.sub",
+        "c32.tan",
+        "c32.tanh",
+        "c32.unblend",
+        "c64",
+        "c64.abs",
+        "c64.acos",
+        "c64.acosh",
+        "c64.add",
+        "c64.arg",
+        "c64.asin",
+        "c64.asinh",
+        "c64.atan",
+        "c64.atanh",
+        "c64.blend",
+        "c64.cart",
+        "c64.clamp",
+        "c64.conj",
+        "c64.cos",
+        "c64.cosh",
+        "c64.div",
+        "c64.eq",
+        "c64.exp",
+        "c64.expm1",
+        "c64.fract",
+        "c64.im",
+        "c64.is-finite?",
+        "c64.is-inf?",
+        "c64.is-nan?",
+        "c64.is-zero?",
+        "c64.log",
+        "c64.log1p",
+        "c64.mag",
+        "c64.mod",
+        "c64.mul",
+        "c64.ne",
+        "c64.neg",
+        "c64.norm",
+        "c64.polar",
+        "c64.pow",
+        "c64.re",
+        "c64.rem",
+        "c64.remap",
+        "c64.sin",
+        "c64.sinh",
+        "c64.sqrt",
+        "c64.sub",
+        "c64.tan",
+        "c64.tanh",
+        "c64.unblend",
+        "c8",
+        "case",
+        "cat",
+        "ceil",
+        "chunk",
+        "clamp",
+        "close-expr",
+        "close-linear",
+        "closure?",
+        "compile-expr",
+        "complex",
+        "complex?",
+        "concat",
+        "cond",
+        "cons",
+        "cons?",
+        "contains?",
+        "cos",
+        "cosh",
+        "def",
+        "defn",
+        "deg->rad",
+        "deriv",
+        "diff",
+        "disasm!",
+        "display",
+        "dot",
+        "drop",
+        "dynamic-library:close",
+        "dynamic-library:lookup",
+        "dynamic-library:open",
+        "else",
+        "equal?",
+        "error-name",
+        "error?",
+        "evaluate",
+        "even?",
+        "exit-reason",
+        "exp",
+        "expm1",
+        "expr->datum",
+        "expr-view",
+        "f16",
+        "f16.abs",
+        "f16.acos",
+        "f16.acosh",
+        "f16.add",
+        "f16.approx?",
+        "f16.asin",
+        "f16.asinh",
+        "f16.atan",
+        "f16.atan2",
+        "f16.atanh",
+        "f16.avg",
+        "f16.blend",
+        "f16.ceil",
+        "f16.clamp",
+        "f16.cos",
+        "f16.cosh",
+        "f16.deg->rad",
+        "f16.div",
+        "f16.eq",
+        "f16.exp",
+        "f16.expm1",
+        "f16.floor",
+        "f16.fract",
+        "f16.gt",
+        "f16.gte",
+        "f16.hypot",
+        "f16.is-even?",
+        "f16.is-finite?",
+        "f16.is-inf?",
+        "f16.is-nan?",
+        "f16.is-odd?",
+        "f16.is-zero?",
+        "f16.log",
+        "f16.log10",
+        "f16.log1p",
+        "f16.log2",
+        "f16.lt",
+        "f16.lte",
+        "f16.max",
+        "f16.min",
+        "f16.mod",
+        "f16.mul",
+        "f16.ne",
+        "f16.neg",
+        "f16.nextafter",
+        "f16.pi",
+        "f16.pow",
+        "f16.prevbefore",
+        "f16.rad->deg",
+        "f16.rem",
+        "f16.remap",
+        "f16.round",
+        "f16.sign",
+        "f16.sin",
+        "f16.sinh",
+        "f16.sqrt",
+        "f16.sub",
+        "f16.tan",
+        "f16.tanh",
+        "f16.tau",
+        "f16.trunc",
+        "f16.unblend",
+        "f32",
+        "f32.abs",
+        "f32.acos",
+        "f32.acosh",
+        "f32.add",
+        "f32.approx?",
+        "f32.asin",
+        "f32.asinh",
+        "f32.atan",
+        "f32.atan2",
+        "f32.atanh",
+        "f32.avg",
+        "f32.blend",
+        "f32.ceil",
+        "f32.clamp",
+        "f32.cos",
+        "f32.cosh",
+        "f32.deg->rad",
+        "f32.div",
+        "f32.eq",
+        "f32.exp",
+        "f32.expm1",
+        "f32.floor",
+        "f32.fract",
+        "f32.gt",
+        "f32.gte",
+        "f32.hypot",
+        "f32.is-even?",
+        "f32.is-finite?",
+        "f32.is-inf?",
+        "f32.is-nan?",
+        "f32.is-odd?",
+        "f32.is-zero?",
+        "f32.log",
+        "f32.log10",
+        "f32.log1p",
+        "f32.log2",
+        "f32.lt",
+        "f32.lte",
+        "f32.max",
+        "f32.min",
+        "f32.mod",
+        "f32.mul",
+        "f32.ne",
+        "f32.neg",
+        "f32.nextafter",
+        "f32.pi",
+        "f32.pow",
+        "f32.prevbefore",
+        "f32.rad->deg",
+        "f32.rem",
+        "f32.remap",
+        "f32.round",
+        "f32.sign",
+        "f32.sin",
+        "f32.sinh",
+        "f32.sqrt",
+        "f32.sub",
+        "f32.tan",
+        "f32.tanh",
+        "f32.tau",
+        "f32.trunc",
+        "f32.unblend",
+        "f64",
+        "f64.abs",
+        "f64.acos",
+        "f64.acosh",
+        "f64.add",
+        "f64.approx?",
+        "f64.asin",
+        "f64.asinh",
+        "f64.atan",
+        "f64.atan2",
+        "f64.atanh",
+        "f64.avg",
+        "f64.blend",
+        "f64.ceil",
+        "f64.clamp",
+        "f64.cos",
+        "f64.cosh",
+        "f64.deg->rad",
+        "f64.div",
+        "f64.eq",
+        "f64.exp",
+        "f64.expm1",
+        "f64.floor",
+        "f64.fract",
+        "f64.gt",
+        "f64.gte",
+        "f64.hypot",
+        "f64.is-even?",
+        "f64.is-finite?",
+        "f64.is-inf?",
+        "f64.is-nan?",
+        "f64.is-odd?",
+        "f64.is-zero?",
+        "f64.log",
+        "f64.log10",
+        "f64.log1p",
+        "f64.log2",
+        "f64.lt",
+        "f64.lte",
+        "f64.max",
+        "f64.min",
+        "f64.mod",
+        "f64.mul",
+        "f64.ne",
+        "f64.neg",
+        "f64.nextafter",
+        "f64.pi",
+        "f64.pow",
+        "f64.prevbefore",
+        "f64.rad->deg",
+        "f64.rem",
+        "f64.remap",
+        "f64.round",
+        "f64.sign",
+        "f64.sin",
+        "f64.sinh",
+        "f64.sqrt",
+        "f64.sub",
+        "f64.tan",
+        "f64.tanh",
+        "f64.tau",
+        "f64.trunc",
+        "f64.unblend",
+        "f8",
+        "ffi:make-func",
+        "ffifunc?",
+        "flat",
+        "float?",
+        "floor",
+        "fn",
+        "fold",
+        "format",
+        "fract",
+        "from-f16",
+        "from-f32",
+        "from-f64",
+        "fst",
+        "gradient",
+        "guard",
+        "hash-map",
+        "hvp",
+        "hypot",
+        "i16",
+        "i16.abs",
+        "i16.add",
+        "i16.clamp",
+        "i16.div",
+        "i16.eq",
+        "i16.from-f16",
+        "i16.from-f32",
+        "i16.from-f64",
+        "i16.gt",
+        "i16.gte",
+        "i16.is-even?",
+        "i16.is-odd?",
+        "i16.lt",
+        "i16.lte",
+        "i16.max",
+        "i16.min",
+        "i16.mod",
+        "i16.mul",
+        "i16.ne",
+        "i16.neg",
+        "i16.pow",
+        "i16.rem",
+        "i16.shl",
+        "i16.shr",
+        "i16.sign",
+        "i16.sub",
+        "i32",
+        "i32.abs",
+        "i32.add",
+        "i32.clamp",
+        "i32.div",
+        "i32.eq",
+        "i32.from-f16",
+        "i32.from-f32",
+        "i32.from-f64",
+        "i32.gt",
+        "i32.gte",
+        "i32.is-even?",
+        "i32.is-odd?",
+        "i32.lt",
+        "i32.lte",
+        "i32.max",
+        "i32.min",
+        "i32.mod",
+        "i32.mul",
+        "i32.ne",
+        "i32.neg",
+        "i32.pow",
+        "i32.rem",
+        "i32.shl",
+        "i32.shr",
+        "i32.sign",
+        "i32.sub",
+        "i64",
+        "i64.abs",
+        "i64.add",
+        "i64.clamp",
+        "i64.div",
+        "i64.eq",
+        "i64.from-f16",
+        "i64.from-f32",
+        "i64.from-f64",
+        "i64.gt",
+        "i64.gte",
+        "i64.is-even?",
+        "i64.is-odd?",
+        "i64.lt",
+        "i64.lte",
+        "i64.max",
+        "i64.min",
+        "i64.mod",
+        "i64.mul",
+        "i64.ne",
+        "i64.neg",
+        "i64.pow",
+        "i64.rem",
+        "i64.shl",
+        "i64.shr",
+        "i64.sign",
+        "i64.sub",
+        "i8",
+        "i8.abs",
+        "i8.add",
+        "i8.clamp",
+        "i8.div",
+        "i8.eq",
+        "i8.from-f16",
+        "i8.from-f32",
+        "i8.from-f64",
+        "i8.gt",
+        "i8.gte",
+        "i8.is-even?",
+        "i8.is-odd?",
+        "i8.lt",
+        "i8.lte",
+        "i8.max",
+        "i8.min",
+        "i8.mod",
+        "i8.mul",
+        "i8.ne",
+        "i8.neg",
+        "i8.pow",
+        "i8.rem",
+        "i8.shl",
+        "i8.shr",
+        "i8.sign",
+        "i8.sub",
+        "if",
+        "im",
+        "image",
+        "import",
+        "instance",
+        "int?",
+        "intrinsic?",
+        "iota",
+        "is-core-type?",
+        "is-even?",
+        "is-finite?",
+        "is-inf?",
+        "is-instance-of?",
+        "is-nan?",
+        "is-odd?",
+        "is-zero?",
+        "jacobian",
+        "jvp",
+        "keep",
+        "keyword.eq",
+        "keyword.ne",
+        "lambda",
+        "length",
+        "let",
+        "linearize",
+        "list",
+        "list->string",
+        "load",
+        "lock-method",
+        "log",
+        "log10",
+        "log1p",
+        "log2",
+        "mag",
+        "map",
+        "map-get",
+        "map-has?",
+        "map-keys",
+        "map-set!",
+        "map-size",
+        "map-vals",
+        "map2",
+        "max",
+        "method",
+        "method?",
+        "min",
+        "mod",
+        "module",
+        "namespace?",
+        "nextafter",
+        "nil",
+        "not",
+        "number->string",
+        "number?",
+        "or",
+        "outer",
+        "part",
+        "pi",
+        "pid",
+        "pid.eq",
+        "pid.ne",
+        "polar",
+        "pow",
+        "prevbefore",
+        "printf",
+        "process-info",
+        "quote",
+        "rad->deg",
+        "raise",
+        "range",
+        "re",
+        "read",
+        "real?",
+        "receive",
+        "register-ad-rule",
+        "register-ad-space",
+        "register-ad-tree",
+        "rem",
+        "remap",
+        "reshape",
+        "rev",
+        "reverse",
+        "rgba",
+        "rot",
+        "round",
+        "rst",
+        "scan",
+        "self",
+        "send",
+        "set!",
+        "shl",
+        "shr",
+        "sign",
+        "simplify-expr",
+        "sin",
+        "sinh",
+        "sleep",
+        "sort-dn",
+        "sort-up",
+        "source-datum",
+        "source-location",
+        "source-text",
+        "spawn",
+        "sqrt",
+        "stack",
+        "string!=",
+        "string->list",
+        "string->number",
+        "string->symbol",
+        "string-append",
+        "string-byte-ref",
+        "string-downcase",
+        "string-ends-with?",
+        "string-find",
+        "string-includes?",
+        "string-join",
+        "string-length",
+        "string-replace",
+        "string-reverse",
+        "string-split",
+        "string-starts-with?",
+        "string-trim",
+        "string-trim-left",
+        "string-trim-right",
+        "string-upcase",
+        "string.append",
+        "string.byte-ref",
+        "string.downcase",
+        "string.ends-with?",
+        "string.eq",
+        "string.find",
+        "string.from-list",
+        "string.from-symbol",
+        "string.gt",
+        "string.gte",
+        "string.includes?",
+        "string.join",
+        "string.length",
+        "string.lt",
+        "string.lte",
+        "string.ne",
+        "string.number->string",
+        "string.replace",
+        "string.reverse",
+        "string.split",
+        "string.starts-with?",
+        "string.string->number",
+        "string.substring",
+        "string.to-list",
+        "string.trim",
+        "string.trim-left",
+        "string.trim-right",
+        "string.upcase",
+        "string<=?",
+        "string<?",
+        "string=?",
+        "string>=?",
+        "string>?",
+        "substring",
+        "symbol",
+        "symbol->string",
+        "symbol.eq",
+        "symbol.ne",
+        "symbolic",
+        "symbolic-var",
+        "take",
+        "tan",
+        "tanh",
+        "tau",
+        "tensor-get",
+        "tensor-len",
+        "tensor-rank",
+        "tensor-shape",
+        "tensor.eq",
+        "timeout-sentinel",
+        "trans",
+        "transpose",
+        "trunc",
+        "try",
+        "type",
+        "u16",
+        "u16.abs",
+        "u16.add",
+        "u16.clamp",
+        "u16.div",
+        "u16.eq",
+        "u16.from-f16",
+        "u16.from-f32",
+        "u16.from-f64",
+        "u16.gt",
+        "u16.gte",
+        "u16.is-even?",
+        "u16.is-odd?",
+        "u16.lt",
+        "u16.lte",
+        "u16.max",
+        "u16.min",
+        "u16.mod",
+        "u16.mul",
+        "u16.ne",
+        "u16.neg",
+        "u16.pow",
+        "u16.rem",
+        "u16.shl",
+        "u16.shr",
+        "u16.sign",
+        "u16.sub",
+        "u32",
+        "u32.abs",
+        "u32.add",
+        "u32.clamp",
+        "u32.div",
+        "u32.eq",
+        "u32.from-f16",
+        "u32.from-f32",
+        "u32.from-f64",
+        "u32.gt",
+        "u32.gte",
+        "u32.is-even?",
+        "u32.is-odd?",
+        "u32.lt",
+        "u32.lte",
+        "u32.max",
+        "u32.min",
+        "u32.mod",
+        "u32.mul",
+        "u32.ne",
+        "u32.neg",
+        "u32.pow",
+        "u32.rem",
+        "u32.shl",
+        "u32.shr",
+        "u32.sign",
+        "u32.sub",
+        "u64",
+        "u64.abs",
+        "u64.add",
+        "u64.clamp",
+        "u64.div",
+        "u64.eq",
+        "u64.from-f16",
+        "u64.from-f32",
+        "u64.from-f64",
+        "u64.gt",
+        "u64.gte",
+        "u64.is-even?",
+        "u64.is-odd?",
+        "u64.lt",
+        "u64.lte",
+        "u64.max",
+        "u64.min",
+        "u64.mod",
+        "u64.mul",
+        "u64.ne",
+        "u64.neg",
+        "u64.pow",
+        "u64.rem",
+        "u64.shl",
+        "u64.shr",
+        "u64.sign",
+        "u64.sub",
+        "u8",
+        "u8.abs",
+        "u8.add",
+        "u8.clamp",
+        "u8.div",
+        "u8.eq",
+        "u8.from-f16",
+        "u8.from-f32",
+        "u8.from-f64",
+        "u8.gt",
+        "u8.gte",
+        "u8.is-even?",
+        "u8.is-odd?",
+        "u8.lt",
+        "u8.lte",
+        "u8.max",
+        "u8.min",
+        "u8.mod",
+        "u8.mul",
+        "u8.ne",
+        "u8.neg",
+        "u8.pow",
+        "u8.rem",
+        "u8.shl",
+        "u8.shr",
+        "u8.sign",
+        "u8.sub",
+        "unblend",
+        "uniq",
+        "unless",
+        "use-multi",
+        "value-and-gradient",
+        "video",
+        "vjp",
+        "when",
+        "where",
+        "write",
+        "zip",
+    ].forEach(function (s) { if (!seen[s]) { seen[s] = 1; list.push(s); } });
+    return list.sort();
+})();
+
+var completionPopup = null;
+var completionVisible = false;
+var completionCandidates = []; // filtered, sorted order preserved
+var completionSelection = 0;
+var completionTabbed = false;  // true once Tab picked a candidate; Space accepts only then
+var completionWordStart = 0;   // absolute offset of the prefix word's first char
+var completionCharW = 0;       // measured mono char width (px)
+
+function isCompletionChar(ch) {
+    if (ch.length !== 1) return false;
+    var c = ch.charCodeAt(0);
+    if (c >= 128) return false;
+    return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) ||
+        "-_?!*/<>=+.:".indexOf(ch) !== -1;
+}
+// Start of the maximal run of word chars ending at `caret` (or caret itself).
+function completionWordStartAt(caret) {
+    var v = inputEl.value;
+    while (caret > 0 && isCompletionChar(v.charAt(caret - 1))) caret--;
+    return caret;
+}
+function hideCompletionPopup() {
+    completionVisible = false;
+    completionCandidates = [];
+    completionSelection = 0;
+    completionTabbed = false;
+    if (completionPopup) completionPopup.style.display = "none";
+}
+function renderCompletionPopup() {
+    completionPopup.textContent = "";
+    completionCandidates.forEach(function (cand, i) {
+        var b = document.createElement("button");
+        b.type = "button";
+        b.textContent = cand;
+        if (completionTabbed && i === completionSelection) b.className = "selected";
+        b.addEventListener("click", function () { acceptCompletion(false); });
+        completionPopup.appendChild(b);
+    });
+    completionPopup.style.display = "";
+}
+function scrollCompletionSelection() {
+    var btns = completionPopup.children;
+    var sel = btns[completionSelection];
+    if (!sel) return;
+    if (sel.offsetTop < completionPopup.scrollTop) {
+        completionPopup.scrollTop = sel.offsetTop;
+    } else if (sel.offsetTop + sel.offsetHeight > completionPopup.scrollTop + completionPopup.clientHeight) {
+        completionPopup.scrollTop = sel.offsetTop + sel.offsetHeight - completionPopup.clientHeight;
+    }
+}
+function showCompletion(start) {
+    var caret = inputEl.selectionStart;
+    var prefix = inputEl.value.slice(start, caret);
+    completionCandidates = COMPLETIONS.filter(function (c) { return c.indexOf(prefix) === 0; });
+    if (completionCandidates.length === 0) { hideCompletionPopup(); return; }
+    completionWordStart = start;
+    completionSelection = 0;
+    completionTabbed = false;
+    completionVisible = true;
+    if (!completionCharW) completionCharW = measureCompletionCharWidth();
+    renderCompletionPopup();
+    positionCompletionPopup();
+}
+// Recompute the popup after the value/caret changed (input event, autopair,
+// caret moves). Shows when a word of >= 2 chars ends at the caret.
+function refreshCompletionAfterEdit() {
+    var caret = inputEl.selectionStart;
+    var start = completionWordStartAt(caret);
+    if (caret - start >= 2) showCompletion(start);
+    else hideCompletionPopup();
+}
+// Tab: first press selects candidate 0 and sets the "tabbed" state; later
+// presses advance the selection (wrapping around).
+function cycleCompletion() {
+    if (completionCandidates.length <= 1) {
+        completionTabbed = true;
+    } else if (completionTabbed) {
+        completionSelection = (completionSelection + 1) % completionCandidates.length;
+    } else {
+        completionTabbed = true;
+        completionSelection = 0;
+    }
+    renderCompletionPopup();
+    scrollCompletionSelection();
+}
+// Accept: replace only the prefix word (word start..caret) — never text
+// beyond the caret — put the caret right after the candidate, optionally
+// insert a literal space after it, and hide the popup.
+function acceptCompletion(insertSpace) {
+    if (!completionVisible) return;
+    var cand = completionCandidates[completionSelection];
+    if (cand === undefined) { hideCompletionPopup(); return; }
+    var v = inputEl.value;
+    var caret = inputEl.selectionStart;
+    var start = Math.min(completionWordStart, caret);
+    var newCaret = start + cand.length;
+    v = v.slice(0, start) + cand + v.slice(caret);
+    if (insertSpace) {
+        v = v.slice(0, newCaret) + " " + v.slice(newCaret);
+        newCaret++;
+    }
+    inputEl.value = v;
+    inputEl.setSelectionRange(newCaret, newCaret);
+    hideCompletionPopup();
+    renderMirror();
+    autoGrow();
+    schedulePreview();
+    inputEl.focus();
+}
+// One-time measurement of the mono char width via a hidden span carrying the
+// textarea's computed font.
+function measureCompletionCharWidth() {
+    var span = document.createElement("span");
+    span.textContent = "0000000000";
+    span.style.position = "absolute";
+    span.style.visibility = "hidden";
+    span.style.whiteSpace = "pre";
+    var cs = getComputedStyle(inputEl);
+    span.style.fontFamily = cs.fontFamily;
+    span.style.fontSize = cs.fontSize;
+    document.body.appendChild(span);
+    var w = span.getBoundingClientRect().width / 10;
+    span.remove();
+    return w;
+}
+// Display column of the prefix word's first char (mono font: chars = cols).
+function completionAnchorCol() {
+    var v = inputEl.value;
+    var caret = inputEl.selectionStart;
+    var lineStart = v.lastIndexOf("\n", caret - 1) + 1;
+    var col = 0;
+    for (var i = lineStart; i < completionWordStart; i++) col += v.charAt(i) === "\t" ? 8 : 1;
+    return col;
+}
+// Re-anchor the popup below the editor, left-aligned to the word-start column.
+function positionCompletionPopup() {
+    if (!completionPopup || !completionVisible) return;
+    var composerRect = composerEl.getBoundingClientRect();
+    var inputRect = inputEl.getBoundingClientRect();
+    var padLeft = parseFloat(getComputedStyle(inputEl).paddingLeft);
+    var left = (inputRect.left - composerRect.left) + padLeft + editorEl.scrollLeft +
+        completionAnchorCol() * completionCharW;
+    var editorRect = editorEl.getBoundingClientRect();
+    completionPopup.style.left = left + "px";
+    completionPopup.style.top = (editorRect.bottom - composerRect.top) + 4 + "px";
+}
+
+/* ================= history ================= */
+var hist = [];
+var histIndex = 0;
+function commit() {
+    var src = inputEl.value;
+    if (!src.trim() || !workerReady) return;
+    clearTimeout(previewTimer);
+    previewEl.textContent = "";
+    hideWelcome();
+    var cell = addCell(src, "", { stale: false });
+    runEval(src, function (t) { writeCellOut(cell, t); }, function (rc) {
+        if (rc === 0) {
+            cell.revision = ASSET_REVISION;
+            cell.stale = false;
+        }
+        renderCellOutput(cell);
+        persistCells();
+    });
+    hist.push(src);
+    histIndex = hist.length;
+    inputEl.value = "";
+    renderMirror();
+    hideCompletionPopup();
+    inputEl.focus();
+}
+
+/* ================= events ================= */
+var OPEN_TO_CLOSE = { "(": ")", "[": "]", "{": "}" };
+
+// Typed ( [ { insert the pair with the caret BETWEEN the pair (a text
+// selection is wrapped); typed ) ] } skip over an identical closing bracket
+// immediately right of the caret instead of inserting a duplicate.
+function handleAutopairKey(e) {
+    var ch = e.key;
+    var open = OPEN_TO_CLOSE[ch];
+    if (open !== undefined) {
+        e.preventDefault();
+        var start = inputEl.selectionStart;
+        var end = inputEl.selectionEnd;
+        var v = inputEl.value;
+        if (start !== end) {
+            v = v.slice(0, start) + ch + v.slice(start, end) + open + v.slice(end);
+            inputEl.value = v;
+            inputEl.setSelectionRange(end + 1, end + 1);
+        } else {
+            v = v.slice(0, start) + ch + open + v.slice(start);
+            inputEl.value = v;
+            inputEl.setSelectionRange(start + 1, start + 1);
+        }
+        afterEdit();
+        return true;
+    }
+    if (ch === ")" || ch === "]" || ch === "}") {
+        if (inputEl.selectionStart === inputEl.selectionEnd) {
+            v = inputEl.value;
+            var pos = inputEl.selectionStart;
+            if (v.charAt(pos) === ch) {
+                e.preventDefault();
+                inputEl.setSelectionRange(pos + 1, pos + 1);
+                afterEdit();
+                return true;
+            }
+        }
+        // otherwise: normal insertion (default)
+    }
+    return false;
+}
+
+// Backspace between a matching pair ("()", "[]", "{}") deletes BOTH
+// characters and leaves the caret where the pair started.
+function handleBackspacePair(e) {
+    var start = inputEl.selectionStart;
+    var end = inputEl.selectionEnd;
+    if (start !== end) return false; // normal selection deletion
+    if (start > 0) {
+        var v = inputEl.value;
+        var left = v.charAt(start - 1);
+        var close = OPEN_TO_CLOSE[left];
+        if (close !== undefined && v.charAt(start) === close) {
+            e.preventDefault();
+            inputEl.value = v.slice(0, start - 1) + v.slice(start + 1);
+            inputEl.setSelectionRange(start - 1, start - 1);
+            afterEdit();
+            return true;
+        }
+    }
+    return false;
+}
+
+// Tab with no popup visible: insert 4 spaces, like the repl's insertTab.
+function insertTabSpaces() {
+    var start = inputEl.selectionStart;
+    var end = inputEl.selectionEnd;
+    var v = inputEl.value;
+    inputEl.value = v.slice(0, start) + "    " + v.slice(end);
+    inputEl.setSelectionRange(start + 4, start + 4);
+    afterEdit();
+}
+
+// Re-sync mirror + preview after a programmatic value/caret mutation, and
+// recompute the completion popup for the caret-ended word.
+function afterEdit() {
+    renderMirror();
+    autoGrow();
+    schedulePreview();
+    refreshCompletionAfterEdit();
+}
+
+function onKeydown(e) {
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+        e.preventDefault();
+        hideCompletionPopup();
+        commit();
+        return;
+    }
+    if (completionVisible) {
+        if (e.key === "Tab") { e.preventDefault(); cycleCompletion(); return; }
+        if (e.key === "Escape") { e.preventDefault(); hideCompletionPopup(); return; }
+        if (e.key === " " && completionTabbed) { e.preventDefault(); acceptCompletion(true); return; }
+        // any other key (incl. a literal Space when not tabbed): dismiss the
+        // popup, then process the key normally
+        hideCompletionPopup();
+    } else if (e.key === "Tab") {
+        e.preventDefault();
+        insertTabSpaces();
+        return;
+    }
+    // typed printable char: bracket autopair
+    if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (handleAutopairKey(e)) return;
+    } else if (e.key === "Backspace" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (handleBackspacePair(e)) return;
+    }
+    var caret = inputEl.selectionStart;
+    var nl = inputEl.value.indexOf("\n");
+    var firstLineEnd = nl === -1 ? inputEl.value.length : nl;
+    if (e.key === "ArrowUp" && caret <= firstLineEnd) {
+        if (histIndex > 0 && !e.shiftKey) {
+            e.preventDefault();
+            histIndex--;
+            inputEl.value = hist[histIndex];
+            inputEl.setSelectionRange(inputEl.value.length, inputEl.value.length);
+            renderMirror();
+            schedulePreview();
+        }
+    } else if (e.key === "ArrowDown" && (inputEl.value.lastIndexOf("\n") < caret || nl === -1)) {
+        if (histIndex < hist.length && !e.shiftKey) {
+            e.preventDefault();
+            histIndex++;
+            inputEl.value = histIndex < hist.length ? hist[histIndex] : "";
+            inputEl.setSelectionRange(inputEl.value.length, inputEl.value.length);
+            renderMirror();
+            schedulePreview();
+        }
+    }
+}
+function onInput() {
+    renderMirror();
+    autoGrow();
+    schedulePreview();
+    refreshCompletionAfterEdit();
+}
+function autoGrow() {
+    inputEl.style.height = "auto";
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 9.3 * 16) + "px";
+}
+
+runBtn.addEventListener("click", commit);
+clearBtn.addEventListener("click", clearCells);
+themeBtn.addEventListener("click", function () {
+    var next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+    document.documentElement.dataset.theme = next;
+    themeBtn.textContent = next === "dark" ? "Light" : "Dark";
+    try { localStorage.setItem(THEME_KEY, next); } catch (e) {}
+});
+inputEl.addEventListener("keydown", onKeydown);
+inputEl.addEventListener("input", onInput);
+
+// Example buttons fill the input and preview it.
+document.querySelectorAll(".example").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+        inputEl.value = btn.textContent;
+        inputEl.focus();
+        renderMirror();
+        autoGrow();
+        runPreview();
+    });
+});
+
+/* ================= reference data (generated) ================= */
+var DOCS = {"!=":["core","negated numeric equality."],"*":["core","generic multiplication."],"+":["core","generic addition (method; exact integers, floats, tensors)."],"-":["core","generic subtraction / negation."],"/":["core","generic division."],"<":["core","numeric less-than."],"<=":["core","numeric less-or-equal."],"=":["core","numeric equality."],">":["core","numeric greater-than."],">=":["core","numeric greater-or-equal."],"Bool":["types","boolean type object."],"CBool":["ffi","C boolean type (foreign interface)."],"CDouble":["ffi","C double type (foreign interface)."],"CFloat":["ffi","C float type (foreign interface)."],"CInt":["ffi","C int type (foreign interface)."],"CString":["ffi","C string type (foreign interface)."],"CUint":["ffi","C unsigned type (foreign interface)."],"CVoid":["ffi","C void type (foreign interface)."],"Keyword":["types","keyword type object."],"Opaque":["types","opaque type object."],"String":["types","string type object."],"Symbol":["types","symbol type object."],"Tensor":["types","tensor type object."],"Type":["types","type-of-types object."],"abs":["core","absolute value."],"acos":["core","generic numeric method (dispatches on operand type)."],"acosh":["core","generic numeric method (dispatches on operand type)."],"ad.gradient-call":["ad","automatic-differentiation primitive."],"ad.value-gradient-call":["ad","automatic-differentiation primitive."],"alive?":["core","liveness test for a process/actor handle."],"and":["core","boolean conjunction."],"append":["core","concatenate lists."],"approx?":["core","approximate numeric equality."],"asin":["core","generic numeric method (dispatches on operand type)."],"asinh":["core","generic numeric method (dispatches on operand type)."],"atan":["core","generic numeric method (dispatches on operand type)."],"atan2":["core","generic numeric method (dispatches on operand type)."],"atanh":["core","generic numeric method (dispatches on operand type)."],"audio":["tensor","play a sample tensor as audio."],"autodiff.cotangent-add":["ad","automatic-differentiation primitive."],"autodiff.cotangent-zero":["ad","automatic-differentiation primitive."],"autodiff.hook-result":["ad","automatic-differentiation primitive."],"autodiff.register-rule":["ad","automatic-differentiation primitive."],"autodiff.register-space":["ad","automatic-differentiation primitive."],"autodiff.register-tree":["ad","automatic-differentiation primitive."],"autodiff.runtime-owned-output":["ad","automatic-differentiation primitive."],"autodiff.scalar":["ad","automatic-differentiation primitive."],"autodiff.scalar-adjoint":["ad","automatic-differentiation primitive."],"autodiff.tensor":["ad","automatic-differentiation primitive."],"autodiff.tensor-linear-apply":["ad","automatic-differentiation primitive."],"autodiff.tensor-linear-transpose":["ad","automatic-differentiation primitive."],"autodiff.tensor-nested":["ad","automatic-differentiation primitive."],"begin":["forms","evaluate forms in order, yield the last. (begin a b c)."],"blend":["core","generic numeric method (dispatches on operand type)."],"bool.and":["numeric","numeric primitive."],"bool.not":["numeric","numeric primitive."],"bool.or":["numeric","numeric primitive."],"bound-code":["core","inspect the bound Code of a closure."],"c16":["types","numeric type object (complex-half pair)."],"c16.abs":["complex","absolute value (complex-half pair)."],"c16.acos":["complex","arccosine (complex-half pair)."],"c16.acosh":["complex","inverse hyp. cosine (complex-half pair)."],"c16.add":["complex","add operation (complex-half pair)."],"c16.arg":["complex","complex argument (phase) (complex-half pair)."],"c16.asin":["complex","arcsine (complex-half pair)."],"c16.asinh":["complex","inverse hyp. sine (complex-half pair)."],"c16.atan":["complex","arctangent (complex-half pair)."],"c16.atanh":["complex","inverse hyp. tangent (complex-half pair)."],"c16.blend":["complex","linear blend (complex-half pair)."],"c16.cart":["complex","polar to cartesian (complex-half pair)."],"c16.clamp":["complex","clamp to range (complex-half pair)."],"c16.conj":["complex","complex conjugate (complex-half pair)."],"c16.cos":["complex","cosine (complex-half pair)."],"c16.cosh":["complex","hyperbolic cosine (complex-half pair)."],"c16.div":["complex","div operation (complex-half pair)."],"c16.eq":["complex","equal (complex-half pair)."],"c16.exp":["complex","exponential (complex-half pair)."],"c16.expm1":["complex","exp(x)-1 (complex-half pair)."],"c16.fract":["complex","fractional part (complex-half pair)."],"c16.im":["complex","imaginary part (complex-half pair)."],"c16.is-finite?":["complex","finiteness test (complex-half pair)."],"c16.is-inf?":["complex","infinity test (complex-half pair)."],"c16.is-nan?":["complex","NaN test (complex-half pair)."],"c16.is-zero?":["complex","zero test (complex-half pair)."],"c16.log":["complex","natural log (complex-half pair)."],"c16.log1p":["complex","log(1+x) (complex-half pair)."],"c16.mag":["complex","complex magnitude (complex-half pair)."],"c16.mod":["complex","modulo (complex-half pair)."],"c16.mul":["complex","mul operation (complex-half pair)."],"c16.ne":["complex","not equal (complex-half pair)."],"c16.neg":["complex","negation (complex-half pair)."],"c16.norm":["complex","complex norm (complex-half pair)."],"c16.polar":["complex","cartesian to polar (complex-half pair)."],"c16.pow":["complex","power (complex-half pair)."],"c16.re":["complex","real part (complex-half pair)."],"c16.rem":["complex","remainder (complex-half pair)."],"c16.remap":["complex","remap across ranges (complex-half pair)."],"c16.sin":["complex","sine (complex-half pair)."],"c16.sinh":["complex","hyperbolic sine (complex-half pair)."],"c16.sqrt":["complex","square root (complex-half pair)."],"c16.sub":["complex","sub operation (complex-half pair)."],"c16.tan":["complex","tangent (complex-half pair)."],"c16.tanh":["complex","hyperbolic tangent (complex-half pair)."],"c16.unblend":["complex","inverse blend (complex-half pair)."],"c32":["types","numeric type object (complex-single pair)."],"c32.abs":["complex","absolute value (complex-single pair)."],"c32.acos":["complex","arccosine (complex-single pair)."],"c32.acosh":["complex","inverse hyp. cosine (complex-single pair)."],"c32.add":["complex","add operation (complex-single pair)."],"c32.arg":["complex","complex argument (phase) (complex-single pair)."],"c32.asin":["complex","arcsine (complex-single pair)."],"c32.asinh":["complex","inverse hyp. sine (complex-single pair)."],"c32.atan":["complex","arctangent (complex-single pair)."],"c32.atanh":["complex","inverse hyp. tangent (complex-single pair)."],"c32.blend":["complex","linear blend (complex-single pair)."],"c32.cart":["complex","polar to cartesian (complex-single pair)."],"c32.clamp":["complex","clamp to range (complex-single pair)."],"c32.conj":["complex","complex conjugate (complex-single pair)."],"c32.cos":["complex","cosine (complex-single pair)."],"c32.cosh":["complex","hyperbolic cosine (complex-single pair)."],"c32.div":["complex","div operation (complex-single pair)."],"c32.eq":["complex","equal (complex-single pair)."],"c32.exp":["complex","exponential (complex-single pair)."],"c32.expm1":["complex","exp(x)-1 (complex-single pair)."],"c32.fract":["complex","fractional part (complex-single pair)."],"c32.im":["complex","imaginary part (complex-single pair)."],"c32.is-finite?":["complex","finiteness test (complex-single pair)."],"c32.is-inf?":["complex","infinity test (complex-single pair)."],"c32.is-nan?":["complex","NaN test (complex-single pair)."],"c32.is-zero?":["complex","zero test (complex-single pair)."],"c32.log":["complex","natural log (complex-single pair)."],"c32.log1p":["complex","log(1+x) (complex-single pair)."],"c32.mag":["complex","complex magnitude (complex-single pair)."],"c32.mod":["complex","modulo (complex-single pair)."],"c32.mul":["complex","mul operation (complex-single pair)."],"c32.ne":["complex","not equal (complex-single pair)."],"c32.neg":["complex","negation (complex-single pair)."],"c32.norm":["complex","complex norm (complex-single pair)."],"c32.polar":["complex","cartesian to polar (complex-single pair)."],"c32.pow":["complex","power (complex-single pair)."],"c32.re":["complex","real part (complex-single pair)."],"c32.rem":["complex","remainder (complex-single pair)."],"c32.remap":["complex","remap across ranges (complex-single pair)."],"c32.sin":["complex","sine (complex-single pair)."],"c32.sinh":["complex","hyperbolic sine (complex-single pair)."],"c32.sqrt":["complex","square root (complex-single pair)."],"c32.sub":["complex","sub operation (complex-single pair)."],"c32.tan":["complex","tangent (complex-single pair)."],"c32.tanh":["complex","hyperbolic tangent (complex-single pair)."],"c32.unblend":["complex","inverse blend (complex-single pair)."],"c64":["types","numeric type object (complex-double pair)."],"c64.abs":["complex","absolute value (complex-double pair)."],"c64.acos":["complex","arccosine (complex-double pair)."],"c64.acosh":["complex","inverse hyp. cosine (complex-double pair)."],"c64.add":["complex","add operation (complex-double pair)."],"c64.arg":["complex","complex argument (phase) (complex-double pair)."],"c64.asin":["complex","arcsine (complex-double pair)."],"c64.asinh":["complex","inverse hyp. sine (complex-double pair)."],"c64.atan":["complex","arctangent (complex-double pair)."],"c64.atanh":["complex","inverse hyp. tangent (complex-double pair)."],"c64.blend":["complex","linear blend (complex-double pair)."],"c64.cart":["complex","polar to cartesian (complex-double pair)."],"c64.clamp":["complex","clamp to range (complex-double pair)."],"c64.conj":["complex","complex conjugate (complex-double pair)."],"c64.cos":["complex","cosine (complex-double pair)."],"c64.cosh":["complex","hyperbolic cosine (complex-double pair)."],"c64.div":["complex","div operation (complex-double pair)."],"c64.eq":["complex","equal (complex-double pair)."],"c64.exp":["complex","exponential (complex-double pair)."],"c64.expm1":["complex","exp(x)-1 (complex-double pair)."],"c64.fract":["complex","fractional part (complex-double pair)."],"c64.im":["complex","imaginary part (complex-double pair)."],"c64.is-finite?":["complex","finiteness test (complex-double pair)."],"c64.is-inf?":["complex","infinity test (complex-double pair)."],"c64.is-nan?":["complex","NaN test (complex-double pair)."],"c64.is-zero?":["complex","zero test (complex-double pair)."],"c64.log":["complex","natural log (complex-double pair)."],"c64.log1p":["complex","log(1+x) (complex-double pair)."],"c64.mag":["complex","complex magnitude (complex-double pair)."],"c64.mod":["complex","modulo (complex-double pair)."],"c64.mul":["complex","mul operation (complex-double pair)."],"c64.ne":["complex","not equal (complex-double pair)."],"c64.neg":["complex","negation (complex-double pair)."],"c64.norm":["complex","complex norm (complex-double pair)."],"c64.polar":["complex","cartesian to polar (complex-double pair)."],"c64.pow":["complex","power (complex-double pair)."],"c64.re":["complex","real part (complex-double pair)."],"c64.rem":["complex","remainder (complex-double pair)."],"c64.remap":["complex","remap across ranges (complex-double pair)."],"c64.sin":["complex","sine (complex-double pair)."],"c64.sinh":["complex","hyperbolic sine (complex-double pair)."],"c64.sqrt":["complex","square root (complex-double pair)."],"c64.sub":["complex","sub operation (complex-double pair)."],"c64.tan":["complex","tangent (complex-double pair)."],"c64.tanh":["complex","hyperbolic tangent (complex-double pair)."],"c64.unblend":["complex","inverse blend (complex-double pair)."],"c8":["types","numeric type object (complex-quarter pair)."],"case":["forms","dispatch on datum equality. (case key ((a b) body...) ... (else body...))."],"cat":["tensor","concatenate tensors along the leading axis."],"ceil":["core","generic numeric method (dispatches on operand type)."],"chunk":["core","split a collection into chunks."],"clamp":["core","generic numeric method (dispatches on operand type)."],"close-expr":["ad","close an expression region."],"close-linear":["ad","close a linear handle."],"closure?":["predicates","exact-tag predicate: #t when the value's actual tag is closure."],"compile-expr":["ad","compile a symbolic expression to executable code."],"complex":["complex","build a complex value (generic)."],"complex?":["predicates","exact-tag predicate: #t when the value's actual tag is complex."],"concat":["core","n-ary list append; binary tensor join."],"cond":["forms","first true clause wins. (cond (test body...) ... (else body...))."],"cons":["core","prepend an element. (cons head rest)."],"cons?":["predicates","exact-tag predicate: #t when the value's actual tag is cons."],"contains?":["predicates","exact-tag predicate: #t when the value's actual tag is contains."],"cos":["core","cosine."],"cosh":["core","generic numeric method (dispatches on operand type)."],"def":["forms","top-level definition. (def name value)."],"defn":["forms","top-level function definition. (defn (name arg...) body...)."],"deg->rad":["core","generic numeric method (dispatches on operand type)."],"deriv":["ad","scalar derivative convenience wrapper."],"diff":["tensor","adjacent differences."],"disasm!":["core","disassemble bound bytecode."],"display":["io","print a value human-readably."],"dot":["tensor","dot product / matrix multiply."],"drop":["collections","drop leading elements. (drop n coll)."],"dynamic-library:close":["ffi","foreign-function primitive."],"dynamic-library:lookup":["ffi","foreign-function primitive."],"dynamic-library:open":["ffi","foreign-function primitive."],"else":["forms","cond/case catch-all (alias of true)."],"equal?":["core","deep structural equality."],"error-name":["core","name of an error value."],"error?":["predicates","exact-tag predicate: #t when the value's actual tag is error."],"evaluate":["eval","evaluate in a controlled model."],"even?":["predicates","exact-tag predicate: #t when the value's actual tag is even."],"exit-reason":["process","a process's exit reason."],"exp":["core","exponential."],"expm1":["core","generic numeric method (dispatches on operand type)."],"expr->datum":["ad","symbolic expression to datum."],"expr-view":["ad","inspect a symbolic expression."],"f16":["types","numeric type object (half)."],"f16.abs":["float","absolute value (half)."],"f16.acos":["float","arccosine (half)."],"f16.acosh":["float","inverse hyp. cosine (half)."],"f16.add":["float","add operation (half)."],"f16.approx?":["float","approximate equality (half)."],"f16.asin":["float","arcsine (half)."],"f16.asinh":["float","inverse hyp. sine (half)."],"f16.atan":["float","arctangent (half)."],"f16.atan2":["float","two-arg arctangent (half)."],"f16.atanh":["float","inverse hyp. tangent (half)."],"f16.avg":["float","average (half)."],"f16.blend":["float","linear blend (half)."],"f16.ceil":["float","ceiling (half)."],"f16.clamp":["float","clamp to range (half)."],"f16.cos":["float","cosine (half)."],"f16.cosh":["float","hyperbolic cosine (half)."],"f16.deg->rad":["float","degrees to radians (half)."],"f16.div":["float","div operation (half)."],"f16.eq":["float","equal (half)."],"f16.exp":["float","exponential (half)."],"f16.expm1":["float","exp(x)-1 (half)."],"f16.floor":["float","floor (half)."],"f16.fract":["float","fractional part (half)."],"f16.gt":["float","greater (half)."],"f16.gte":["float","greater-or-equal (half)."],"f16.hypot":["float","hypotenuse (half)."],"f16.is-even?":["float","even test (half)."],"f16.is-finite?":["float","finiteness test (half)."],"f16.is-inf?":["float","infinity test (half)."],"f16.is-nan?":["float","NaN test (half)."],"f16.is-odd?":["float","odd test (half)."],"f16.is-zero?":["float","zero test (half)."],"f16.log":["float","natural log (half)."],"f16.log10":["float","base-10 log (half)."],"f16.log1p":["float","log(1+x) (half)."],"f16.log2":["float","base-2 log (half)."],"f16.lt":["float","less (half)."],"f16.lte":["float","less-or-equal (half)."],"f16.max":["float","maximum (half)."],"f16.min":["float","minimum (half)."],"f16.mod":["float","modulo (half)."],"f16.mul":["float","mul operation (half)."],"f16.ne":["float","not equal (half)."],"f16.neg":["float","negation (half)."],"f16.nextafter":["float","next representable float (half)."],"f16.pi":["float","pi operation (half)."],"f16.pow":["float","power (half)."],"f16.prevbefore":["float","previous representable float (half)."],"f16.rad->deg":["float","radians to degrees (half)."],"f16.rem":["float","remainder (half)."],"f16.remap":["float","remap across ranges (half)."],"f16.round":["float","round (half)."],"f16.sign":["float","sign (-1/0/1) (half)."],"f16.sin":["float","sine (half)."],"f16.sinh":["float","hyperbolic sine (half)."],"f16.sqrt":["float","square root (half)."],"f16.sub":["float","sub operation (half)."],"f16.tan":["float","tangent (half)."],"f16.tanh":["float","hyperbolic tangent (half)."],"f16.tau":["float","tau operation (half)."],"f16.trunc":["float","truncate (half)."],"f16.unblend":["float","inverse blend (half)."],"f32":["types","numeric type object (single)."],"f32.abs":["float","absolute value (single)."],"f32.acos":["float","arccosine (single)."],"f32.acosh":["float","inverse hyp. cosine (single)."],"f32.add":["float","add operation (single)."],"f32.approx?":["float","approximate equality (single)."],"f32.asin":["float","arcsine (single)."],"f32.asinh":["float","inverse hyp. sine (single)."],"f32.atan":["float","arctangent (single)."],"f32.atan2":["float","two-arg arctangent (single)."],"f32.atanh":["float","inverse hyp. tangent (single)."],"f32.avg":["float","average (single)."],"f32.blend":["float","linear blend (single)."],"f32.ceil":["float","ceiling (single)."],"f32.clamp":["float","clamp to range (single)."],"f32.cos":["float","cosine (single)."],"f32.cosh":["float","hyperbolic cosine (single)."],"f32.deg->rad":["float","degrees to radians (single)."],"f32.div":["float","div operation (single)."],"f32.eq":["float","equal (single)."],"f32.exp":["float","exponential (single)."],"f32.expm1":["float","exp(x)-1 (single)."],"f32.floor":["float","floor (single)."],"f32.fract":["float","fractional part (single)."],"f32.gt":["float","greater (single)."],"f32.gte":["float","greater-or-equal (single)."],"f32.hypot":["float","hypotenuse (single)."],"f32.is-even?":["float","even test (single)."],"f32.is-finite?":["float","finiteness test (single)."],"f32.is-inf?":["float","infinity test (single)."],"f32.is-nan?":["float","NaN test (single)."],"f32.is-odd?":["float","odd test (single)."],"f32.is-zero?":["float","zero test (single)."],"f32.log":["float","natural log (single)."],"f32.log10":["float","base-10 log (single)."],"f32.log1p":["float","log(1+x) (single)."],"f32.log2":["float","base-2 log (single)."],"f32.lt":["float","less (single)."],"f32.lte":["float","less-or-equal (single)."],"f32.max":["float","maximum (single)."],"f32.min":["float","minimum (single)."],"f32.mod":["float","modulo (single)."],"f32.mul":["float","mul operation (single)."],"f32.ne":["float","not equal (single)."],"f32.neg":["float","negation (single)."],"f32.nextafter":["float","next representable float (single)."],"f32.pi":["float","pi operation (single)."],"f32.pow":["float","power (single)."],"f32.prevbefore":["float","previous representable float (single)."],"f32.rad->deg":["float","radians to degrees (single)."],"f32.rem":["float","remainder (single)."],"f32.remap":["float","remap across ranges (single)."],"f32.round":["float","round (single)."],"f32.sign":["float","sign (-1/0/1) (single)."],"f32.sin":["float","sine (single)."],"f32.sinh":["float","hyperbolic sine (single)."],"f32.sqrt":["float","square root (single)."],"f32.sub":["float","sub operation (single)."],"f32.tan":["float","tangent (single)."],"f32.tanh":["float","hyperbolic tangent (single)."],"f32.tau":["float","tau operation (single)."],"f32.trunc":["float","truncate (single)."],"f32.unblend":["float","inverse blend (single)."],"f64":["types","numeric type object (double)."],"f64.abs":["float","absolute value (double)."],"f64.acos":["float","arccosine (double)."],"f64.acosh":["float","inverse hyp. cosine (double)."],"f64.add":["float","add operation (double)."],"f64.approx?":["float","approximate equality (double)."],"f64.asin":["float","arcsine (double)."],"f64.asinh":["float","inverse hyp. sine (double)."],"f64.atan":["float","arctangent (double)."],"f64.atan2":["float","two-arg arctangent (double)."],"f64.atanh":["float","inverse hyp. tangent (double)."],"f64.avg":["float","average (double)."],"f64.blend":["float","linear blend (double)."],"f64.ceil":["float","ceiling (double)."],"f64.clamp":["float","clamp to range (double)."],"f64.cos":["float","cosine (double)."],"f64.cosh":["float","hyperbolic cosine (double)."],"f64.deg->rad":["float","degrees to radians (double)."],"f64.div":["float","div operation (double)."],"f64.eq":["float","equal (double)."],"f64.exp":["float","exponential (double)."],"f64.expm1":["float","exp(x)-1 (double)."],"f64.floor":["float","floor (double)."],"f64.fract":["float","fractional part (double)."],"f64.gt":["float","greater (double)."],"f64.gte":["float","greater-or-equal (double)."],"f64.hypot":["float","hypotenuse (double)."],"f64.is-even?":["float","even test (double)."],"f64.is-finite?":["float","finiteness test (double)."],"f64.is-inf?":["float","infinity test (double)."],"f64.is-nan?":["float","NaN test (double)."],"f64.is-odd?":["float","odd test (double)."],"f64.is-zero?":["float","zero test (double)."],"f64.log":["float","natural log (double)."],"f64.log10":["float","base-10 log (double)."],"f64.log1p":["float","log(1+x) (double)."],"f64.log2":["float","base-2 log (double)."],"f64.lt":["float","less (double)."],"f64.lte":["float","less-or-equal (double)."],"f64.max":["float","maximum (double)."],"f64.min":["float","minimum (double)."],"f64.mod":["float","modulo (double)."],"f64.mul":["float","mul operation (double)."],"f64.ne":["float","not equal (double)."],"f64.neg":["float","negation (double)."],"f64.nextafter":["float","next representable float (double)."],"f64.pi":["float","pi operation (double)."],"f64.pow":["float","power (double)."],"f64.prevbefore":["float","previous representable float (double)."],"f64.rad->deg":["float","radians to degrees (double)."],"f64.rem":["float","remainder (double)."],"f64.remap":["float","remap across ranges (double)."],"f64.round":["float","round (double)."],"f64.sign":["float","sign (-1/0/1) (double)."],"f64.sin":["float","sine (double)."],"f64.sinh":["float","hyperbolic sine (double)."],"f64.sqrt":["float","square root (double)."],"f64.sub":["float","sub operation (double)."],"f64.tan":["float","tangent (double)."],"f64.tanh":["float","hyperbolic tangent (double)."],"f64.tau":["float","tau operation (double)."],"f64.trunc":["float","truncate (double)."],"f64.unblend":["float","inverse blend (double)."],"f8":["types","numeric type object (8-bit float)."],"ffi:make-func":["ffi","foreign-function primitive."],"ffifunc?":["predicates","exact-tag predicate: #t when the value's actual tag is ffifunc."],"flat":["core","flatten nested structure."],"float?":["predicates","exact-tag predicate: #t when the value's actual tag is float."],"floor":["core","generic numeric method (dispatches on operand type)."],"fn":["forms","anonymous closure. (fn (arg...) body...)."],"fold":["collections","reduce a collection left to right. (fold coll f) / (fold coll init f)."],"format":["io","format a string."],"fract":["core","generic numeric method (dispatches on operand type)."],"from-f16":["float","convert half to float."],"from-f32":["float","convert single to float."],"from-f64":["float","convert double to float."],"fst":["collections","head of a pair/list."],"gradient":["core","gradient closure (scalar output). (gradient f)."],"guard":["forms","scoped guard for residual/specialized code. (guard opts body...)."],"hash-map":["map","construct a map."],"hvp":["ad","Hessian-vector product via JVP + pullback. (hvp f x v)."],"hypot":["core","generic numeric method (dispatches on operand type)."],"i16":["types","numeric type object (16-bit int)."],"i16.abs":["int","absolute value (16-bit int)."],"i16.add":["int","add operation (16-bit int)."],"i16.clamp":["int","clamp to range (16-bit int)."],"i16.div":["int","div operation (16-bit int)."],"i16.eq":["int","equal (16-bit int)."],"i16.from-f16":["int","from-f16 operation (16-bit int)."],"i16.from-f32":["int","from-f32 operation (16-bit int)."],"i16.from-f64":["int","from-f64 operation (16-bit int)."],"i16.gt":["int","greater (16-bit int)."],"i16.gte":["int","greater-or-equal (16-bit int)."],"i16.is-even?":["int","even test (16-bit int)."],"i16.is-odd?":["int","odd test (16-bit int)."],"i16.lt":["int","less (16-bit int)."],"i16.lte":["int","less-or-equal (16-bit int)."],"i16.max":["int","maximum (16-bit int)."],"i16.min":["int","minimum (16-bit int)."],"i16.mod":["int","modulo (16-bit int)."],"i16.mul":["int","mul operation (16-bit int)."],"i16.ne":["int","not equal (16-bit int)."],"i16.neg":["int","negation (16-bit int)."],"i16.pow":["int","power (16-bit int)."],"i16.rem":["int","remainder (16-bit int)."],"i16.shl":["int","shl operation (16-bit int)."],"i16.shr":["int","shr operation (16-bit int)."],"i16.sign":["int","sign (-1/0/1) (16-bit int)."],"i16.sub":["int","sub operation (16-bit int)."],"i32":["types","numeric type object (32-bit int)."],"i32.abs":["int","absolute value (32-bit int)."],"i32.add":["int","add operation (32-bit int)."],"i32.clamp":["int","clamp to range (32-bit int)."],"i32.div":["int","div operation (32-bit int)."],"i32.eq":["int","equal (32-bit int)."],"i32.from-f16":["int","from-f16 operation (32-bit int)."],"i32.from-f32":["int","from-f32 operation (32-bit int)."],"i32.from-f64":["int","from-f64 operation (32-bit int)."],"i32.gt":["int","greater (32-bit int)."],"i32.gte":["int","greater-or-equal (32-bit int)."],"i32.is-even?":["int","even test (32-bit int)."],"i32.is-odd?":["int","odd test (32-bit int)."],"i32.lt":["int","less (32-bit int)."],"i32.lte":["int","less-or-equal (32-bit int)."],"i32.max":["int","maximum (32-bit int)."],"i32.min":["int","minimum (32-bit int)."],"i32.mod":["int","modulo (32-bit int)."],"i32.mul":["int","mul operation (32-bit int)."],"i32.ne":["int","not equal (32-bit int)."],"i32.neg":["int","negation (32-bit int)."],"i32.pow":["int","power (32-bit int)."],"i32.rem":["int","remainder (32-bit int)."],"i32.shl":["int","shl operation (32-bit int)."],"i32.shr":["int","shr operation (32-bit int)."],"i32.sign":["int","sign (-1/0/1) (32-bit int)."],"i32.sub":["int","sub operation (32-bit int)."],"i64":["types","numeric type object (64-bit int)."],"i64.abs":["int","absolute value (64-bit int)."],"i64.add":["int","add operation (64-bit int)."],"i64.clamp":["int","clamp to range (64-bit int)."],"i64.div":["int","div operation (64-bit int)."],"i64.eq":["int","equal (64-bit int)."],"i64.from-f16":["int","from-f16 operation (64-bit int)."],"i64.from-f32":["int","from-f32 operation (64-bit int)."],"i64.from-f64":["int","from-f64 operation (64-bit int)."],"i64.gt":["int","greater (64-bit int)."],"i64.gte":["int","greater-or-equal (64-bit int)."],"i64.is-even?":["int","even test (64-bit int)."],"i64.is-odd?":["int","odd test (64-bit int)."],"i64.lt":["int","less (64-bit int)."],"i64.lte":["int","less-or-equal (64-bit int)."],"i64.max":["int","maximum (64-bit int)."],"i64.min":["int","minimum (64-bit int)."],"i64.mod":["int","modulo (64-bit int)."],"i64.mul":["int","mul operation (64-bit int)."],"i64.ne":["int","not equal (64-bit int)."],"i64.neg":["int","negation (64-bit int)."],"i64.pow":["int","power (64-bit int)."],"i64.rem":["int","remainder (64-bit int)."],"i64.shl":["int","shl operation (64-bit int)."],"i64.shr":["int","shr operation (64-bit int)."],"i64.sign":["int","sign (-1/0/1) (64-bit int)."],"i64.sub":["int","sub operation (64-bit int)."],"i8":["types","numeric type object (8-bit int)."],"i8.abs":["int","absolute value (8-bit int)."],"i8.add":["int","add operation (8-bit int)."],"i8.clamp":["int","clamp to range (8-bit int)."],"i8.div":["int","div operation (8-bit int)."],"i8.eq":["int","equal (8-bit int)."],"i8.from-f16":["int","from-f16 operation (8-bit int)."],"i8.from-f32":["int","from-f32 operation (8-bit int)."],"i8.from-f64":["int","from-f64 operation (8-bit int)."],"i8.gt":["int","greater (8-bit int)."],"i8.gte":["int","greater-or-equal (8-bit int)."],"i8.is-even?":["int","even test (8-bit int)."],"i8.is-odd?":["int","odd test (8-bit int)."],"i8.lt":["int","less (8-bit int)."],"i8.lte":["int","less-or-equal (8-bit int)."],"i8.max":["int","maximum (8-bit int)."],"i8.min":["int","minimum (8-bit int)."],"i8.mod":["int","modulo (8-bit int)."],"i8.mul":["int","mul operation (8-bit int)."],"i8.ne":["int","not equal (8-bit int)."],"i8.neg":["int","negation (8-bit int)."],"i8.pow":["int","power (8-bit int)."],"i8.rem":["int","remainder (8-bit int)."],"i8.shl":["int","shl operation (8-bit int)."],"i8.shr":["int","shr operation (8-bit int)."],"i8.sign":["int","sign (-1/0/1) (8-bit int)."],"i8.sub":["int","sub operation (8-bit int)."],"if":["forms","branch on truthiness (#f and nil are false). (if test then else)."],"im":["complex","complex imaginary part."],"image":["tensor","render a rank-2/3 tensor as an image."],"import":["forms","load a module into scope. (import path...)."],"instance":["types","method instance for a type."],"int?":["predicates","exact-tag predicate: #t when the value's actual tag is int."],"intrinsic?":["predicates","exact-tag predicate: #t when the value's actual tag is intrinsic."],"iota":["tensor","counting tensor. (iota n)."],"is-core-type?":["core","whether a value has a core (non-derived) type tag."],"is-even?":["predicates","exact-tag predicate: #t when the value's actual tag is is-even."],"is-finite?":["predicates","exact-tag predicate: #t when the value's actual tag is is-finite."],"is-inf?":["predicates","exact-tag predicate: #t when the value's actual tag is is-inf."],"is-instance-of?":["core","instance check against a type object."],"is-nan?":["predicates","exact-tag predicate: #t when the value's actual tag is is-nan."],"is-odd?":["predicates","exact-tag predicate: #t when the value's actual tag is is-odd."],"is-zero?":["predicates","exact-tag predicate: #t when the value's actual tag is is-zero."],"jacobian":["ad","full Jacobian materialization."],"jvp":["ad","forward pair. (jvp f x v) returns (list primal tangent)."],"keep":["core","tensor/list filter kernel (leading-axis cells)."],"keyword.eq":["types","keyword equality."],"keyword.ne":["types","keyword inequality."],"lambda":["forms","alias of fn. (lambda (arg...) body...)."],"length":["core","element count of a collection."],"let":["forms","lexical bindings, then body. (let ((name value)...) body...)."],"linearize":["ad","primal linearization to a residual."],"list":["collections","build a list. (list a b c)."],"list->string":["string","list to string."],"load":["eval","load a module file."],"lock-method":["types","seal a method against further instances."],"log":["core","natural logarithm."],"log10":["core","generic numeric method (dispatches on operand type)."],"log1p":["core","generic numeric method (dispatches on operand type)."],"log2":["core","generic numeric method (dispatches on operand type)."],"mag":["complex","complex magnitude."],"map":["map","transform each element. (map coll f)."],"map-get":["map","map lookup."],"map-has?":["map","membership test."],"map-keys":["map","map key list."],"map-set!":["map","mutate a map entry."],"map-size":["map","map entry count."],"map-vals":["map","map value list."],"map2":["core","combine two collections elementwise. (map2 a b f)."],"max":["core","greater of two numbers."],"method":["types","generic method table."],"method?":["predicates","exact-tag predicate: #t when the value's actual tag is method."],"min":["core","lesser of two numbers."],"mod":["core","generic numeric method (dispatches on operand type)."],"module":["forms","declare a module namespace. (module name body...)."],"namespace?":["predicates","exact-tag predicate: #t when the value's actual tag is namespace."],"nextafter":["core","generic numeric method (dispatches on operand type)."],"nil":["core","the empty value."],"not":["core","boolean negation."],"number->string":["string","number to string."],"number?":["predicates","exact-tag predicate: #t when the value's actual tag is number."],"or":["core","boolean disjunction."],"outer":["tensor","outer product."],"part":["core","partition a collection."],"pi":["core","the circle constant (f64)."],"pid":["process","process id type."],"pid.eq":["process","process id equality."],"pid.ne":["process","process id inequality."],"polar":["complex","complex polar form."],"pow":["core","generic numeric method (dispatches on operand type)."],"prevbefore":["core","generic numeric method (dispatches on operand type)."],"printf":["io","print formatted output."],"process-info":["process","inspect a process."],"quote":["forms","return the datum unevaluated. (quote x) \u2014 x is data, not code."],"rad->deg":["core","generic numeric method (dispatches on operand type)."],"raise":["forms","raise an error value. (raise msg)."],"range":["core","integer range as a list."],"re":["complex","complex real part."],"read":["core","parse a string into a datum."],"real?":["predicates","exact-tag predicate: #t when the value's actual tag is real."],"receive":["process","receive a message."],"register-ad-rule":["ad","register a custom AD rule."],"register-ad-space":["ad","register a custom AD space."],"register-ad-tree":["ad","register a custom AD tree."],"rem":["core","generic numeric method (dispatches on operand type)."],"remap":["core","generic numeric method (dispatches on operand type)."],"reshape":["tensor","reinterpret tensor elements under a new shape. (reshape t shape)."],"rev":["collections","reverse a collection."],"reverse":["core","reverse a list or tensor."],"rgba":["core","pack an RGBA color."],"rot":["core","rotate tensor elements."],"round":["core","generic numeric method (dispatches on operand type)."],"rst":["collections","tail of a pair/list."],"scan":["collections","prefix reductions (leading-axis default). (scan coll f)."],"self":["process","the current process."],"send":["process","send a message."],"set!":["forms","mutate a binding cell. (set! name value)."],"shl":["core","generic numeric method (dispatches on operand type)."],"shr":["core","generic numeric method (dispatches on operand type)."],"sign":["core","generic numeric method (dispatches on operand type)."],"simplify-expr":["ad","apply domain rewrites to a symbolic expression."],"sin":["core","sine."],"sinh":["core","generic numeric method (dispatches on operand type)."],"sleep":["process","sleep N milliseconds."],"sort-dn":["collections","descending list sort."],"sort-up":["collections","ascending list sort."],"source-datum":["core","source datum of a value."],"source-location":["core","source location of a value."],"source-text":["core","source text of a value."],"spawn":["process","spawn an actor process."],"sqrt":["core","square root."],"stack":["tensor","stack values into a tensor (leading axis)."],"string!=":["string","negated string equality."],"string->list":["core","string >list operation."],"string->number":["core","string >number operation."],"string->symbol":["core","string >symbol operation."],"string-append":["core","concatenate strings (string)."],"string-byte-ref":["core","byte at index (string)."],"string-downcase":["core","lowercase (string)."],"string-ends-with?":["predicates","suffix test (string)."],"string-find":["core","byte index of a match (string)."],"string-includes?":["predicates","substring test (string)."],"string-join":["core","join strings with a separator (string)."],"string-length":["core","byte length (string)."],"string-replace":["core","replace matches (string)."],"string-reverse":["core","reverse by codepoint (string)."],"string-split":["core","split on a byte sequence (string)."],"string-starts-with?":["predicates","prefix test (string)."],"string-trim":["core","trim whitespace (string)."],"string-trim-left":["core","trim leading whitespace (string)."],"string-trim-right":["core","trim trailing whitespace (string)."],"string-upcase":["core","uppercase (string)."],"string.append":["string","concatenate strings (string)."],"string.byte-ref":["string","byte at index (string)."],"string.downcase":["string","lowercase (string)."],"string.ends-with?":["string","suffix test (string)."],"string.eq":["string","content equality (string)."],"string.find":["string","byte index of a match (string)."],"string.from-list":["string","codepoint list to string (string)."],"string.from-symbol":["string","symbol name as a string (string)."],"string.gt":["string","lexicographic greater (string)."],"string.gte":["string","lexicographic greater-or-equal (string)."],"string.includes?":["string","substring test (string)."],"string.join":["string","join strings with a separator (string)."],"string.length":["string","byte length (string)."],"string.lt":["string","lexicographic less (string)."],"string.lte":["string","lexicographic less-or-equal (string)."],"string.ne":["string","content inequality (string)."],"string.number->string":["string","number to string (string)."],"string.replace":["string","replace matches (string)."],"string.reverse":["string","reverse by codepoint (string)."],"string.split":["string","split on a byte sequence (string)."],"string.starts-with?":["string","prefix test (string)."],"string.string->number":["string","string string->number operation."],"string.substring":["string","string substring operation."],"string.to-list":["string","string to-list operation."],"string.trim":["string","trim whitespace (string)."],"string.trim-left":["string","trim leading whitespace (string)."],"string.trim-right":["string","trim trailing whitespace (string)."],"string.upcase":["string","uppercase (string)."],"string<=?":["predicates","exact-tag predicate: #t when the value's actual tag is string<=."],"string<?":["predicates","exact-tag predicate: #t when the value's actual tag is string<."],"string=?":["predicates","exact-tag predicate: #t when the value's actual tag is string=."],"string>=?":["predicates","exact-tag predicate: #t when the value's actual tag is string>=."],"string>?":["predicates","exact-tag predicate: #t when the value's actual tag is string>."],"substring":["string","codepoint substring."],"symbol":["types","intern a symbol."],"symbol->string":["string","symbol name as a string."],"symbol.eq":["types","symbol equality."],"symbol.ne":["types","symbol inequality."],"symbolic":["ad","lift a value/expression into the symbolic domain."],"symbolic-var":["ad","fresh symbolic variable."],"take":["collections","leading prefix. (take n coll)."],"tan":["core","generic numeric method (dispatches on operand type)."],"tanh":["core","generic numeric method (dispatches on operand type)."],"tau":["core","2\u03c0 (f64)."],"tensor-get":["tensor","element at indices. (tensor-get t i j...)."],"tensor-len":["tensor","element count of a tensor."],"tensor-rank":["tensor","number of tensor axes."],"tensor-shape":["tensor","shape list of a tensor."],"tensor.eq":["tensor","elementwise tensor equality."],"timeout-sentinel":["process","receive-timeout sentinel (interned opaque)."],"trans":["tensor","tensor transpose (concrete permutation)."],"transpose":["ad","transpose a linear handle."],"trunc":["core","generic numeric method (dispatches on operand type)."],"try":["forms","catch errors as values. (try body... (catch handler...))."],"type":["core","the type tag of a value."],"u16":["types","numeric type object (16-bit uint)."],"u16.abs":["int","absolute value (16-bit uint)."],"u16.add":["int","add operation (16-bit uint)."],"u16.clamp":["int","clamp to range (16-bit uint)."],"u16.div":["int","div operation (16-bit uint)."],"u16.eq":["int","equal (16-bit uint)."],"u16.from-f16":["int","from-f16 operation (16-bit uint)."],"u16.from-f32":["int","from-f32 operation (16-bit uint)."],"u16.from-f64":["int","from-f64 operation (16-bit uint)."],"u16.gt":["int","greater (16-bit uint)."],"u16.gte":["int","greater-or-equal (16-bit uint)."],"u16.is-even?":["int","even test (16-bit uint)."],"u16.is-odd?":["int","odd test (16-bit uint)."],"u16.lt":["int","less (16-bit uint)."],"u16.lte":["int","less-or-equal (16-bit uint)."],"u16.max":["int","maximum (16-bit uint)."],"u16.min":["int","minimum (16-bit uint)."],"u16.mod":["int","modulo (16-bit uint)."],"u16.mul":["int","mul operation (16-bit uint)."],"u16.ne":["int","not equal (16-bit uint)."],"u16.neg":["int","negation (16-bit uint)."],"u16.pow":["int","power (16-bit uint)."],"u16.rem":["int","remainder (16-bit uint)."],"u16.shl":["int","shl operation (16-bit uint)."],"u16.shr":["int","shr operation (16-bit uint)."],"u16.sign":["int","sign (-1/0/1) (16-bit uint)."],"u16.sub":["int","sub operation (16-bit uint)."],"u32":["types","numeric type object (32-bit uint)."],"u32.abs":["int","absolute value (32-bit uint)."],"u32.add":["int","add operation (32-bit uint)."],"u32.clamp":["int","clamp to range (32-bit uint)."],"u32.div":["int","div operation (32-bit uint)."],"u32.eq":["int","equal (32-bit uint)."],"u32.from-f16":["int","from-f16 operation (32-bit uint)."],"u32.from-f32":["int","from-f32 operation (32-bit uint)."],"u32.from-f64":["int","from-f64 operation (32-bit uint)."],"u32.gt":["int","greater (32-bit uint)."],"u32.gte":["int","greater-or-equal (32-bit uint)."],"u32.is-even?":["int","even test (32-bit uint)."],"u32.is-odd?":["int","odd test (32-bit uint)."],"u32.lt":["int","less (32-bit uint)."],"u32.lte":["int","less-or-equal (32-bit uint)."],"u32.max":["int","maximum (32-bit uint)."],"u32.min":["int","minimum (32-bit uint)."],"u32.mod":["int","modulo (32-bit uint)."],"u32.mul":["int","mul operation (32-bit uint)."],"u32.ne":["int","not equal (32-bit uint)."],"u32.neg":["int","negation (32-bit uint)."],"u32.pow":["int","power (32-bit uint)."],"u32.rem":["int","remainder (32-bit uint)."],"u32.shl":["int","shl operation (32-bit uint)."],"u32.shr":["int","shr operation (32-bit uint)."],"u32.sign":["int","sign (-1/0/1) (32-bit uint)."],"u32.sub":["int","sub operation (32-bit uint)."],"u64":["types","numeric type object (64-bit uint)."],"u64.abs":["int","absolute value (64-bit uint)."],"u64.add":["int","add operation (64-bit uint)."],"u64.clamp":["int","clamp to range (64-bit uint)."],"u64.div":["int","div operation (64-bit uint)."],"u64.eq":["int","equal (64-bit uint)."],"u64.from-f16":["int","from-f16 operation (64-bit uint)."],"u64.from-f32":["int","from-f32 operation (64-bit uint)."],"u64.from-f64":["int","from-f64 operation (64-bit uint)."],"u64.gt":["int","greater (64-bit uint)."],"u64.gte":["int","greater-or-equal (64-bit uint)."],"u64.is-even?":["int","even test (64-bit uint)."],"u64.is-odd?":["int","odd test (64-bit uint)."],"u64.lt":["int","less (64-bit uint)."],"u64.lte":["int","less-or-equal (64-bit uint)."],"u64.max":["int","maximum (64-bit uint)."],"u64.min":["int","minimum (64-bit uint)."],"u64.mod":["int","modulo (64-bit uint)."],"u64.mul":["int","mul operation (64-bit uint)."],"u64.ne":["int","not equal (64-bit uint)."],"u64.neg":["int","negation (64-bit uint)."],"u64.pow":["int","power (64-bit uint)."],"u64.rem":["int","remainder (64-bit uint)."],"u64.shl":["int","shl operation (64-bit uint)."],"u64.shr":["int","shr operation (64-bit uint)."],"u64.sign":["int","sign (-1/0/1) (64-bit uint)."],"u64.sub":["int","sub operation (64-bit uint)."],"u8":["types","numeric type object (8-bit uint)."],"u8.abs":["int","absolute value (8-bit uint)."],"u8.add":["int","add operation (8-bit uint)."],"u8.clamp":["int","clamp to range (8-bit uint)."],"u8.div":["int","div operation (8-bit uint)."],"u8.eq":["int","equal (8-bit uint)."],"u8.from-f16":["int","from-f16 operation (8-bit uint)."],"u8.from-f32":["int","from-f32 operation (8-bit uint)."],"u8.from-f64":["int","from-f64 operation (8-bit uint)."],"u8.gt":["int","greater (8-bit uint)."],"u8.gte":["int","greater-or-equal (8-bit uint)."],"u8.is-even?":["int","even test (8-bit uint)."],"u8.is-odd?":["int","odd test (8-bit uint)."],"u8.lt":["int","less (8-bit uint)."],"u8.lte":["int","less-or-equal (8-bit uint)."],"u8.max":["int","maximum (8-bit uint)."],"u8.min":["int","minimum (8-bit uint)."],"u8.mod":["int","modulo (8-bit uint)."],"u8.mul":["int","mul operation (8-bit uint)."],"u8.ne":["int","not equal (8-bit uint)."],"u8.neg":["int","negation (8-bit uint)."],"u8.pow":["int","power (8-bit uint)."],"u8.rem":["int","remainder (8-bit uint)."],"u8.shl":["int","shl operation (8-bit uint)."],"u8.shr":["int","shr operation (8-bit uint)."],"u8.sign":["int","sign (-1/0/1) (8-bit uint)."],"u8.sub":["int","sub operation (8-bit uint)."],"unblend":["core","generic numeric method (dispatches on operand type)."],"uniq":["tensor","deduplicate a tensor."],"unless":["forms","evaluate body when test is false, else nil. (unless test body...)."],"use-multi":["eval","load multiple modules."],"value-and-gradient":["ad","closure returning (cons primal gradient)."],"video":["tensor","render a frame-axis tensor as video."],"vjp":["ad","vector-Jacobian product (pullback)."],"when":["forms","evaluate body when test is true, else nil. (when test body...)."],"where":["tensor","indices of true elements."],"write":["io","print a value machine-readably."],"zip":["core","pair up two collections."]};
+var DOC_GROUPS = [{"id":"forms","title":"Special forms","names":["begin","case","cond","def","defn","else","fn","guard","if","import","lambda","let","module","quote","raise","set!","try","unless","when"]},{"id":"core","title":"Core library","names":["!=","*","+","-","/","<","<=","=",">",">=","abs","acos","acosh","alive?","and","append","approx?","asin","asinh","atan","atan2","atanh","blend","bound-code","ceil","chunk","clamp","concat","cons","cos","cosh","deg->rad","disasm!","equal?","error-name","exp","expm1","flat","floor","fract","gradient","hypot","is-core-type?","is-instance-of?","keep","length","log","log10","log1p","log2","map2","max","min","mod","nextafter","nil","not","or","part","pi","pow","prevbefore","rad->deg","range","read","rem","remap","reverse","rgba","rot","round","shl","shr","sign","sin","sinh","source-datum","source-location","source-text","sqrt","string->list","string->number","string->symbol","string-append","string-byte-ref","string-downcase","string-find","string-join","string-length","string-replace","string-reverse","string-split","string-trim","string-trim-left","string-trim-right","string-upcase","tan","tanh","tau","trunc","type","unblend","zip"]},{"id":"ad","title":"Differentiation","names":["ad.gradient-call","ad.value-gradient-call","autodiff.cotangent-add","autodiff.cotangent-zero","autodiff.hook-result","autodiff.register-rule","autodiff.register-space","autodiff.register-tree","autodiff.runtime-owned-output","autodiff.scalar","autodiff.scalar-adjoint","autodiff.tensor","autodiff.tensor-linear-apply","autodiff.tensor-linear-transpose","autodiff.tensor-nested","close-expr","close-linear","compile-expr","deriv","expr->datum","expr-view","hvp","jacobian","jvp","linearize","register-ad-rule","register-ad-space","register-ad-tree","simplify-expr","symbolic","symbolic-var","transpose","value-and-gradient","vjp"]},{"id":"tensor","title":"Tensors","names":["audio","cat","diff","dot","image","iota","outer","reshape","stack","tensor-get","tensor-len","tensor-rank","tensor-shape","tensor.eq","trans","uniq","video","where"]},{"id":"collections","title":"Collections","names":["drop","fold","fst","list","rev","rst","scan","sort-dn","sort-up","take"]},{"id":"string","title":"Strings","names":["list->string","number->string","string!=","string.append","string.byte-ref","string.downcase","string.ends-with?","string.eq","string.find","string.from-list","string.from-symbol","string.gt","string.gte","string.includes?","string.join","string.length","string.lt","string.lte","string.ne","string.number->string","string.replace","string.reverse","string.split","string.starts-with?","string.string->number","string.substring","string.to-list","string.trim","string.trim-left","string.trim-right","string.upcase","substring","symbol->string"]},{"id":"map","title":"Maps","names":["hash-map","map","map-get","map-has?","map-keys","map-set!","map-size","map-vals"]},{"id":"float","title":"Float ops","names":["f16.abs","f16.acos","f16.acosh","f16.add","f16.approx?","f16.asin","f16.asinh","f16.atan","f16.atan2","f16.atanh","f16.avg","f16.blend","f16.ceil","f16.clamp","f16.cos","f16.cosh","f16.deg->rad","f16.div","f16.eq","f16.exp","f16.expm1","f16.floor","f16.fract","f16.gt","f16.gte","f16.hypot","f16.is-even?","f16.is-finite?","f16.is-inf?","f16.is-nan?","f16.is-odd?","f16.is-zero?","f16.log","f16.log10","f16.log1p","f16.log2","f16.lt","f16.lte","f16.max","f16.min","f16.mod","f16.mul","f16.ne","f16.neg","f16.nextafter","f16.pi","f16.pow","f16.prevbefore","f16.rad->deg","f16.rem","f16.remap","f16.round","f16.sign","f16.sin","f16.sinh","f16.sqrt","f16.sub","f16.tan","f16.tanh","f16.tau","f16.trunc","f16.unblend","f32.abs","f32.acos","f32.acosh","f32.add","f32.approx?","f32.asin","f32.asinh","f32.atan","f32.atan2","f32.atanh","f32.avg","f32.blend","f32.ceil","f32.clamp","f32.cos","f32.cosh","f32.deg->rad","f32.div","f32.eq","f32.exp","f32.expm1","f32.floor","f32.fract","f32.gt","f32.gte","f32.hypot","f32.is-even?","f32.is-finite?","f32.is-inf?","f32.is-nan?","f32.is-odd?","f32.is-zero?","f32.log","f32.log10","f32.log1p","f32.log2","f32.lt","f32.lte","f32.max","f32.min","f32.mod","f32.mul","f32.ne","f32.neg","f32.nextafter","f32.pi","f32.pow","f32.prevbefore","f32.rad->deg","f32.rem","f32.remap","f32.round","f32.sign","f32.sin","f32.sinh","f32.sqrt","f32.sub","f32.tan","f32.tanh","f32.tau","f32.trunc","f32.unblend","f64.abs","f64.acos","f64.acosh","f64.add","f64.approx?","f64.asin","f64.asinh","f64.atan","f64.atan2","f64.atanh","f64.avg","f64.blend","f64.ceil","f64.clamp","f64.cos","f64.cosh","f64.deg->rad","f64.div","f64.eq","f64.exp","f64.expm1","f64.floor","f64.fract","f64.gt","f64.gte","f64.hypot","f64.is-even?","f64.is-finite?","f64.is-inf?","f64.is-nan?","f64.is-odd?","f64.is-zero?","f64.log","f64.log10","f64.log1p","f64.log2","f64.lt","f64.lte","f64.max","f64.min","f64.mod","f64.mul","f64.ne","f64.neg","f64.nextafter","f64.pi","f64.pow","f64.prevbefore","f64.rad->deg","f64.rem","f64.remap","f64.round","f64.sign","f64.sin","f64.sinh","f64.sqrt","f64.sub","f64.tan","f64.tanh","f64.tau","f64.trunc","f64.unblend","from-f16","from-f32","from-f64"]},{"id":"int","title":"Integer ops","names":["i16.abs","i16.add","i16.clamp","i16.div","i16.eq","i16.from-f16","i16.from-f32","i16.from-f64","i16.gt","i16.gte","i16.is-even?","i16.is-odd?","i16.lt","i16.lte","i16.max","i16.min","i16.mod","i16.mul","i16.ne","i16.neg","i16.pow","i16.rem","i16.shl","i16.shr","i16.sign","i16.sub","i32.abs","i32.add","i32.clamp","i32.div","i32.eq","i32.from-f16","i32.from-f32","i32.from-f64","i32.gt","i32.gte","i32.is-even?","i32.is-odd?","i32.lt","i32.lte","i32.max","i32.min","i32.mod","i32.mul","i32.ne","i32.neg","i32.pow","i32.rem","i32.shl","i32.shr","i32.sign","i32.sub","i64.abs","i64.add","i64.clamp","i64.div","i64.eq","i64.from-f16","i64.from-f32","i64.from-f64","i64.gt","i64.gte","i64.is-even?","i64.is-odd?","i64.lt","i64.lte","i64.max","i64.min","i64.mod","i64.mul","i64.ne","i64.neg","i64.pow","i64.rem","i64.shl","i64.shr","i64.sign","i64.sub","i8.abs","i8.add","i8.clamp","i8.div","i8.eq","i8.from-f16","i8.from-f32","i8.from-f64","i8.gt","i8.gte","i8.is-even?","i8.is-odd?","i8.lt","i8.lte","i8.max","i8.min","i8.mod","i8.mul","i8.ne","i8.neg","i8.pow","i8.rem","i8.shl","i8.shr","i8.sign","i8.sub","u16.abs","u16.add","u16.clamp","u16.div","u16.eq","u16.from-f16","u16.from-f32","u16.from-f64","u16.gt","u16.gte","u16.is-even?","u16.is-odd?","u16.lt","u16.lte","u16.max","u16.min","u16.mod","u16.mul","u16.ne","u16.neg","u16.pow","u16.rem","u16.shl","u16.shr","u16.sign","u16.sub","u32.abs","u32.add","u32.clamp","u32.div","u32.eq","u32.from-f16","u32.from-f32","u32.from-f64","u32.gt","u32.gte","u32.is-even?","u32.is-odd?","u32.lt","u32.lte","u32.max","u32.min","u32.mod","u32.mul","u32.ne","u32.neg","u32.pow","u32.rem","u32.shl","u32.shr","u32.sign","u32.sub","u64.abs","u64.add","u64.clamp","u64.div","u64.eq","u64.from-f16","u64.from-f32","u64.from-f64","u64.gt","u64.gte","u64.is-even?","u64.is-odd?","u64.lt","u64.lte","u64.max","u64.min","u64.mod","u64.mul","u64.ne","u64.neg","u64.pow","u64.rem","u64.shl","u64.shr","u64.sign","u64.sub","u8.abs","u8.add","u8.clamp","u8.div","u8.eq","u8.from-f16","u8.from-f32","u8.from-f64","u8.gt","u8.gte","u8.is-even?","u8.is-odd?","u8.lt","u8.lte","u8.max","u8.min","u8.mod","u8.mul","u8.ne","u8.neg","u8.pow","u8.rem","u8.shl","u8.shr","u8.sign","u8.sub"]},{"id":"complex","title":"Complex ops","names":["c16.abs","c16.acos","c16.acosh","c16.add","c16.arg","c16.asin","c16.asinh","c16.atan","c16.atanh","c16.blend","c16.cart","c16.clamp","c16.conj","c16.cos","c16.cosh","c16.div","c16.eq","c16.exp","c16.expm1","c16.fract","c16.im","c16.is-finite?","c16.is-inf?","c16.is-nan?","c16.is-zero?","c16.log","c16.log1p","c16.mag","c16.mod","c16.mul","c16.ne","c16.neg","c16.norm","c16.polar","c16.pow","c16.re","c16.rem","c16.remap","c16.sin","c16.sinh","c16.sqrt","c16.sub","c16.tan","c16.tanh","c16.unblend","c32.abs","c32.acos","c32.acosh","c32.add","c32.arg","c32.asin","c32.asinh","c32.atan","c32.atanh","c32.blend","c32.cart","c32.clamp","c32.conj","c32.cos","c32.cosh","c32.div","c32.eq","c32.exp","c32.expm1","c32.fract","c32.im","c32.is-finite?","c32.is-inf?","c32.is-nan?","c32.is-zero?","c32.log","c32.log1p","c32.mag","c32.mod","c32.mul","c32.ne","c32.neg","c32.norm","c32.polar","c32.pow","c32.re","c32.rem","c32.remap","c32.sin","c32.sinh","c32.sqrt","c32.sub","c32.tan","c32.tanh","c32.unblend","c64.abs","c64.acos","c64.acosh","c64.add","c64.arg","c64.asin","c64.asinh","c64.atan","c64.atanh","c64.blend","c64.cart","c64.clamp","c64.conj","c64.cos","c64.cosh","c64.div","c64.eq","c64.exp","c64.expm1","c64.fract","c64.im","c64.is-finite?","c64.is-inf?","c64.is-nan?","c64.is-zero?","c64.log","c64.log1p","c64.mag","c64.mod","c64.mul","c64.ne","c64.neg","c64.norm","c64.polar","c64.pow","c64.re","c64.rem","c64.remap","c64.sin","c64.sinh","c64.sqrt","c64.sub","c64.tan","c64.tanh","c64.unblend","complex","im","mag","polar","re"]},{"id":"numeric","title":"Generic numerics","names":["bool.and","bool.not","bool.or"]},{"id":"types","title":"Types","names":["Bool","Keyword","Opaque","String","Symbol","Tensor","Type","c16","c32","c64","c8","f16","f32","f64","f8","i16","i32","i64","i8","instance","keyword.eq","keyword.ne","lock-method","method","symbol","symbol.eq","symbol.ne","u16","u32","u64","u8"]},{"id":"predicates","title":"Predicates","names":["closure?","complex?","cons?","contains?","error?","even?","ffifunc?","float?","int?","intrinsic?","is-even?","is-finite?","is-inf?","is-nan?","is-odd?","is-zero?","method?","namespace?","number?","real?","string-ends-with?","string-includes?","string-starts-with?","string<=?","string<?","string=?","string>=?","string>?"]},{"id":"io","title":"Input/output","names":["display","format","printf","write"]},{"id":"process","title":"Processes","names":["exit-reason","pid","pid.eq","pid.ne","process-info","receive","self","send","sleep","spawn","timeout-sentinel"]},{"id":"eval","title":"Evaluator","names":["evaluate","load","use-multi"]},{"id":"ffi","title":"Foreign functions","names":["CBool","CDouble","CFloat","CInt","CString","CUint","CVoid","dynamic-library:close","dynamic-library:lookup","dynamic-library:open","ffi:make-func"]}];
+
+
+/* ================= docs sidepanel ================= */
+// Rendered from DOCS / DOC_GROUPS (generated from src/intrinsics.zig,
+// src/prelude.pt, and the bind.zig special forms). Click a name to insert
+// it at the caret; the search box filters all groups.
+var docsPanel = document.getElementById("docs-panel");
+var docsBody = document.getElementById("docs-body");
+var docsSearch = document.getElementById("docs-search");
+var docsCount = document.getElementById("docs-count");
+var docsToggle = document.getElementById("docs-toggle");
+var DOCS_KEY = "skript.pad.docs";
+function docsInsert(name) {
+    var caret = inputEl.selectionStart;
+    var v = inputEl.value;
+    var insert = name + " ";
+    inputEl.value = v.slice(0, caret) + insert + v.slice(inputEl.selectionEnd);
+    inputEl.setSelectionRange(caret + insert.length, caret + insert.length);
+    afterEdit();
+    inputEl.focus();
+}
+function renderDocs(filter) {
+    var q = (filter || "").toLowerCase();
+    docsBody.textContent = "";
+    var shown = 0;
+    DOC_GROUPS.forEach(function (group, gi) {
+        var matches = group.names.filter(function (n) {
+            return !q || n.toLowerCase().indexOf(q) !== -1 ||
+                DOCS[n][1].toLowerCase().indexOf(q) !== -1;
+        });
+        if (matches.length === 0) return;
+        shown += matches.length;
+        var det = document.createElement("details");
+        if (gi < 2 || q) det.open = true;
+        var sum = document.createElement("summary");
+        sum.textContent = group.title + " ";
+        var n = document.createElement("span");
+        n.className = "n";
+        n.textContent = "(" + matches.length + ")";
+        sum.appendChild(n);
+        det.appendChild(sum);
+        matches.forEach(function (name) {
+            var row = document.createElement("div");
+            row.className = "doc";
+            var b = document.createElement("button");
+            b.type = "button";
+            b.textContent = name;
+            b.title = "insert";
+            b.addEventListener("click", function () { docsInsert(name); });
+            var d = document.createElement("span");
+            d.textContent = DOCS[name][1];
+            row.appendChild(b);
+            row.appendChild(d);
+            det.appendChild(row);
+        });
+        docsBody.appendChild(det);
+    });
+    docsCount.textContent = shown + " shown";
+}
+var docsDebounce = null;
+docsSearch.addEventListener("input", function () {
+    clearTimeout(docsDebounce);
+    docsDebounce = setTimeout(function () { renderDocs(docsSearch.value); }, 120);
+});
+docsToggle.addEventListener("click", function () {
+    var hidden = document.body.classList.toggle("docs-hidden");
+    try { localStorage.setItem(DOCS_KEY, hidden ? "hidden" : "shown"); } catch (e) {}
+});
+try {
+    if (localStorage.getItem(DOCS_KEY) === "hidden") document.body.classList.add("docs-hidden");
+} catch (e) {}
+renderDocs("");
+
+/* ================= boot ================= */
+// Theme restore (before paint: the <html> tag already carries the default).
+try {
+    var savedTheme = localStorage.getItem(THEME_KEY);
+    if (savedTheme === "light" || savedTheme === "dark") {
+        document.documentElement.dataset.theme = savedTheme;
+        themeBtn.textContent = savedTheme === "dark" ? "Light" : "Dark";
+    }
+} catch (e) {}
+
+// Completion popup DOM + one-time listeners.
+completionPopup = document.createElement("div");
+completionPopup.className = "completion-popup";
+completionPopup.style.display = "none";
+completionPopup.addEventListener("mousedown", function (e) { e.preventDefault(); });
+composerEl.appendChild(completionPopup);
+editorEl.addEventListener("scroll", positionCompletionPopup);
+inputEl.addEventListener("mouseup", function () { if (completionVisible) refreshCompletionAfterEdit(); });
+inputEl.addEventListener("keyup", function () { renderMirror(); });
+inputEl.addEventListener("click", function () { renderMirror(); });
+
+// Runs once the worker reports its wasm ready (see worker.onmessage).
+function bootAfterReady() {
+    var restored = restoreCells();
+    if (restored) hideWelcome();
+    renderMirror();
+    inputEl.focus();
+    // First visit: run the hello demo so the pad proves itself.
+    if (!restored) {
+        inputEl.value = '(begin (write "hello from the skript pad\\n") (fold [1 2 3 4] +))';
+        commit();
+    }
+}
+</script>
+</body>
+</html>

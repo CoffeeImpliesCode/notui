@@ -1,0 +1,595 @@
+#!/usr/bin/env -S skript
+; test/api/autodiff.pt — Bound-Code forward AD API boundaries.
+; Run: ./zig-out/bin/skript test/api/autodiff.pt
+; Expected: a dot per passing check, then ALL-OK and exit 0.
+
+(defn (fail-msg got want)
+  (begin (write "\nFAIL ") (write got) (write " != ") (write want) (write "\n")
+         (raise "check-failed")))
+(defn (check-eq got want)
+  (if (equal? got want) (write ".") (fail-msg got want)))
+(defn (check-num got want)
+  (if (= got want) (write ".") (fail-msg got want)))
+
+; Scalar gradients preserve the established single-argument result contract.
+(check-num ((gradient (fn (x) (* x x))) 3) 6)
+
+; A gradient of a multi-argument function is a list in formal-argument order.
+(def scalar-multi-gradient
+  ((gradient (fn (x y) (+ (* x x) (* y y)))) 3 4))
+(check-num (length scalar-multi-gradient) 2)
+(check-num (fst scalar-multi-gradient) 6)
+(check-num (fst (rst scalar-multi-gradient)) 8)
+
+; Value-and-gradient returns the primal consed onto that gradient list.
+(def scalar-value-gradient
+  ((value-and-gradient (fn (x y) (+ (* x x) (* y y)))) 3 4))
+(check-num (fst scalar-value-gradient) 25)
+(check-num (fst (rst scalar-value-gradient)) 6)
+(check-num (fst (rst (rst scalar-value-gradient))) 8)
+(check-eq (rst (rst (rst scalar-value-gradient))) nil)
+
+; Public JVP returns the primal and caller-seeded tangent. Multi-argument
+; primals and tangents use proper lists in formal-argument order.
+(check-eq
+  (jvp
+    (fn (x y) (+ (* x y) x))
+    (list 2.0 3.0)
+    (list 4.0 5.0))
+  (list 8.0 26.0))
+
+; Named helpers and direct anonymous closures compose in generated Code.
+(defn (jvp-shift x) (+ x 1.0))
+(check-eq
+  (jvp
+    (fn (x)
+      ((fn (y) (* 3.0 y))
+       (jvp-shift (* x x))))
+    2.0
+    0.5)
+  (list 15.0 6.0))
+
+; A multi-body let differentiates and returns its final body.
+(check-eq
+  (jvp
+    (fn (x)
+      (let ((shift (+ x 1.0)))
+        (* shift shift)
+        (+ (* 3.0 x) 2.0)))
+    4.0
+    0.5)
+  (list 14.0 1.5))
+
+; Map keys are static labels; primal and tangent maps retain them.
+(def structured-jvp
+  (jvp
+    (fn (point)
+      (let ((x (map-get point :x))
+            (y (map-get point :y)))
+        (hash-map
+          :norm (+ (* x x) (* y y))
+          :sum (+ x y))))
+    (hash-map :x 3.0 :y 4.0)
+    (hash-map :x 1.0 :y -1.0)))
+(def structured-jvp-primal (fst structured-jvp))
+(def structured-jvp-tangent (fst (rst structured-jvp)))
+(check-eq
+  (list
+    (map-size structured-jvp-primal)
+    (map-size structured-jvp-tangent)
+    (map-get structured-jvp-primal :norm)
+    (map-get structured-jvp-primal :sum)
+    (map-get structured-jvp-tangent :norm)
+    (map-get structured-jvp-tangent :sum)
+    (rst (rst structured-jvp)))
+  (list 2 2 25.0 7.0 -2.0 0.0 nil))
+
+; Basis sweeps rebuild tensor gradients with the primal tensor shape.
+(check-eq ((gradient (fn (x) (dot x x))) [3.0 4.0]) [6.0 8.0])
+(def matrix-gradient
+  ((gradient
+     (fn (x)
+       (+ (+ (* (tensor-get x 0 0) (tensor-get x 0 0))
+             (* (tensor-get x 0 1) (tensor-get x 0 1)))
+          (+ (* (tensor-get x 1 0) (tensor-get x 1 0))
+             (* (tensor-get x 1 1) (tensor-get x 1 1))))))
+   [[1.0 2.0] [3.0 4.0]]))
+(check-eq matrix-gradient [[2.0 4.0] [6.0 8.0]])
+(check-eq (tensor-shape matrix-gradient) (list 2 2))
+
+; Tensor map callbacks retain active outer captures in their JVP kernels.
+(check-eq
+  (jvp
+    (fn (values scale)
+      (map values (fn (element) (* scale element))))
+    (list [1.0 2.0 3.0] 2.0)
+    (list [0.5 1.0 1.5] 0.25))
+  (list [2.0 4.0 6.0] [1.25 2.5 3.75]))
+
+; A finite zero coefficient works, but a non-finite scalar primal cannot
+; publish a linear handle or pullback after zero multiplication.
+(def reverse-zero-scalar (fn (x) (* 0.0 x)))
+(def reverse-zero-scalar-linear (linearize reverse-zero-scalar 2.0))
+(check-num (fst reverse-zero-scalar-linear) 0.0)
+(check-num ((fst (rst reverse-zero-scalar-linear)) 3.0) 0.0)
+(check-num ((fst (rst (vjp reverse-zero-scalar 2.0))) 5.0) 0.0)
+(check-eq
+  (error-name (try (linearize reverse-zero-scalar inf.0) (catch e e)))
+  "Unsupported")
+(check-eq
+  (error-name (try (vjp reverse-zero-scalar inf.0) (catch e e)))
+  "Unsupported")
+(def reverse-unary-map
+  (fn (x) (map x (fn (element) (* 2.0 element)))))
+(check-eq
+  (jvp reverse-unary-map [1.0 2.0] [1.0 1.0])
+  (list [2.0 4.0] [2.0 2.0]))
+(def reverse-unary-map-result (vjp reverse-unary-map [1.0 2.0]))
+(check-eq (fst reverse-unary-map-result) [2.0 4.0])
+(check-eq
+  ((fst (rst reverse-unary-map-result)) [5.0 6.0])
+  [10.0 12.0])
+
+; A nonzero map coefficient still multiplies a zero tangent by the primal.
+; The per-element coefficient kernel must reject non-finite primals, including
+; one that follows a finite element in the same tensor.
+(check-eq
+  (error-name (try (linearize reverse-unary-map [inf.0]) (catch e e)))
+  "Unsupported")
+(check-eq
+  (error-name (try (vjp reverse-unary-map [inf.0]) (catch e e)))
+  "Unsupported")
+(check-eq
+  (error-name (try (vjp reverse-unary-map [2.0 inf.0]) (catch e e)))
+  "Unsupported")
+
+; A zero map coefficient must not hide the non-finite element it multiplied.
+(def reverse-zero-unary-map
+  (fn (x) (map x (fn (element) (* 0.0 element)))))
+(def reverse-zero-unary-map-linear
+  (linearize reverse-zero-unary-map [2.0]))
+(check-eq (fst reverse-zero-unary-map-linear) [0.0])
+(check-eq ((fst (rst reverse-zero-unary-map-linear)) [3.0]) [0.0])
+(check-eq
+  ((fst (rst (vjp reverse-zero-unary-map [2.0]))) [5.0])
+  [0.0])
+(check-eq
+  (error-name (try (linearize reverse-zero-unary-map [inf.0]) (catch e e)))
+  "Unsupported")
+(check-eq
+  (error-name (try (vjp reverse-zero-unary-map [inf.0]) (catch e e)))
+  "Unsupported")
+(check-eq
+  (error-name (try (vjp reverse-zero-unary-map [2.0 inf.0]) (catch e e)))
+  "Unsupported")
+
+; Tensor reduction uses the selected axis and a bound method callback.
+(check-eq
+  (jvp
+    (fn (values) (fold values 1 +))
+    [[1.0 2.0] [3.0 4.0]]
+    [[0.5 1.0] [1.5 2.0]])
+  (list [3.0 7.0] [1.5 3.5]))
+
+; Generated JVP closures retain lexical captures.
+(defn (scaled-square scale)
+  (fn (x) (* scale (* x x))))
+(check-num ((gradient (scaled-square 3.0)) 2.0) 12.0)
+
+; One bound function can have distinct captured environments in the AD cache.
+(def scaled-two (scaled-square 2.0))
+(def scaled-five (scaled-square 5.0))
+(check-num ((deriv scaled-two) 4.0) 16.0)
+(check-num ((deriv scaled-five) 4.0) 40.0)
+(check-num ((gradient scaled-two) 4.0) 16.0)
+(check-num ((gradient scaled-five) 4.0) 40.0)
+(check-num ((deriv scaled-two) 4.0) 16.0)
+
+; Generated Code remains differentiable for mixed partials.
+(check-num
+  ((deriv (deriv (fn (x y) (* (* x x) y)) 0) 1) 3.0 4.0)
+  6.0)
+
+; Valid three-formal AD distinguishes selector errors from argument arity.
+(def sum-three (fn (x y z) (+ (+ x y) z)))
+(check-num (sum-three 1.0 2.0 3.0) 6.0)
+(check-num ((deriv sum-three 2) 1.0 2.0 3.0) 1.0)
+(check-num ((deriv sum-three 'y) 1.0 2.0 3.0) 1.0)
+(check-eq ((gradient sum-three) 1.0 2.0 3.0) (list 1.0 1.0 1.0))
+(check-num (fst (vjp sum-three (list 1.0 2.0 3.0))) 6.0)
+(check-eq (error-name (try (deriv sum-three 3) (catch e e))) "InvalidSelector")
+(check-eq (error-name (try (deriv sum-three -1) (catch e e))) "InvalidSelector")
+(check-eq (error-name (try (deriv sum-three 'missing) (catch e e))) "InvalidSelector")
+
+; Nested list/map pytrees retain structure, keys, and unused-leaf zeros.
+(def nested-gradient
+  ((gradient
+     (fn (tree)
+       (let ((x (fst tree))
+             (params (fst (rst tree))))
+         (+ (* x x)
+            (* (map-get params :used) (map-get params :used))))))
+   (list 3.0 (hash-map :used 4.0 :unused 9.0))))
+(check-num (length nested-gradient) 2)
+(check-num (fst nested-gradient) 6.0)
+(def nested-map-gradient (fst (rst nested-gradient)))
+(check-num (map-size nested-map-gradient) 2)
+(check-num (map-get nested-map-gradient :used) 8.0)
+(check-num (map-get nested-map-gradient :unused) 0.0)
+
+; Every parameter JVP is validated before a primal call or an earlier sweep.
+; The second parameter rejects display; the first parameter's generated JVP
+; would otherwise execute the preceding mutation.
+(def gradient-effect-state (hash-map :runs 0))
+(check-eq
+  (error-name
+    (try
+      ((gradient
+         (fn (x y)
+           (begin
+             (map-set! gradient-effect-state :runs 1)
+             (display y)
+             (+ (* x x) (* y y)))))
+       2.0
+       3.0)
+      (catch e e)))
+  "Unsupported")
+(check-num (map-get gradient-effect-state :runs) 0)
+
+; Shape validation also completes before a rejected primal can mutate state.
+(def gradient-shape-state (hash-map :runs 0))
+(check-eq
+  (error-name
+    (try
+      ((gradient
+         (fn (x y)
+           (begin
+             (map-set! gradient-shape-state :runs x)
+             (* x x))))
+       2.0
+       (hash-map :bad "leaf"))
+      (catch e e)))
+  "TypeMismatch")
+(check-num (map-get gradient-shape-state :runs) 0)
+
+
+; Value-and-gradient rejects a mutating active path before the primal call.
+(def value-gradient-effect-state (hash-map :runs 0))
+(check-eq
+  (error-name
+    (try
+      ((value-and-gradient
+         (fn (x)
+           (begin
+             (map-set! value-gradient-effect-state :runs x)
+             (* x x))))
+       3.0)
+      (catch e e)))
+  "Unsupported")
+(check-num (map-get value-gradient-effect-state :runs) 0)
+
+; Integer tensor gradients preserve values that are not exactly representable
+; as f64.
+(check-eq
+  ((gradient (fn (x) (dot x [9007199254740993]))) [1])
+  [9007199254740993])
+
+; A maximum-width basis sweep reuses one seed instead of retaining one full
+; tensor per leaf.
+(def wide-gradient
+  ((gradient (fn (x) (tensor-get x 0))) (iota 8192)))
+(check-num (tensor-len wide-gradient) 8192)
+(check-num (tensor-get wide-gradient 0) 1)
+(check-num (tensor-get wide-gradient 8191) 0)
+
+; One leaf beyond the documented sweep cap has a distinct limit error.
+(check-eq
+  (error-name
+    (try ((gradient (fn (x) (tensor-get x 0))) (iota 8193)) (catch e e)))
+  "LimitExceeded")
+
+; A shadowed global resolves to its known pure helper closure.
+(def saved-sin sin)
+(def sin (fn (x) (* x x)))
+(check-num ((deriv (fn (x) (sin x))) 3.0) 6.0)
+(def sin saved-sin)
+
+; A heterogeneous method with a closure instance remains a dynamic boundary.
+(instance sin f64 (fn (x) (* x x)))
+(check-eq
+  (error-name (try (deriv (fn (x) (sin x))) (catch e e)))
+  "Unsupported")
+(instance sin f64 @f64.sin)
+
+; Captured and local shadows resolve to their pure helper closures.
+(check-num
+  (((fn (sin)
+      (deriv (fn (x) (sin x))))
+    (fn (x) (+ (* x x) x)))
+   3.0)
+  7.0)
+(check-num
+  ((deriv
+     (fn (x)
+       (let ((sin (fn (y) (* 3.0 y))))
+         (sin x))))
+   4.0)
+  3.0)
+
+; A lexical cos binding cannot capture sin's bound rule dependency.
+(check-num
+  (let ((cos (fn (x) 99.0)))
+    ((deriv (fn (x) (sin x))) 0.0))
+  1.0)
+(check-num ((deriv (fn (x) (sin x))) 0.0) 1.0)
+
+; Held derivatives and gradient JVPs reject stale bound dependencies.
+(def cached-sin-f (fn (x) (sin x)))
+(def cached-sin-derivative (deriv cached-sin-f))
+(def cached-sin-gradient (gradient cached-sin-f))
+(def cached-sin-second-derivative (deriv cached-sin-derivative))
+(check-num (cached-sin-second-derivative 0.0) 0.0)
+(check-num (cached-sin-derivative 0.0) 1.0)
+(check-num (cached-sin-gradient 0.0) 1.0)
+
+(def sin (fn (x) (* x x)))
+(check-eq
+  (error-name (try (cached-sin-derivative 0.0) (catch e e)))
+  "Unsupported")
+(check-eq
+  (error-name (try (cached-sin-gradient 0.0) (catch e e)))
+  "Unsupported")
+(check-eq
+  (error-name (try (cached-sin-second-derivative 0.0) (catch e e)))
+  "Unsupported")
+(check-eq
+  (error-name (try (deriv cached-sin-derivative) (catch e e)))
+  "Unsupported")
+(check-num ((deriv cached-sin-f) 3.0) 6.0)
+(def sin saved-sin)
+
+; Replacing a dependency permits a fresh cache entry but rejects the old one.
+(def h (fn () 0))
+(def f (fn (x) (begin (h) (* x x))))
+(def old (deriv f))
+(check-num (old 3) 6)
+(def h (fn () 1))
+(def fresh (deriv f))
+(check-num (fresh 3) 6)
+(check-eq
+  (error-name (try (old 3) (catch e e)))
+  "Unsupported")
+
+; Type and arity failures are values that callers can catch and inspect.
+(check-eq (error-name (try (gradient) (catch e e))) "ArityMismatch")
+(check-eq (error-name (try (gradient 42) (catch e e))) "TypeMismatch")
+(def square-gradient (gradient (fn (x) (* x x))))
+(check-eq (error-name (try (square-gradient) (catch e e))) "ArityMismatch")
+(check-eq (error-name (try (square-gradient "bad") (catch e e))) "TypeMismatch")
+(check-eq
+  (error-name
+    (try ((gradient (fn (x) "not-a-scalar-number")) 1.0) (catch e e)))
+  "TypeMismatch")
+(check-eq
+  (error-name
+    (try ((gradient (fn (m) 1.0)) (hash-map :bad "leaf")) (catch e e)))
+  "TypeMismatch")
+
+; --- Phase 3 bound-code effect preflight regressions ---
+
+; 1. Direct write in inactive expression is rejected before observable map mutation.
+(def probe-inactive-write (hash-map :runs 0))
+(check-eq
+  (error-name
+    (try
+      ((deriv
+         (fn (x)
+           (let ((_ (map-set! probe-inactive-write :runs 1)))
+             (* x x))))
+       3.0)
+      (catch e e)))
+  "Unsupported")
+(check-num (map-get probe-inactive-write :runs) 0)
+
+; 2. Aliased write in inactive branch is rejected before observable map mutation.
+(def probe-aliased-write (hash-map :runs 0))
+(def aliased-map-set! map-set!)
+(check-eq
+  (error-name
+    (try
+      ((deriv
+         (fn (x)
+           (if #f
+             (aliased-map-set! probe-aliased-write :runs 1)
+             (* x x))))
+       3.0)
+      (catch e e)))
+  "Unsupported")
+(check-num (map-get probe-aliased-write :runs) 0)
+
+; 3. Write in predicate is rejected before observable map mutation.
+(def probe-predicate-write (hash-map :runs 0))
+(check-eq
+  (error-name
+    (try
+      ((deriv
+         (fn (x)
+           (if (begin (map-set! probe-predicate-write :runs 1) #t)
+             (* x x)
+             (* x x))))
+       3.0)
+      (catch e e)))
+  "Unsupported")
+(check-num (map-get probe-predicate-write :runs) 0)
+
+; 4. Write in transitive call inside inactive branch is rejected before output/mutation.
+(def probe-transitive-write (hash-map :runs 0))
+(defn (transitive-helper y)
+  (begin (map-set! probe-transitive-write :runs 1) y))
+(check-eq
+  (error-name
+    (try
+      ((gradient
+         (fn (x)
+           (if #f
+             (transitive-helper x)
+             (* x x))))
+       3.0)
+      (catch e e)))
+  "Unsupported")
+(check-num (map-get probe-transitive-write :runs) 0)
+
+; 5. Custom unknown method is rejected before execution.
+(def custom-unknown-op (method))
+(instance custom-unknown-op f64 (fn (x) (* x x)))
+(check-eq
+  (error-name
+    (try
+      ((deriv (fn (x) (custom-unknown-op x))) 2.0)
+      (catch e e)))
+  "Unsupported")
+
+; 6. Value-and-gradient with aliased write in dead branch rejects before primal call.
+(def probe-vg-alias (hash-map :runs 0))
+(check-eq
+  (error-name
+    (try
+      ((value-and-gradient
+         (fn (x)
+           (begin
+             (if #f (aliased-map-set! probe-vg-alias :runs 1) nil)
+             (* x x))))
+       4.0)
+      (catch e e)))
+  "Unsupported")
+(check-num (map-get probe-vg-alias :runs) 0)
+
+; 7. Pure captured arithmetic and map gradient parity contracts remain intact.
+(defn (make-affine-quad a b c)
+  (fn (x) (+ (* a (* x x)) (+ (* b x) c))))
+(def affine-f (make-affine-quad 2.0 3.0 5.0))
+(check-num ((deriv affine-f) 4.0) 19.0)
+(check-num ((gradient affine-f) 4.0) 19.0)
+
+; Pure lexical let scopes are not state effects.
+(def let-affine
+  ((fn (a)
+     (let ((b 3.0))
+       (fn (x) (+ a (* b x)))))
+   2.0))
+(check-num ((deriv let-affine) 4.0) 3.0)
+
+(def map-grad-fn
+  (fn (m)
+    (+ (* (map-get m :x) (map-get m :x))
+       (* 3.0 (map-get m :y)))))
+(def map-grad-res ((gradient map-grad-fn) (hash-map :x 4.0 :y 2.0)))
+(check-num (map-get map-grad-res :x) 8.0)
+(check-num (map-get map-grad-res :y) 3.0)
+
+
+; ---- Reverse mode through a broadcast axis ----
+; f(x) = sum over the [2 1] x [1 3] broadcast of (x*x) * [10 20 30].
+; Expanding gives f(x) = 60 * (x0*x0 + x1*x1), so the Hessian is diagonal
+; with 120 on both entries and the Hessian-vector product is exact.
+(defn (add2 a b) (+ a b))
+(def bcast-quad
+  (fn (x)
+    (fold (fold (map2 (map2 x x *) (reshape [10 20 30] [1 3]) *) 0 add2) 0 add2)))
+(def bcast-col (reshape [1 2] [2 1]))
+(check-num (bcast-quad bcast-col) 300)
+(check-num (fst (vjp bcast-quad bcast-col)) 300)
+(check-eq (hvp bcast-quad bcast-col (reshape [1 1] [2 1]))
+          (reshape [120 120] [2 1]))
+; A different seed must move the result: the Hessian is 120 * I.
+(check-eq (hvp bcast-quad bcast-col (reshape [1 0] [2 1]))
+          (reshape [120 0] [2 1]))
+
+; Map identity is a working reverse-mode control for structured cotangents.
+(def reverse-map-input (hash-map :x 3.0 :unused 9.0))
+(def reverse-map-identity (vjp (fn (m) m) reverse-map-input))
+(def reverse-map-identity-cotangent
+  ((fst (rst reverse-map-identity)) (hash-map :x 5.0 :unused 7.0)))
+(check-eq
+  (list (map-size reverse-map-identity-cotangent)
+        (map-get reverse-map-identity-cotangent :x)
+        (map-get reverse-map-identity-cotangent :unused))
+  (list 2 5.0 7.0))
+
+; Projection puts the seed on the selected key and preserves an inactive zero.
+(def reverse-map-projection
+  (vjp (fn (m) (map-get m :x)) reverse-map-input))
+(check-num (fst reverse-map-projection) 3.0)
+(def reverse-map-projected ((fst (rst reverse-map-projection)) 5.0))
+(check-eq
+  (list (map-size reverse-map-projected)
+        (map-has? reverse-map-projected :x)
+        (map-has? reverse-map-projected :unused)
+        (map-get reverse-map-projected :x)
+        (map-get reverse-map-projected :unused))
+  (list 2 #t #t 5.0 0.0))
+
+; The same projection works for a tangent handle and a Jacobian row.
+(def reverse-map-linearized
+  (linearize (fn (m) (map-get m :x)) reverse-map-input))
+(check-num (fst reverse-map-linearized) 3.0)
+(check-num
+  ((fst (rst reverse-map-linearized)) (hash-map :x 4.0 :unused 12.0))
+  4.0)
+(def reverse-map-jacobian
+  (fst (jacobian (fn (m) (map-get m :x)) reverse-map-input)))
+(check-eq
+  (list (map-size reverse-map-jacobian)
+        (map-get reverse-map-jacobian :x)
+        (map-get reverse-map-jacobian :unused))
+  (list 2 1.0 0.0))
+
+; A disconnected map input still has a cotangent for every original key.
+(def reverse-map-constant (vjp (fn (m) 7.0) reverse-map-input))
+(check-num (fst reverse-map-constant) 7.0)
+(def reverse-map-zero ((fst (rst reverse-map-constant)) 5.0))
+(check-eq
+  (list (map-size reverse-map-zero)
+        (map-has? reverse-map-zero :x)
+        (map-has? reverse-map-zero :unused)
+        (map-get reverse-map-zero :x)
+        (map-get reverse-map-zero :unused))
+  (list 2 #t #t 0.0 0.0))
+
+; A map output consumes a cotangent with its matching keys.
+(def reverse-map-constructor
+  (vjp (fn (x) (hash-map :x x :fixed 8.0)) 3.0))
+(def reverse-map-constructed (fst reverse-map-constructor))
+(check-eq
+  (list (map-size reverse-map-constructed)
+        (map-get reverse-map-constructed :x)
+        (map-get reverse-map-constructed :fixed))
+  (list 2 3.0 8.0))
+(check-num
+  ((fst (rst reverse-map-constructor)) (hash-map :x 5.0 :fixed 11.0))
+  5.0)
+
+; Scalar square and binary tensor map have working pullbacks.
+(check-num
+  ((fst (rst (vjp (fn (x) (* x x)) 3.0))) 5.0)
+  30.0)
+(check-eq
+  ((fst (rst (vjp (fn (x) (map2 x [2.0 2.0] *)) [1.0 2.0])))
+   [5.0 6.0])
+  [10.0 12.0])
+
+; Closing a linear handle expires that handle and its transpose.
+(def reverse-square-linear
+  (fst (rst (linearize (fn (x) (* x x)) 3.0))))
+(def reverse-square-transpose (transpose reverse-square-linear))
+(check-num (reverse-square-linear 1.0) 6.0)
+(check-num (reverse-square-transpose 1.0) 6.0)
+(check-eq (close-linear reverse-square-linear) #t)
+(check-eq
+  (error-name (try (reverse-square-linear 1.0) (catch e e)))
+  "Expired")
+(check-eq
+  (error-name (try (reverse-square-transpose 1.0) (catch e e)))
+  "Expired")
+
+(write "\nALL-OK\n")

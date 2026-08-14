@@ -8,14 +8,19 @@ pub fn build(b: *std.Build) void {
     const coverage = b.option(bool, "coverage", "Enable zig-cov") orelse false;
     const cov_rt = b.option([]const u8, "coverage-rt", "zig-cov-rt path") orelse null;
 
-    // Sole dependency: zg — Unicode 16 text/width/graphemes.
+    // Library dependency: zg — Unicode 16 text/width/graphemes. The only
+    // one the `notui` module itself imports (src/width.zig is the single
+    // seam).
     const zg = b.dependency("zg", .{});
 
-    // skript — the Lisp runtime embedded by examples/skript_repl.zig
-    // (path dep, build.zig.zon). `enable_libffi = false` keeps the build
-    // lean: the REPL does not use FFI. skript's own build fetches its
-    // tracy dependency unconditionally (expected — the client is disabled
-    // by skript's `enable_tracy` default).
+    // skript — the Lisp runtime embedded by examples/skript_repl.zig.
+    // VENDORED at vendor/skript (path dep, build.zig.zon): the repo
+    // carries its own copy, so there is no sibling checkout to keep in
+    // sync. Example-only — the `notui` module never imports it.
+    // `enable_libffi = false` keeps the build lean: the REPL does not use
+    // FFI. skript's own build fetches its tracy dependency
+    // unconditionally (expected — the client is disabled by skript's
+    // `enable_tracy` default).
     const skript_dep = b.dependency("skript", .{
         .target = target,
         .optimize = optimize,

@@ -1,0 +1,231 @@
+; =============================================================================
+; test/api/tensors.pt — API-wide tensor surface corpus (regvm file mode)
+;
+; Run:  ./zig-out/bin/skript test/api/tensors.pt
+; Expected: a dot per passing check, ends with ALL-OK, exit 0.
+;
+; Error cases are caught in the API corpus where they exercise observable
+; behavior. Tensor integer dot products below also check modular overflow
+; without terminating the process.
+; =============================================================================
+
+; ---- Shared check helpers ----
+(defn (fail-msg got want)
+  (begin (write "\nFAIL ") (write got) (write " != ") (write want) (write "\n") (raise "check-failed")))
+(defn (check-eq got want)
+  (if (equal? got want) (write ".") (fail-msg got want)))
+(defn (check-num got want)
+  (if (= got want) (write ".") (fail-msg got want)))
+
+; ---- iota ----
+; (iota 0) is an empty .i64 tensor; the [] literal is .empty, so assert via
+; shape/rank/len rather than equal?.
+(check-eq (tensor-shape (iota 0)) (list 0))
+(check-num (tensor-len (iota 0)) 0)
+(check-num (tensor-rank (iota 0)) 1)
+(check-eq (iota 5) [0 1 2 3 4])
+(check-eq (iota 12) [0 1 2 3 4 5 6 7 8 9 10 11])
+; (iota -1) -> error.Unsupported (verified: exit 1)
+
+; ---- reshape ----
+; Column-wise: the leading-axis slices (columns) are contiguous runs and
+; the LAST axis varies fastest, so reshape re-interprets the flat data
+; O(1) into a stack of columns — (reshape (iota 4) [2 2]) is [[0 1] [2 3]],
+; equal to the literal (stack [0 1] [2 3]).
+(check-eq (reshape (iota 4) [2 2]) [[0 1] [2 3]])
+(check-eq (reshape (iota 6) [2 3]) [[0 1 2] [3 4 5]])
+(check-eq (reshape (iota 8) [2 2 2]) [[[0 1] [2 3]] [[4 5] [6 7]]])
+; cons-list shape form (3 2) is accepted like the [3 2] literal.
+(check-eq (reshape [1 2 3 4 5 6] (list 3 2)) [[1 2] [3 4] [5 6]])
+; count mismatch: (reshape (iota 4) [3]) -> error.ArityMismatch (verified: exit 1)
+
+; ---- tensor-get ----
+(check-num (tensor-get [10 20 30] 1) 20)
+(check-num (tensor-get [[1 2] [3 4]] 0 0) 1)
+(check-num (tensor-get [[1 2] [3 4]] 0 1) 2)
+(check-num (tensor-get [[1 2] [3 4]] 1 0) 3)
+(check-num (tensor-get [[1 2] [3 4]] 1 1) 4)
+(check-num (tensor-get [[[1 2] [3 4]] [[5 6] [7 8]]] 1 0 1) 6)
+(check-num (tensor-get (reshape (iota 6) [2 3]) 1 2) 5)
+; out of range: (tensor-get [1 2 3] 3) and (tensor-get [1 2] -1) ->
+;   error.Unsupported; index-count mismatch (tensor-get [[1 2] [3 4]] 0) ->
+;   error.ArityMismatch (all verified: exit 1)
+
+; ---- tensor-shape / tensor-rank / tensor-len ----
+(check-eq (tensor-shape [1 2 3]) (list 3))
+(check-eq (tensor-shape [[1 2] [3 4]]) (list 2 2))
+(check-eq (tensor-shape [[[0 1] [2 3]] [[4 5] [6 7]]]) (list 2 2 2))
+(check-eq (tensor-shape []) (list 0))
+(check-num (tensor-rank [1 2 3]) 1)
+(check-num (tensor-rank [[1 2] [3 4]]) 2)
+(check-num (tensor-rank (reshape (iota 8) [2 2 2])) 3)
+(check-num (tensor-len [1 2 3]) 3)
+(check-num (tensor-len [[1 2] [3 4]]) 2)
+(check-num (tensor-len []) 0)
+
+; ---- fold / scan ----
+; fold collapses the folded axis: (fold t +) folds axis 0 (the leading
+; axis); the axis form is (fold t k fn), negative k counts from the end.
+(check-num (fold [1 2 3 4] +) 10)
+(check-eq (fold [[1 2] [3 4]] +) [4 6])             ; leading axis = column sums
+(check-eq (fold [[1 2] [3 4]] 0 +) [4 6])
+(check-eq (fold [[1 2] [3 4]] 1 +) [3 7])           ; row sums
+(check-eq (fold [[1 2] [3 4]] -1 +) [3 7])          ; negative axis = last
+(check-num (fold [1.5 2.5] +) 4.0)
+; (fold [] +) -> error.Unsupported (no identity without init; verified: exit 1)
+(check-eq (scan [1 2 3 4] +) [1 3 6 10])
+(check-eq (scan [1 2 3 4] *) [1 2 6 24])
+(check-eq (scan [[1 2] [3 4]] 1 +) [[1 3] [3 7]])
+
+; ---- map ----
+(check-eq (map [1 2 3] (fn (x) (* x 2))) [2 4 6])
+(check-eq (map [[1 2] [3 4]] 1 (fn (x) (* x 10))) [[10 20] [30 40]])
+(def tensor-callback-events (hash-map :calls 0))
+(check-eq (map [1 2 3]
+  (fn (x)
+    (begin
+      (map-set! tensor-callback-events :calls (+ (map-get tensor-callback-events :calls) 1))
+      (fold [x 1] +))))
+  [2 3 4])
+(check-num (map-get tensor-callback-events :calls) 3)
+(check-num (fold [1 2 3]
+  (fn (a b)
+    (begin
+      (map-set! tensor-callback-events :calls (+ (map-get tensor-callback-events :calls) 1))
+      (+ a b))))
+  6)
+(check-num (map-get tensor-callback-events :calls) 5)
+
+; ---- keep ----
+(check-eq (keep [1 2 3 4] (fn (x) (> x 2))) [3 4])
+(check-eq (keep [[1 2] [5 6]] (fn (r) (> (fold r +) 5))) [[5 6]])
+
+; ---- uniq (adjacent duplicates) ----
+(check-eq (uniq [1 1 2 2 2 3]) [1 2 3])
+(check-eq (uniq [1 1 1]) [1])
+; non-adjacent duplicates survive
+(check-eq (uniq [1 2 1]) [1 2 1])
+
+; ---- where ----
+(check-eq (where [0 1 0 3]) [1 3])
+(check-eq (where [0 5 0 -3]) [1 3])
+(check-num (tensor-len (where [0 0])) 0)
+
+; ---- diff ----
+(check-eq (diff [1 3 6 10]) [2 3 4])
+(check-eq (diff [[1 2] [3 4]] 1) [[1] [1]])
+(check-eq (diff (reshape (iota 6) [2 3]) 0) [[3 3 3]])
+(check-num (tensor-len (diff [5])) 0)
+
+; ---- flat (column-wise ravel: the literal reading order) ----
+(check-eq (flat [[1 2] [3 4]]) [1 2 3 4])
+(check-eq (flat (reshape (iota 6) [2 3])) [0 1 2 3 4 5])
+
+; ---- trans ----
+(check-eq (trans [[1 2] [3 4]]) [[1 3] [2 4]])
+(check-eq (trans [[1 2] [3 4]] [1 0]) [[1 3] [2 4]])
+(check-eq (trans (reshape (iota 8) [2 2 2])) [[[0 4] [2 6]] [[1 5] [3 7]]])
+(check-eq (trans (reshape (iota 8) [2 2 2]) [1 0 2]) [[[0 1] [4 5]] [[2 3] [6 7]]])
+(check-eq (trans [1 2 3]) [1 2 3])
+
+; ---- chunk (count-first; rank-1 inputs — the proto kernel's strided
+; rank-2 data path is not exercised by the corpus) ----
+(check-eq (chunk 2 [1 2 3 4]) [[1 2] [3 4]])
+(check-eq (chunk 3 [1 2 3]) [[1 2 3]])
+; remainder: (chunk 3 [1 2 3 4]) -> error.ArityMismatch; (chunk 0 [1 2]) ->
+;   error.Unsupported (verified: exit 1)
+
+; ---- part (splits into an improper pair (pass . fail)) ----
+(check-eq (part [1 2 3 4] (fn (x) (> x 2))) (cons [3 4] [1 2]))
+
+; ---- take / drop (count-first: (take n t [k])) ----
+(check-eq (take 2 [1 2 3 4]) [1 2])
+(check-eq (take 9 [1 2 3 4]) [1 2 3 4])
+(check-eq (take -2 [1 2 3 4]) [3 4])
+(check-num (tensor-len (take 0 [1 2 3 4])) 0)
+(check-eq (take 1 [[1 2] [3 4]]) [[1 2]])
+(check-eq (take 1 [[1 2] [3 4]] 1) [[1] [3]])
+(check-eq (drop 2 [1 2 3 4]) [3 4])
+(check-eq (drop -2 [1 2 3 4]) [1 2])
+(check-num (tensor-len (drop 9 [1 2 3 4])) 0)
+(check-eq (drop 1 [[1 2] [3 4]] 1) [[2] [4]])
+
+; ---- cat ----
+(check-eq (cat [1 2] [3 4]) [1 2 3 4])
+(check-eq (cat [[1 2] [3 4]] [[5 6]]) [[1 2] [3 4] [5 6]])
+(check-eq (cat [] [1]) [1])
+
+; ---- rev ----
+(check-eq (rev [1 2 3]) [3 2 1])
+(check-eq (rev [[1 2] [3 4]]) [[3 4] [1 2]])
+(check-eq (rev [[1 2] [3 4]] 1) [[2 1] [4 3]])
+
+; ---- rot (count-first: (rot n t [k])) ----
+(check-eq (rot 1 [1 2 3]) [2 3 1])
+(check-eq (rot -1 [1 2 3]) [3 1 2])
+(check-eq (rot 4 [1 2 3]) [2 3 1])
+(check-eq (rot 0 [1 2 3]) [1 2 3])
+(check-eq (rot 1 [[1 2] [3 4]] 1) [[2 1] [4 3]])
+
+; ---- outer ----
+(check-eq (outer [1 2] [3 4 5] *) [[3 4 5] [6 8 10]])
+(check-eq (outer [0 10] [0 1 2] +) [[0 1 2] [10 11 12]])
+
+; ---- dot ----
+(check-num (dot [1 2 3] [4 5 6]) 32)
+(check-num (dot [1.0 2.0 3.0] [4.0 5.0 6.0]) 32)
+(check-eq (dot [[1 2] [3 4]] [[5 6] [7 8]]) [[19 22] [43 50]])
+; i64 multiplication and accumulation use the scalar modular wrap policy.
+(check-num (dot [4611686018427387903] [4611686018427387903]) -9223372036854775807)
+(check-num (dot [9223372036854775807 1] [1 1]) -9223372036854775808)
+(check-eq (dot [[4611686018427387903]] [[4611686018427387903]]) [[-9223372036854775807]])
+(check-eq (dot [[9223372036854775807 1]] [[1] [1]]) [[-9223372036854775808]])
+
+; ---- zip (pairs stack into a new LAST axis; unequal leading-axis
+; lengths truncate to the shorter) ----
+(check-eq (zip [1 2 3] [4 5 6]) [[1 4] [2 5] [3 6]])
+(check-eq (zip [10 20] [30 40]) [[10 30] [20 40]])
+(check-eq (zip [1 2] [4 5 6]) [[1 4] [2 5]])
+
+; ---- map2 ----
+(check-eq (map2 [1 2 3] [4 5 6] +) [5 7 9])
+(check-eq (map2 [1 2 3] [2 3 4] *) [2 6 12])
+(check-eq (map2 [[1 2 3] [4 5 6]] [10 20 30] +) [[11 22 33] [14 25 36]])
+(check-eq
+  (map2 (reshape [1 2] [2 1]) (reshape [10 20 30] [1 3]) +)
+  [[11 21 31] [12 22 32]])
+(check-eq (tensor-shape
+  (map2 (reshape (iota 0) [2 0 3]) (reshape [10 20 30] [1 1 3]) +))
+  (list 2 0 3))
+(def map2-broadcast-events (hash-map :calls 0 :order nil))
+(map2 (reshape [1 2] [2 1]) (reshape [10 20 30] [1 3])
+  (fn (a b)
+    (begin
+      (map-set! map2-broadcast-events :calls (+ (map-get map2-broadcast-events :calls) 1))
+      (map-set! map2-broadcast-events :order
+        (concat (map-get map2-broadcast-events :order) (list (+ (* a 100) b))))
+      (+ a b))))
+(check-num (map-get map2-broadcast-events :calls) 6)
+(check-eq (map-get map2-broadcast-events :order) (list 110 120 130 210 220 230))
+(map2 (reshape (iota 0) [2 0 3]) (reshape [10 20 30] [1 1 3])
+  (fn (a b)
+    (begin
+      (map-set! map2-broadcast-events :calls (+ (map-get map2-broadcast-events :calls) 1))
+      (+ a b))))
+(check-num (map-get map2-broadcast-events :calls) 6)
+; Incompatible dimensions, including 0 against a size greater than 1, return error.Unsupported.
+
+; ---- max / min ----
+(check-num (max [1 3 2]) 3)
+(check-num (min [1 3 2]) 1)
+(check-num (max [1.5 2.5]) 2.5)
+(check-eq (max [1 5] [3 2]) [3 5])
+(check-eq (min [1 5] [3 2]) [1 2])
+(check-eq (max [[1 5] [3 2]] [[4 0] [9 7]]) [[4 5] [9 7]])
+(check-eq (min [[1 5] [3 2]] [[4 0] [9 7]]) [[1 0] [3 2]])
+
+; ---- tensor literals round-trip ----
+(check-eq [1 2 3] [1 2 3])
+(check-eq [[1 2] [3 4]] [[1 2] [3 4]])
+
+(write "\nALL-OK\n")

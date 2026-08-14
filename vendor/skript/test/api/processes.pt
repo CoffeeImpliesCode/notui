@@ -1,0 +1,224 @@
+; API test corpus: process/actor surface (Phase C).
+; spawn / self / send / receive (plain, selective, timeout) /
+; alive? / sleep / pid equality / ping-pong / concurrent sum.
+; File mode runs the main process; spawned workers run on the scheduler.
+
+(defn (fail-msg got want)
+  (begin (write "\nFAIL ") (write got) (write " != ") (write want) (write "\n") (raise "check-failed")))
+(defn (check-eq got want)
+  (if (equal? got want) (write ".") (fail-msg got want)))
+(defn (check-num got want)
+  (if (= got want) (write ".") (fail-msg got want)))
+
+; ---- spawn: returns a pid; distinct spawns give distinct pids ----
+(def p1 (spawn (fn () nil)))
+(def p2 (spawn (fn () nil)))
+(check-eq (= p1 p1) #t)
+(check-eq (= p1 p2) #f)
+(check-eq (= p2 p2) #t)
+(check-eq (equal? p1 p1) #t)
+(check-eq (equal? p1 p2) #f)
+
+; ---- self: pid of the calling process (main is pid 1 here) ----
+(check-eq (= (self) (self)) #t)
+(check-eq (= (self) p1) #f)
+(check-eq (= (self) p2) #f)
+
+; ---- send: delivers MSG and returns it (Erlang semantics) ----
+(check-eq (send (self) 'x) 'x)
+(check-eq (send (self) 42) 42)
+(check-eq (send (self) (list 1 2 3)) (list 1 2 3))
+
+; ---- receive basic: FIFO order ----
+(check-eq (receive) 'x)
+(check-eq (receive) 42)
+(check-eq (receive) (list 1 2 3))
+
+; ---- receive pred: selective — matches only some, preserves the rest ----
+(send (self) 10)
+(send (self) 20)
+(send (self) 30)
+(check-num (receive (fn (m) (= m 30))) 30)
+(check-num (receive (fn (m) (= m 10))) 10)
+(check-num (receive) 20)
+
+; pred returning #f for everything must not consume messages
+(send (self) 5)
+(send (self) 6)
+(check-eq (receive (fn (m) #f) 20) (timeout-sentinel))
+(check-num (receive) 5)
+(check-num (receive) 6)
+
+; a predicate cannot suspend; Denied leaves the message queued
+(send (self) :kept-after-denial)
+(check-eq
+  (error-name
+    (try (receive (fn (m) (begin (sleep 1) #t)) 20) (catch e e)))
+  "Denied")
+(check-eq (receive 20) :kept-after-denial)
+
+; a raising predicate passes its raw payload to catch without taking the message
+(send (self) :kept-after-raise)
+(def predicate-raise
+  (try (receive (fn (m) (raise :bad)) 20) (catch e e)))
+(check-eq (receive 20) :kept-after-raise)
+(check-eq predicate-raise :bad)
+
+; ---- receive pred timeout-ms: returns the opaque timeout-sentinel ----
+(def to1 (receive (fn (m) (= m 999)) 30))
+(check-eq to1 (timeout-sentinel))
+(check-eq (equal? to1 :timeout) #f)
+
+; timeout preserves the mailbox contents and their order
+(send (self) 1)
+(send (self) 2)
+(send (self) 3)
+(def to2 (receive (fn (m) (= m 999)) 20))
+(check-eq to2 (timeout-sentinel))
+(check-num (receive) 1)
+(check-num (receive) 2)
+(check-num (receive) 3)
+
+; a delivered message beats the timeout: no give-up when a match is present
+(send (self) 7)
+(check-num (receive (fn (m) (= m 7)) 1000) 7)
+
+; ---- sleep ms: returns nil ----
+(check-eq (sleep 5) nil)
+
+; ---- alive?: #t before completion, #f after ----
+(defn (slower dest) (fn () (begin (sleep 40) (send dest 'done))))
+(def w (spawn (slower (self))))
+(check-eq (alive? w) #t)
+(check-eq (receive) 'done)
+(check-eq (alive? w) #f)
+(check-eq (alive? (self)) #t)
+
+; quick worker: gone by the time its send is observed
+(defn (quicker dest) (fn () (send dest 'bye)))
+(def q (spawn (quicker (self))))
+(check-eq (receive) 'bye)
+(check-eq (alive? q) #f)
+
+; p1/p2 ran while main was suspended on the receives above: now completed
+(check-eq (alive? p1) #f)
+(check-eq (alive? p2) #f)
+
+; send to a completed pid is a silent drop (documented), observable as timeout
+(send p1 'lost)
+(check-eq (receive (fn (m) (= m 'lost)) 20) (timeout-sentinel))
+
+; ---- ping-pong: worker receives, echoes back to its creator ----
+(defn (echoer dest) (fn () (begin (send dest (receive)) (send dest (receive)))))
+(def e (spawn (echoer (self))))
+(check-eq (send e 'ping) 'ping)
+(check-eq (receive) 'ping)
+(send e (list 4 5 6))
+(check-eq (receive) (list 4 5 6))
+(check-eq (alive? e) #f)
+
+; ---- concurrent sum: 3 workers, each sends a number, sum them ----
+(defn (sender dest n) (fn () (send dest n)))
+(def s1 (spawn (sender (self) 1)))
+(def s2 (spawn (sender (self) 2)))
+(def s3 (spawn (sender (self) 3)))
+(def a (receive))
+(def b (receive))
+(def c (receive))
+(check-num (+ a (+ b c)) 6)
+
+; ---- crash observability: process-info / exit-reason / timeout-sentinel ----
+; A crashed child used to be unobservable: alive? alone cannot tell a crash
+; from a clean finish, and Process.raised (the reason) was not exposed.
+(defn (wait-dead pid)
+  (if (alive? pid) (begin (sleep 5) (wait-dead pid)) nil))
+
+; crash by an uncaught (raise 5): exit-reason is the payload 5
+(def cr (spawn (fn () (raise 5))))
+(wait-dead cr)
+(check-eq (alive? cr) #f)
+(check-num (exit-reason cr) 5)
+
+; clean exit: nil reason
+(def ok (spawn (fn () 42)))
+(wait-dead ok)
+(check-eq (exit-reason ok) nil)
+
+; process-info: a proper cons list of (:key . value) pairs
+(defn (plist-get pl key)
+  (if (nil? pl) nil
+      (if (equal? (fst (fst pl)) key)
+          (rst (fst pl))
+          (plist-get (rst pl) key))))
+(check-eq (plist-get (process-info cr) :alive) #f)
+(check-eq (plist-get (process-info cr) :status) :crashed)
+(check-num (plist-get (process-info cr) :raised) 5)
+(check-eq (plist-get (process-info cr) :error) nil)
+(check-eq (plist-get (process-info ok) :status) :done)
+(check-eq (plist-get (process-info ok) :raised) nil)
+(check-eq (plist-get (process-info ok) :error) nil)
+(check-eq (plist-get (process-info (self)) :alive) #t)
+(check-eq (exit-reason (self)) nil)
+
+; a child's uncaught predicate raise retains the raw payload
+(def predicate-crash
+  (spawn (fn ()
+    (begin
+      (send (self) :child-message)
+      (receive (fn (m) (raise :bad)) 20)))))
+(wait-dead predicate-crash)
+(check-eq (plist-get (process-info predicate-crash) :status) :crashed)
+(check-eq (exit-reason predicate-crash) :bad)
+(check-eq (plist-get (process-info predicate-crash) :raised) :bad)
+(check-eq (plist-get (process-info predicate-crash) :error) nil)
+
+; a SYSTEM error ends the child with an @Error reason, not a raw raise
+(def sys (spawn (fn () (fst 42))))
+(wait-dead sys)
+(check-eq (plist-get (process-info sys) :status) :crashed)
+(check-eq (error? (exit-reason sys)) #t)
+(check-eq (is-instance-of? @Error (exit-reason sys)) #t)
+(check-eq (error-name (exit-reason sys)) "TypeMismatch")
+(check-eq (error? (plist-get (process-info sys) :error)) #t)
+(check-eq (is-instance-of? @Error (plist-get (process-info sys) :error)) #t)
+(check-eq (error-name (plist-get (process-info sys) :error)) "TypeMismatch")
+(check-eq (plist-get (process-info sys) :raised) nil)
+
+; the sentinel is a stable singleton: `=` on opaque compares by identity
+(check-eq (= (timeout-sentinel) (timeout-sentinel)) #t)
+
+; Method instances run in a separate VM fiber. A nested receive predicate's
+; raw raise must reach the catch in that method without consuming its message.
+(def method-raw-predicate (method))
+(instance method-raw-predicate i64
+  (fn (ignored)
+    (try (receive (fn (candidate) (raise :bad)) 20)
+         (catch e e))))
+(send (self) :method-candidate)
+(check-eq (method-raw-predicate 0) :bad)
+(check-eq (receive 20) :method-candidate)
+
+; A caught callback error must not remain pending on the process fiber.
+; The next, unrelated TypeMismatch has its own source line and call frame.
+(defn (method-predicate-type-fault candidate) (fst 42))
+(def method-system-predicate (method))
+(instance method-system-predicate i64
+  (fn (ignored)
+    (try (receive method-predicate-type-fault 20)
+         (catch e e))))
+(send (self) 71)
+(def method-callback-error (method-system-predicate 0))
+(check-eq (error-name method-callback-error) "TypeMismatch")
+(check-num (receive 20) 71)
+(defn (method-later-type-fault) (fst :unrelated))
+(def method-later-error (try (method-later-type-fault) (catch e e)))
+(check-eq (error-name method-later-error) "TypeMismatch")
+(check-eq (plist-get (fst (error-trace method-later-error)) 'function)
+          "method-later-type-fault")
+(check-eq (> (plist-get (error-location method-later-error) 'line)
+             (plist-get (error-location method-callback-error) 'line))
+          #t)
+(check-eq (plist-get (fst (error-trace method-callback-error)) 'function)
+          "method-predicate-type-fault")
+
+(write "\nALL-OK\n")

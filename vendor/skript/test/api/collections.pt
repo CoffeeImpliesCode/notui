@@ -1,0 +1,243 @@
+#!/usr/bin/env -S skript
+; collections.pt — API corpus: cons lists, list algorithms, maps, compose,
+; and shared-dispatcher tensor routing.
+; Run: ./zig-out/bin/skript test/api/collections.pt
+
+(defn (fail-msg got want)
+  (begin (write "\nFAIL ") (write got) (write " != ") (write want) (write "\n") (raise "check-failed")))
+(defn (check-eq got want)
+  (if (equal? got want) (write ".") (fail-msg got want)))
+(defn (check-num got want)
+  (if (= got want) (write ".") (fail-msg got want)))
+
+; ---- cons / fst / rst / list ----
+(check-eq (cons 1 2) (cons 1 2))
+(check-num (fst (cons 1 2)) 1)
+(check-num (rst (cons 1 2)) 2)
+(check-eq (rst (cons 1 nil)) nil)
+(check-eq (fst (cons "a" nil)) "a")
+(check-eq (list) nil)
+(check-eq (list 1 2 3) (cons 1 (cons 2 (cons 3 nil))))
+(check-eq (fst (list 1 2 3)) 1)
+(check-eq (rst (list 1 2 3)) (list 2 3))
+(check-eq (list (list 1) (list 2 3)) (list (list 1) (list 2 3)))
+
+; ---- map ----
+(check-eq (map (list 1 2 3) (fn (x) x)) (list 1 2 3))
+(check-eq (map (list 1 2 3) (fn (x) (* x 2))) (list 2 4 6))
+(check-eq (map nil (fn (x) (* x 2))) nil)
+(check-eq (map (list 1 2) (fn (x) (list x x))) (list (list 1 1) (list 2 2)))
+
+; ---- fold (list: left fold, seed = first element or explicit init) ----
+; List form keeps the function last: (fold lst fn) and (fold lst init fn).
+(check-num (fold (list 1 2 3) +) 6)
+(check-num (fold (list 1 2 3 4) +) 10)
+(check-num (fold (list 1 2 3) 10 +) 16)
+(check-num (fold (list 10 3 2) 100 -) 85)
+(check-num (fold (list 7) (fn (x y) (+ x y))) 7)
+(check-num (fold nil 5 +) 5)
+; (fold nil +) -> error.Unsupported: no identity without init.
+
+; Arity errors take precedence when no supported signature can match.
+(check-eq (error-name (try (fold) (catch e e))) "ArityMismatch")
+(check-eq (error-name (try (fold 5) (catch e e))) "ArityMismatch")
+(check-eq (error-name (try (fold 5 +) (catch e e))) "TypeMismatch")
+(check-eq (error-name (try (fold (list 1) 0 + 9) (catch e e))) "ArityMismatch")
+(check-eq (error-name (try (scan 5) (catch e e))) "ArityMismatch")
+(check-eq (error-name (try (map 5) (catch e e))) "ArityMismatch")
+(check-eq (error-name (try (keep 5) (catch e e))) "ArityMismatch")
+
+; ---- scan (list: inclusive left-to-right prefix fold) ----
+(check-eq (scan (list 1 2 3) +) (list 1 3 6))
+(check-eq (scan (list 1 2 3) *) (list 1 2 6))
+(check-eq (scan (list 10 3 2) -) (list 10 7 5))
+(check-eq (scan nil +) nil)
+(check-eq (scan (list 7) (fn (x y) (+ x y))) (list 7))
+
+; ---- callback order and effects ----
+(def collection-map-events (hash-map :seen nil))
+(check-eq
+  (map (list 1 2 3)
+    (fn (x)
+      (begin
+        (map-set! collection-map-events :seen
+          (concat (map-get collection-map-events :seen) (list x)))
+        (* x 2))))
+  (list 2 4 6))
+(check-eq (map-get collection-map-events :seen) (list 1 2 3))
+
+(def collection-fold-events (hash-map :seen nil))
+(check-num
+  (fold (list 10 3 2) 100
+    (fn (acc x)
+      (begin
+        (map-set! collection-fold-events :seen
+          (concat (map-get collection-fold-events :seen) (list x)))
+        (- acc x))))
+  85)
+(check-eq (map-get collection-fold-events :seen) (list 10 3 2))
+
+(def collection-scan-events (hash-map :seen nil))
+(check-eq
+  (scan (list 10 3 2)
+    (fn (acc x)
+      (begin
+        (map-set! collection-scan-events :seen
+          (concat (map-get collection-scan-events :seen) (list x)))
+        (- acc x))))
+  (list 10 7 5))
+(check-eq (map-get collection-scan-events :seen) (list 3 2))
+
+(def collection-empty-fold-events (hash-map :calls 0))
+(check-num
+  (fold nil 5
+    (fn (acc x)
+      (begin (map-set! collection-empty-fold-events :calls 1) (+ acc x))))
+  5)
+(check-num (map-get collection-empty-fold-events :calls) 0)
+
+; ---- keep ----
+(check-eq (keep (list 1 2 3 4) (fn (x) (> x 2))) (list 3 4))
+(check-eq (keep (list 1 2 3) (fn (x) (> x 0))) (list 1 2 3))
+(check-eq (keep (list 1 2 3) (fn (x) (> x 9))) nil)
+(check-eq (keep nil (fn (x) #t)) nil)
+(check-eq (keep (list 1 2 3 4) even?) (list 2 4))
+
+; ---- concat ----
+(check-eq (concat (list 1 2) (list 3 4)) (list 1 2 3 4))
+(check-eq (concat (list 1) (list 2) (list 3 4)) (list 1 2 3 4))
+(check-eq (concat nil (list 1)) (list 1))
+(check-eq (concat nil nil) nil)
+(check-eq (concat) nil)
+(check-eq (concat (list 1 2)) (list 1 2))
+(check-eq (error-name (try (concat (cons 1 2)) (catch e e))) "TypeMismatch")
+
+; ---- reverse ----
+(check-eq (reverse (list 1 2 3)) (list 3 2 1))
+(check-eq (reverse (list 42)) (list 42))
+(check-eq (reverse nil) nil)
+(check-eq (reverse (reverse (list 1 2 3))) (list 1 2 3))
+(check-eq (reverse (list "a" "b")) (list "b" "a"))
+
+; ---- take (count-first: (take n lst)) ----
+(check-eq (take 0 (list 1 2 3)) nil)
+(check-eq (take 2 (list 1 2 3 4)) (list 1 2))
+(check-eq (take 9 (list 1 2)) (list 1 2))
+(check-eq (take -2 (list 1 2 3 4)) (list 3 4))
+(check-eq (take -9 (list 1 2)) (list 1 2))
+(check-eq (take 1 (list 1 2 3)) (list 1))
+
+; ---- drop (count-first: (drop n lst)) ----
+(check-eq (drop 0 (list 1 2 3)) (list 1 2 3))
+(check-eq (drop 2 (list 1 2 3 4)) (list 3 4))
+(check-eq (drop 9 (list 1 2)) nil)
+(check-eq (drop -2 (list 1 2 3 4)) (list 1 2))
+(check-eq (drop -9 (list 1 2)) nil)
+(check-eq (drop 1 (list 1 2 3)) (list 2 3))
+
+; ---- length (list-only; the tensor size op is tensor-len, the map size
+; op is map-size — length does not dispatch to them) ----
+(check-num (length nil) 0)
+(check-num (length (list 1 2 3)) 3)
+(check-num (length (list (list 1) (list 2 3))) 2)
+(check-num (length (list 5)) 1)
+(check-eq (error-name (try (length (cons 1 2)) (catch e e))) "TypeMismatch")
+(check-eq (error-name (try (map (cons 1 2) (fn (x) x)) (catch e e))) "TypeMismatch")
+
+; ---- range ----
+(check-eq (range 4) (list 0 1 2 3))
+(check-eq (range 2 5) (list 2 3 4))
+(check-eq (range 0) nil)
+(check-eq (range 4 4) nil)
+(check-eq (range 5 2) nil)
+(check-eq (range -3) nil)
+(check-eq (range 1 1) nil)
+
+; ---- contains? ----
+(check-eq (contains? (list 1 2 3) 2) #t)
+(check-eq (contains? (list 1 2 3) 9) #f)
+(check-eq (contains? nil 1) #f)
+(check-eq (contains? (list (list 1 2) (list 3)) (list 1 2)) #t)
+(check-eq (contains? (list "a" "b") "a") #t)
+(check-eq (contains? (list 'a 'b) 'b) #t)
+(check-eq (contains? (list 'a) :a) #f)
+
+; ---- sort-up / sort-dn ----
+(check-eq (sort-up (list 1 2 3)) (list 1 2 3))
+(check-eq (sort-up (list 3 2 1)) (list 1 2 3))
+(check-eq (sort-up (list 3 1 2)) (list 1 2 3))
+(check-eq (sort-up nil) nil)
+(check-eq (sort-up (list 5)) (list 5))
+(check-eq (sort-up (list 2 1 2)) (list 1 2 2))
+(check-eq (sort-up (list "b" "a" "c")) (list "a" "b" "c"))
+(check-eq (sort-up (list 'b 'a 'c)) (list 'a 'b 'c))
+(check-eq (sort-dn (list 3 1 2)) (list 3 2 1))
+(check-eq (sort-dn (list 3 2 1)) (list 3 2 1))
+(check-eq (sort-dn nil) nil)
+(check-eq (sort-dn (list 1 2 1)) (list 2 1 1))
+
+; ---- map-has? / map-keys / map-vals / map-size (dicts built via hash-map) ----
+(check-eq (map-has? (hash-map 'a 1) 'a) #t)
+(check-eq (map-has? (hash-map 'a 1) 'b) #f)
+(check-eq (map-has? (hash-map 'a 1) :a) #f)
+(check-eq (map-has? (hash-map :k 1) :k) #t)
+(check-eq (map-has? (hash-map) 'a) #f)
+(check-num (map-size (hash-map)) 0)
+(check-num (map-size (hash-map 'a 1 :b 2 'c 3)) 3)
+(check-num (map-size (hash-map 'a 1 :a 2)) 2)
+(check-num (map-size (hash-map 'a 1 'a 2)) 1)
+(check-eq (map-keys (hash-map)) nil)
+(check-eq (map-vals (hash-map)) nil)
+(check-num (length (map-keys (hash-map 'a 1 :b 2))) 2)
+(check-eq (contains? (map-keys (hash-map 'a 1 :b 2)) 'a) #t)
+(check-eq (contains? (map-keys (hash-map 'a 1 'b 2)) 'b) #t)
+(check-eq (contains? (map-keys (hash-map 'a 1 :b 2)) :b) #t)
+(check-eq (contains? (map-keys (hash-map 'a 1 'b 2)) :a) #f)
+(check-num (length (map-vals (hash-map 'a 1 :b 2))) 2)
+(check-eq (contains? (map-vals (hash-map 'a 1 :b 2)) 2) #t)
+(check-eq (contains? (map-vals (hash-map 'a 1)) 9) #f)
+(check-num (map-get :{ :a 1 :b 2 } :a) 1)
+(check-eq (map-get :{ :a 1 } :missing) nil)
+; Scalar key equality follows the same-type `equal?` contract.
+(check-num
+  (map-size
+    (hash-map nil :nil #f :false #t :true
+      (i8 1) :i8 (i16 1) :i16 (i32 1) :i32 (i64 1) :i64
+      (u8 1) :u8 (u16 1) :u16 (u32 1) :u32 (u64 1) :u64
+      (f16 1.0) :f16 (f32 1.0) :f32 (f64 1.0) :f64))
+  14)
+(check-eq
+  (equal? (hash-map nil 1 "text" 2 (i8 3) 4)
+          (hash-map (i8 3) 4 "text" 2 nil 1))
+  #t)
+(check-eq
+  (map-get (hash-map "text" 1 (string-append "te" "xt") 2) "text")
+  2)
+(check-eq
+  (map-get (hash-map (f16 0.0) :plus (f16 -0.0) :minus) (f16 0.0))
+  :minus)
+(check-eq
+  (contains? (map-keys (hash-map nil 1 "text" 2 (i8 3) 4)) "text")
+  #t)
+; map-merge and map-update are not registered in this P2 batch.
+; map is transform-only: it no longer builds dicts.
+(check-eq (map (list 1 2) (fn (x) (* x 2))) (list 2 4))
+
+; ---- compose ----
+(check-num ((compose (fn (x) (* x 2)) (fn (x) (+ x 1))) 5) 12)
+(check-num ((compose (fn (x) x) (fn (x) x)) 7) 7)
+(check-num ((compose (compose (fn (x) (* x 2)) (fn (x) (+ x 1))) (fn (x) (- x 3))) 10) 16)
+(check-num ((compose (fn (x) (* x 2)) (compose (fn (x) (+ x 1)) (fn (x) (- x 3)))) 10) 16)
+
+; ---- shared dispatchers route to tensors ----
+(check-num (fold (stack 1 2 3) +) 6)
+(check-eq (fold (stack (stack 1 2) (stack 3 4)) 0 +) [4 6])
+(check-eq (fold (stack (stack 1 2) (stack 3 4)) 1 +) [3 7])
+(check-eq (map (stack 1 2 3) (fn (x) (* x 2))) [2 4 6])
+(check-eq (keep (stack 1 2 3 4) (fn (x) (> x 2))) [3 4])
+(check-eq (take 2 (stack 1 2 3 4)) [1 2])
+(check-eq (drop 2 (stack 1 2 3 4)) [3 4])
+(check-eq (concat (stack 1 2) (stack 3 4)) [1 2 3 4])
+(check-eq (reverse (stack 1 2 3)) [3 2 1])
+
+(write "\nALL-OK\n")

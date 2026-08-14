@@ -9,11 +9,18 @@
             .hash = "zg-0.16.2-oGqU3HqftgI6rwFS90ypwfjgToH8Pz829OKuFURlm773",
         },
         // skript: the Lisp runtime embedded by examples/skript_repl.zig.
-        // Sibling checkout (fingerprint 0x2cf1ccfb80bef1f4); a .path dep
-        // skips the hash. skript's own build pulls its deps (tracy git
-        // fetch — expected; libffi is lazy and skipped via
+        // VENDORED (vendor/skript) — a copy of ../skript's consumer
+        // surface: build.zig, build.zig.zon, build_web.zig, src, test,
+        // demo, web, third_party/zigzag. That is exactly skript's own
+        // `.paths` set, so the copy is what a downstream consumer of
+        // skript would receive. Re-vendor with:
+        //   (cd ../skript && jj file list -r @) \
+        //     | grep -E '^(src|test|demo|web|third_party/zigzag)/|^(build\.zig|build\.zig\.zon|build_web\.zig)$' \
+        //     | rsync -a --files-from=- ../skript/ vendor/skript/
+        // A .path dep skips the hash. skript's own build pulls its deps
+        // (tracy git fetch — expected; libffi is lazy and skipped via
         // .enable_libffi = false in build.zig).
-        .skript = .{ .path = "../skript" },
+        .skript = .{ .path = "vendor/skript" },
     },
     .paths = .{
         "build.zig",

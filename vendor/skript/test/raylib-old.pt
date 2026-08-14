@@ -1,0 +1,301 @@
+#!/usr/bin/env -S skript
+
+(def raylib (dynamic-library:open "libraylib.so"))
+(defn (rlget name) (dynamic-library:lookup raylib name))
+
+(def RLColor CInt)
+(def Vector2 c32)
+
+; rgba : (-> f64 f64 f64 f64 RLColor)
+(defn (rgba r g b a) (@rgba r g b a))
+
+(def lightgray  (rgba 0.784  0.784  0.784  1.0  ))
+(def gray       (rgba 0.51   0.51   0.51   1.0  ))
+(def yellow     (rgba 0.992  0.976  0.0    1.0  ))
+(def gold       (rgba 1.0    0.796  0.0    1.0  ))
+(def pink       (rgba 1.0    0.427  0.761  1.0  ))
+(def red        (rgba 0.902  0.161  0.216  1.0  ))
+(def maroon     (rgba 0.745  0.129  0.216  1.0  ))
+(def green      (rgba 0.0    0.894  0.188  1.0  ))
+(def lime       (rgba 0.0    0.620  0.184  1.0  ))
+(def darkgreen  (rgba 0.0    0.459  0.173  1.0  ))
+(def skyblue    (rgba 0.4    0.749  1.0    1.0  ))
+(def blue       (rgba 0.0    0.475  0.945  1.0  ))
+(def darkblue   (rgba 0.0    0.322  0.675  1.0  ))
+(def purple     (rgba 0.784  0.478  1.0    1.0  ))
+(def violet     (rgba 0.529  0.235  0.745  1.0  ))
+(def darkpurple (rgba 0.439  0.122  0.494  1.0  ))
+(def beige      (rgba 0.827  0.690  0.514  1.0  ))
+(def brown      (rgba 0.498  0.416  0.31   1.0  ))
+(def darkbrown  (rgba 0.298  0.247  0.184  1.0  ))
+(def white      (rgba 1.0    1.0    1.0    1.0  ))
+(def black      (rgba 0.0    0.0    0.0    1.0  ))
+(def blank      (rgba 0.0    0.0    0.0    0.0  ))
+(def magenta    (rgba 1.0    0.0    1.0    1.0  ))
+(def raywhite   (rgba 0.961  0.961  0.961  1.0  ))
+
+
+; module: rcore
+; Window-related functions
+(def InitWindow         (ffi:make-func (rlget "InitWindow")        CInt   CInt   CString CVoid))
+(def CloseWindow        (ffi:make-func (rlget "CloseWindow")                             CVoid))
+(def WindowShouldClose  (ffi:make-func (rlget "WindowShouldClose")                       CBool))
+(def IsWindowReady      (ffi:make-func (rlget "IsWindowReady")                           CBool))
+(def IsWindowFullscreen (ffi:make-func (rlget "IsWindowFullscreen")                      CBool))
+(def IsWindowHidden     (ffi:make-func (rlget "IsWindowHidden")                          CBool))
+(def IsWindowMinimized  (ffi:make-func (rlget "IsWindowMinimized")                       CBool))
+(def IsWindowMaximized  (ffi:make-func (rlget "IsWindowMaximized")                       CBool))
+(def IsWindowFocused    (ffi:make-func (rlget "IsWindowFocused")                         CBool))
+(def IsWindowResized    (ffi:make-func (rlget "IsWindowResized")                         CBool))
+(def IsWindowState      (ffi:make-func (rlget "IsWindowState")     CInt                  CBool))
+(def SetWindowState     (ffi:make-func (rlget "SetWindowState")    CInt                  CVoid))
+(def ClearWindowState   (ffi:make-func (rlget "ClearWindowState")  CInt                  CVoid))
+(def ToggleFullscreen   (ffi:make-func (rlget "ToggleFullscreen")                        CVoid))
+(def ToggleBorderlessWindowed (ffi:make-func (rlget "ToggleBorderlessWindowed")          CVoid))
+(def MaximizeWindow     (ffi:make-func (rlget "MaximizeWindow")                          CVoid))
+(def MinimizeWindow     (ffi:make-func (rlget "MinimizeWindow")                          CVoid))
+(def RestoreWindow      (ffi:make-func (rlget "RestoreWindow")                           CVoid))
+; SetWindowIcon
+; SetWindowIcons
+(def SetWindowTitle     (ffi:make-func (rlget "SetWindowTitle")    CString               CVoid))
+(def SetWindowPosition  (ffi:make-func (rlget "SetWindowPosition") CInt    CInt          CVoid))
+(def SetWindowMonitor   (ffi:make-func (rlget "SetWindowMonitor")  CInt                  CVoid))
+(def SetWindowMinSize   (ffi:make-func (rlget "SetWindowMinSize")  CInt    CInt          CVoid))
+(def SetWindowMaxSize   (ffi:make-func (rlget "SetWindowMaxSize")  CInt    CInt          CVoid))
+(def SetWindowSize      (ffi:make-func (rlget "SetWindowSize")     CInt    CInt          CVoid))
+(def SetWindowOpacity   (ffi:make-func (rlget "SetWindowOpacity")  CFloat                CVoid))
+(def SetWindowFocused   (ffi:make-func (rlget "SetWindowFocused")                        CVoid))
+(def GetWindowHandle    (ffi:make-func (rlget "GetWindowHandle")                         Opaque))
+(def GetScreenWidth     (ffi:make-func (rlget "GetScreenWidth")                          CInt))
+(def GetScreenHeight    (ffi:make-func (rlget "GetScreenHeight")                         CInt))
+(def GetRenderWidth     (ffi:make-func (rlget "GetRenderWidth")                          CInt))
+(def GetRenderHeight    (ffi:make-func (rlget "GetRenderHeight")                         CInt))
+(def GetMonitorCount    (ffi:make-func (rlget "GetMonitorCount")                         CInt))
+(def GetCurrentMonitor  (ffi:make-func (rlget "GetCurrentMonitor")                       CInt))
+; GetMonitorPosition
+(def GetMonitorWidth    (ffi:make-func (rlget "GetMonitorWidth")  CInt                   CInt))
+(def GetMonitorHeight   (ffi:make-func (rlget "GetMonitorHeight") CInt                   CInt))
+(def GetMonitorPhysicalWidth  (ffi:make-func (rlget "GetMonitorPhysicalWidth")   CInt    CInt))
+(def GetMonitorPhysicalHeight (ffi:make-func (rlget "GetMonitorPhysicalHeight")  CInt    CInt))
+(def GetMonitorRefreshRate    (ffi:make-func (rlget "GetMonitorRefreshRate")     CInt    CInt))
+; GetWindowPosition
+; GeWindowScaleDPI
+(def GetMonitorName     (ffi:make-func (rlget "GetMonitorName")   CInt                   CString))
+(def SetClipboardText   (ffi:make-func (rlget "SetClipboardText") CString                CVoid))
+(def GetClipboardText   (ffi:make-func (rlget "GetClipboardText")                        CString))
+; GetclipboardImage
+(def EnableEventWaiting (ffi:make-func (rlget "EnableEventWaiting")                      CVoid))
+(def DisableEventWaiting (ffi:make-func (rlget "DisableEventWaiting")                    CVoid))
+
+; Cursor-related functions
+(def ShowCursor         (ffi:make-func (rlget "ShowCursor")                              CVoid))
+(def HideCursor         (ffi:make-func (rlget "HideCursor")                              CVoid))
+(def IsCursorHidden     (ffi:make-func (rlget "IsCursorHidden")                          CBool))
+(def EnableCursor       (ffi:make-func (rlget "EnableCursor")                            CVoid))
+(def DisableCursor      (ffi:make-func (rlget "DisableCursor")                           CVoid))
+(def IsCursorOnScreen   (ffi:make-func (rlget "IsCursorOnScreen")                        CBool))
+
+; Drawing-related functions
+(def ClearBackground    (ffi:make-func (rlget "ClearBackground")   RLColor               CVoid))
+(def BeginDrawing       (ffi:make-func (rlget "BeginDrawing")                            CVoid))
+(def EndDrawing         (ffi:make-func (rlget "EndDrawing")                              CVoid))
+; BeginMode2D
+(def EndMode2D          (ffi:make-func (rlget "EndMode2D")                               CVoid))
+; BeginMode3D
+(def EndMode3D          (ffi:make-func (rlget "EndMode3D")                               CVoid))
+; BeginTextureMode
+(def EndTextureMode     (ffi:make-func (rlget "EndTextureMode")                          CVoid))
+; BeginShaderMode
+(def EndShaderMode      (ffi:make-func (rlget "EndShaderMode")                           CVoid))
+(def BeginBlendMode     (ffi:make-func (rlget "BeginBlendMode")    CInt                  CVoid))
+(def EndBlendMode       (ffi:make-func (rlget "EndBlendMode")                            CVoid))
+(def BeginScissorMode   (ffi:make-func (rlget "BeginScissorMode")  CInt CInt CInt CInt   CVoid))
+(def EndScissorMode     (ffi:make-func (rlget "EndScissorMode")                          CVoid))
+; BeginVrStereoMode
+(def EndVrStereoMode    (ffi:make-func (rlget "EndVrStereoMode")                         CVoid))
+
+; LoadVrStereoConfig
+; UnloadVrStereoConfig
+
+; Shader management functions
+(def Shader Opaque)
+(def LoadShader         (ffi:make-func (rlget "LoadShader")        CString CString       Shader))
+(def LoadShaderFromMemory (ffi:make-func (rlget "LoadShaderFromMemory") CString CString  Shader))
+(def IsShaderValid      (ffi:make-func (rlget "IsShaderValid") Shader                    CBool))
+(def GetShaderLocation  (ffi:make-func (rlget "GetShaderLocation") Shader CString        CInt))
+(def GetShaderLocationAttrib (ffi:make-func (rlget "GetShaderLocationAttrib") Shader CString CInt))
+; SetShaderValue
+; SetShaderValueV
+; SetShaderValueMatrix
+; SetShaderValueTexture
+(def UnloadShader       (ffi:make-func (rlget "UnloadShader") Shader                     CVoid))
+
+; Screen-space-related functions
+; GetScreenToWorldRay
+; GetScreenToWorldRayEx
+; GetWorldToScreen
+; GetWorldToScreenEx
+; GetWorldToScreen2D
+; GetScreenToWorld2D
+; GetCameraMatrix
+; GetCameraMatrix2D
+
+; Timing-related functions
+(def SetTargetFPS       (ffi:make-func (rlget "SetTargetFPS")      CInt                  CVoid))
+(def GetFrameTime       (ffi:make-func (rlget "GetFrameTime")                            CFloat))
+(def GetTime            (ffi:make-func (rlget "GetTime")                                 CDouble))
+(def GetFPS             (ffi:make-func (rlget "GetFPS")                                  CInt))
+
+; Custom frame control functions
+(def SwapScreenBuffer   (ffi:make-func (rlget "SwapScreenBuffer")                        CVoid))
+(def PollInputEvents    (ffi:make-func (rlget "PollInputEvents")                         CVoid))
+(def WaitTime           (ffi:make-func (rlget "WaitTime")          CDouble               CVoid))
+
+; Random values generating functions
+(def SetRandomSeed      (ffi:make-func (rlget "SetRandomSeed")     CUint                 CVoid))
+(def GetRandomValue     (ffi:make-func (rlget "GetRandomValue")    CInt    CInt          CInt))
+; LoadRandomSequence
+; UnloadRandomSequence
+
+; misc functions
+(def TakeScreenshot     (ffi:make-func (rlget "TakeScreenshot")    CString               CVoid))
+(def SetConfigFlags     (ffi:make-func (rlget "SetConfigFlags")    CUint                 CVoid))
+(def OpenURL            (ffi:make-func (rlget "OpenURL")           CString               CVoid))
+
+; loggin
+(def SetTraceLogLevel   (ffi:make-func (rlget "SetTraceLogLevel")  CInt                  CVoid))
+; TraceLog
+; SetTraceLogCallback
+
+; memory management
+(def MemAlloc           (ffi:make-func (rlget "MemAlloc")          CUint                 Opaque))
+(def MemRealloc         (ffi:make-func (rlget "MemRealloc")        CUint                 Opaque))
+(def MemFree            (ffi:make-func (rlget "MemFree")           CUint                 Opaque))
+
+; file system management functions
+; LoadFileData
+; UnloadFileData
+; SaveFileData
+; ExportDataAsCode
+(def LoadFileText       (ffi:make-func (rlget "LoadFileText")     CString                CString))
+(def UnloadFileText     (ffi:make-func (rlget "UnloadFileText")   CString                CVoid))
+(def SaveFileText       (ffi:make-func (rlget "SaveFileText")     CString CString        CBool))
+; ...
+
+
+; Input Handling Functions
+; keyboard
+(def IsKeyPressed       (ffi:make-func (rlget "IsKeyPressed")     CInt                   CBool))
+(def IsKeyPressedRepeat (ffi:make-func (rlget "IsKeyPressedRepeat") CInt                 CBool))
+(def IsKeyDown          (ffi:make-func (rlget "IsKeyDown")        CInt                   CBool))
+(def IsKeyUp            (ffi:make-func (rlget "IsKeyUp")          CInt                   CBool))
+(def GetKeyPressed      (ffi:make-func (rlget "GetKeyPressed")                           CInt))
+(def GetCharPressed     (ffi:make-func (rlget "GetCharPressed")                          CInt))
+(def GetKeyName         (ffi:make-func (rlget "GetKeyName")       CInt                   CString))
+(def SetExitKey         (ffi:make-func (rlget "SetExitKey")       CInt                   CVoid))
+;gamepad
+(def IsGamepadAvailable (ffi:make-func (rlget "IsGamepadAvailable") CInt                 CBool))
+(def GetGamepadName     (ffi:make-func (rlget "GetGamepadName")   CInt                   CString))
+; (def IsGamepadButtonPressed)
+; ...
+; mouse
+(def IsMouseButtonPressed (ffi:make-func (rlget "IsMouseButtonPressed") CInt             CBool))
+(def IsMouseButtonDown  (ffi:make-func (rlget "IsMouseButtonDown") CInt                  CBool))
+(def IsMouseButtonReleased (ffi:make-func (rlget "IsMouseButtonReleased") CInt           CBool))
+(def IsMouseButtonUp    (ffi:make-func (rlget "IsMouseButtonUp")   CInt                  CBool))
+(def GetMouseX          (ffi:make-func (rlget "GetMouseX")                               CInt))
+(def GetMouseY          (ffi:make-func (rlget "GetMouseY")                               CInt))
+(def GetMousePosition   (ffi:make-func (rlget "GetMousePosition")                        Vector2))
+; GetMouseDelta
+; SetMousePosition
+; SetMouseOffset
+; SetMouseScale
+(def GetMouseWheelMove  (ffi:make-func (rlget "GetMouseWheelMove")                      CFloat))
+; GetMouseWheelMoveV
+(def SetMouseCursor     (ffi:make-func (rlget "SetMouseCursor")    CInt                 CVoid))
+; touch
+(def GetTouchX          (ffi:make-func (rlget "GetTouchX")                              CInt))
+(def GetTouchY          (ffi:make-func (rlget "GetTouchY")                              CInt))
+; (def GetTouchPosition
+(def GetTouchPointId    (ffi:make-func (rlget "GetTouchPointId")   CInt                 CInt))
+(def GetTouchPointCount (ffi:make-func (rlget "GetTouchPointCount")                     CInt))
+
+; ...
+; window flags
+(def flag-vsync-hint                  64)
+(def flag-fullscreen-mode              2)
+
+(def flag-window-resizable             4)
+(def flag-window-undecorated           8)
+(def flag-window-hidden              128)
+(def flag-window-minimized           512)
+(def flag-window-maximized          1024)
+(def flag-window-unfocused          2048)
+(def flag-window-topmost            4096)
+(def flag-window-always-run          256)
+(def flag-window-transparent          16)
+(def flag-window-highdpi            8192)
+(def flag-window-mouse-passthrough 16384)
+(def flag-borderless-windowed-mode 32768)
+
+(def flag-msaa-4x-hint                32)
+(def flag-interlaced-hint          65536)
+
+; keys
+(def key-null                          0)
+(def key-apostrophe                   39)
+(def key-comma                        44)
+(def key-minus                        45)
+(def key-period                       46)
+(def key-slash                        47)
+(def key-zero                         48)
+(def key-one                          49)
+(def key-two                          50)
+(def key-three                        51)
+(def key-four                         52)
+(def key-five                         53)
+(def key-six                          54)
+(def key-seven                        55)
+(def key-eight                        56)
+(def key-nine                         57)
+(def key-semicolon                    59)
+(def key-equal                        61)
+(def key-a                            65)
+(def key-b                            66)
+(def key-c                            67)
+(def key-d                            68)
+(def key-e                            69)
+(def key-f                            70)
+(def key-g                            71)
+
+; module: rshapes
+; Basic shapes drawing functions
+(def DrawPixel          (ffi:make-func (rlget "DrawPixel")    CInt   CInt   RLColor                 CVoid))
+(def DrawLine           (ffi:make-func (rlget "DrawLine")     CInt   CInt   CInt    CInt    RLColor CVoid))
+(def DrawCircle         (ffi:make-func (rlget "DrawCircle")   CInt   CInt   CFloat  RLColor         CVoid))
+(def DrawCircleV        (ffi:make-func (rlget "DrawCircleV")  Vector2 CFloat RLColor                CVoid))
+
+(SetConfigFlags flag-msaa-4x-hint)
+(InitWindow 800 600 "Hello, World!")
+(SetTargetFPS 100)
+
+(defn (image dt)
+  (ClearBackground blank)
+  (DrawCircle (* 10.0 dt) 100.0 5.0 green)
+  (DrawCircleV (GetMousePosition) 20.0 raywhite))
+
+(defn (mainloop)
+  (PollInputEvents)
+  (BeginDrawing)
+  (image (GetTime))
+  (EndDrawing)
+  (if (WindowShouldClose)
+  ; (if @true
+    @true
+    (mainloop)))
+
+; (print-disasm! mainloop)
+
+(write "Regular Exit: " (mainloop))
+
+(CloseWindow)

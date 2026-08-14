@@ -1,0 +1,77 @@
+#!/usr/bin/env skript
+; numerics.pt — a tour of the flat fixed-width numeric type system
+; Integers (i64) and their arithmetic, float math and rounding, numeric
+; predicates, complex numbers, type conversions, constants, bit ops.
+; Run: cd skript && ./zig-out/bin/skript demo/numerics.pt
+
+(display "--- integers (i64) ---\n")
+(display "7 + 3 = ") (write (+ 7 3)) (display "\n")
+(display "10 - 4 = ") (write (- 10 4)) (display "\n")
+(display "6 * 7 = ") (write (* 6 7)) (display "\n")
+(display "17 / 5 = ") (write (/ 17 5)) (display "\n")  ; integer division truncates
+(display "17 mod 5 = ") (write (mod 17 5)) (display "\n")
+(display "17 rem 5 = ") (write (rem 17 5)) (display "\n")
+(display "-17 mod 5 = ") (write (mod -17 5)) (display "\n")  ; mod follows divisor sign
+(display "-17 rem 5 = ") (write (rem -17 5)) (display "\n")  ; rem follows dividend sign
+
+(display "--- floats ---\n")
+(display "sqrt 2.0 = ") (write (sqrt 2.0)) (display "\n")
+(display "pow 2.0 10.0 = ") (write (pow 2.0 10.0)) (display "\n")
+(display "exp 1.0 = ") (write (exp 1.0)) (display "\n")
+(display "log 1000.0 = ") (write (log 1000.0)) (display "\n")
+(display "sin pi/2 = ") (write (sin (/ pi 2.0))) (display "\n")
+(display "cos 0.0 = ") (write (cos 0.0)) (display "\n")
+(display "tan 0.0 = ") (write (tan 0.0)) (display "\n")
+(display "deg->rad 180.0 = ") (write (deg->rad 180.0)) (display "\n")
+(display "rad->deg pi = ") (write (rad->deg pi)) (display "\n")
+
+(display "--- rounding ---\n")
+(display "floor 3.7 = ") (write (floor 3.7)) (display "\n")
+(display "ceil 3.2 = ") (write (ceil 3.2)) (display "\n")
+(display "round 3.5 = ") (write (round 3.5)) (display "\n")  ; half rounds away from zero
+(display "round 2.5 = ") (write (round 2.5)) (display "\n")
+(display "trunc -3.7 = ") (write (trunc -3.7)) (display "\n")
+(display "fract 3.25 = ") (write (fract 3.25)) (display "\n")
+(display "abs -5 = ") (write (abs -5)) (display "\n")
+(display "sign -3 = ") (write (sign -3)) (display "\n")
+(display "clamp 15 0 10 = ") (write (clamp 15 0 10)) (display "\n")
+(display "min 3 7 = ") (write (min 3 7)) (display "\n")
+(display "max 3 7 = ") (write (max 3 7)) (display "\n")
+
+(display "--- predicates ---\n")
+(display "is-odd? 7 = ") (write (is-odd? 7)) (display "\n")
+(display "is-even? 8 = ") (write (is-even? 8)) (display "\n")
+(display "is-zero? 0.0 = ") (write (is-zero? 0.0)) (display "\n")
+(display "is-finite? 1.0 = ") (write (is-finite? 1.0)) (display "\n")
+(display "sqrt -1.0 = ") (write (sqrt -1.0)) (display "\n")  ; IEEE nan, no error
+(display "is-nan? (sqrt -1.0) = ") (write (is-nan? (sqrt -1.0))) (display "\n")
+(display "exp 1000.0 = ") (write (exp 1000.0)) (display "\n")  ; overflows to +inf
+(display "is-inf? (exp 1000.0) = ") (write (is-inf? (exp 1000.0))) (display "\n")
+(display "approx? (sqrt 2.0) 1.41421356 0.0001 = ") (write (approx? (sqrt 2.0) 1.41421356 0.0001)) (display "\n")
+
+(display "--- complex ---\n")
+(display "complex 3.0 4.0 = ") (write (complex 3.0 4.0)) (display "\n")
+(display "re 1+2i = ") (write (re 1+2i)) (display "\n")
+(display "im 1+2i = ") (write (im 1+2i)) (display "\n")
+(display "mag (complex 3.0 4.0) = ") (write (mag (complex 3.0 4.0))) (display "\n")
+(display "c64.arg 0+1i = ") (write (c64.arg 0+1i)) (display "\n")
+(display "c64.conj 1+2i = ") (write (c64.conj 1+2i)) (display "\n")
+(display "(1+2i) * (3+4i) = ") (write (* 1+2i 3+4i)) (display "\n")
+(display "c64.norm (complex 3.0 4.0) = ") (write (c64.norm (complex 3.0 4.0))) (display "\n")  ; squared magnitude
+
+(display "--- conversions & type tags ---\n")
+(display "from-f64 3.7 = ") (write (from-f64 3.7)) (display "\n")
+(display "from-f32 2.5 = ") (write (from-f32 2.5)) (display "\n")
+(display "i64? 42 = ") (write (i64? 42)) (display "\n")
+(display "i64? 3.0 = ") (write (i64? 3.0)) (display "\n")  ; 42 is i64, 3.0 is f64
+(display "f64? 3.0 = ") (write (f64? 3.0)) (display "\n")
+(display "f64? 42 = ") (write (f64? 42)) (display "\n")
+(display "c64? 1+2i = ") (write (c64? 1+2i)) (display "\n")
+
+(display "--- constants & bit ops ---\n")
+(display "pi = ") (write pi) (display "\n")
+(display "tau = ") (write tau) (display "\n")
+(display "shl 1 8 = ") (write (shl 1 8)) (display "\n")
+(display "shr 256 4 = ") (write (shr 256 4)) (display "\n")
+
+(display "done\n")
