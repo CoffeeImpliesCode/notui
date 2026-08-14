@@ -93,15 +93,19 @@ pub fn main(init: std.process.Init) !void {
 
     // Debug args (piped path): `--ascii [formula]` prints the coverage
     // grid of the rendered formula as an ASCII value map instead of a
-    // PPM — the pixel-level debug view.
+    // PPM; `--bench <n> [formula]` times n parse+render iterations and
+    // reports the averages (the vector-length tuning harness).
     var it = std.process.Args.Iterator.init(init.minimal.args);
     defer it.deinit();
     _ = it.next(); // argv[0]: the program name
     var src_arg: ?[]const u8 = null;
     var ascii = false;
+    var bench_n: ?usize = null;
     while (it.next()) |a| {
         if (std.mem.eql(u8, a, "--ascii")) {
             ascii = true;
+        } else if (std.mem.eql(u8, a, "--bench")) {
+            bench_n = if (it.next()) |n| std.fmt.parseInt(usize, n, 10) catch null else null;
         } else if (src_arg == null) {
             src_arg = a;
         }
@@ -114,7 +118,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Non-TTY degradation: one plain frame (PPM or ASCII dump), no tty.
     if (!Tty.isTty(std.posix.STDIN_FILENO)) {
-        return runPlain(gpa, io, &ctx, src_arg orelse default_formula, ascii);
+        return runPlain(gpa, io, &ctx, src_arg orelse default_formula, ascii, bench_n);
     }
 
     var tty = try Tty.init(io);
@@ -945,7 +949,39 @@ fn isCtrl(k: Key, cp: u21, letter: u8) bool {
 /// One plain frame, no interactive sequences: the default formula
 /// rasterized and dumped as a P6 PPM to stdout, then a one-line summary
 /// (drawable counts + pixel size) — the piped verification path.
-fn runPlain(gpa: std.mem.Allocator, io: std.Io, ctx: *const ztex.Context, src: []const u8, ascii: bool) !void {
+fn runPlain(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    ctx: *const ztex.Context,
+    src: []const u8,
+    ascii: bool,
+    bench_n: ?usize,
+) !void {
+    // Benchmark mode: time n parse+render iterations, report the averages
+    // (the vector-length tuning harness). Skips the bitmap dump.
+    if (bench_n) |n| {
+        var parse_total: f64 = 0;
+        var render_total: f64 = 0;
+        var render_min: f64 = std.math.inf(f64);
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const t0 = monoNs();
+            var dl = try ztex.render(gpa, src, default_size_pt, null);
+            defer dl.deinit();
+            parse_total += msSince(t0);
+            const t1 = monoNs();
+            const bmp = try rasterize(gpa, ctx, &dl);
+            defer gpa.free(bmp.data);
+            const rms = msSince(t1);
+            render_total += rms;
+            render_min = @min(render_min, rms);
+        }
+        std.debug.print("bench n={d} parse avg {d:.3}ms render avg {d:.3}ms render min {d:.3}ms\n", .{
+            n, parse_total / @as(f64, @floatFromInt(n)), render_total / @as(f64, @floatFromInt(n)), render_min,
+        });
+        return;
+    }
+
     var dl = try ztex.render(gpa, src, default_size_pt, null);
     defer dl.deinit();
     const bmp = try rasterize(gpa, ctx, &dl);

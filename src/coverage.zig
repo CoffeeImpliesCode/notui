@@ -28,7 +28,7 @@ pub const QuadCurve = struct {
 };
 
 /// SIMD lane count for `coverageRow`.
-const lanes: usize = 8;
+const lanes: usize = 16;
 
 const size_x: f32 = 1.0;
 const size_y: f32 = 1.0;
