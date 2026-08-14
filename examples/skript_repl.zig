@@ -15,15 +15,14 @@
 //! captured library output (capped at 5 lines + "N more captured").
 //! Answers are guarded: 16 KiB byte cap + 200-row line cap (§6).
 //!
-//! The skript runtime (register VM, `initRegvm`) is initialized once and
+//! The skript runtime (`Runtime.init`, register VM) is initialized once and
 //! used by exactly ONE thread at a time: each submission copies the query
 //! into the app arena and spawns a worker `std.Thread` that compiles +
 //! evals + formats the answer entirely off the UI thread, capturing the
 //! form's fd 1/2 writes into a pipe (libc extern block — the example
 //! links libc). The worker evaluates via `spawnEval` + `awaitProcess`
-//! (regvm fast path; the scheduler's own runner thread executes the
-//! bytecode) with a stack-VM `evalNode` fallback for non-regvm-compilable
-//! forms. The worker publishes into a result slot; the main loop polls
+//! (the scheduler's own runner thread executes the bytecode). The worker
+//! publishes into a result slot; the main loop polls
 //! the slot each tick and keeps rendering (the spinner animates while
 //! busy). Enter is ignored while a submission is in flight; paren-aware
 //! Enter continues multi-line input; Up/Down navigate a 100-entry history
@@ -183,12 +182,8 @@ pub fn main(init: std.process.Init) !void {
     // The skript runtime: init once (prelude + builtins + store), then
     // single-thread-at-a-time — the worker owns it during each eval, the
     // main thread only polls the result slot. deinit() drains the runtime's
-    // scheduler runners, so the worker is joined first (below). regvm
-    // engine: the register VM is ~10× faster on compute-heavy forms and
-    // does not run out of the fixed store heap on deep recursion (the
-    // stack VM's failure mode past ~fib(17)); the eval path falls back to
-    // the stack VM for non-regvm-compilable forms (§2).
-    var rt = try skript.Runtime.initRegvm(gpa, io);
+    // scheduler runners, so the worker is joined first (below).
+    var rt = try skript.Runtime.init(gpa, io);
     defer rt.deinit();
 
     // `display`/`write` route through `rt.stdout`. skript's hosts must set
@@ -717,7 +712,7 @@ fn pushLine(aa: std.mem.Allocator, region: *Region, text: []const u8) !void {
 /// aligned under the " ⇒ " prefix by display width.
 fn formatAnswer(aa: std.mem.Allocator, rt: *skript.Runtime, res: skript.Value) []const u8 {
     const tag_val: u64 = @intFromEnum(res.typ);
-    const typ_ptr: *skript.Type = if (tag_val <= skript.builtins.type_last_idx)
+    const typ_ptr: *const skript.Type = if (tag_val <= skript.builtins.type_last_idx)
         rt.predefined_types.items[@as(usize, @intCast(tag_val))]
     else
         res.typ.toRef().deref(skript.Type);

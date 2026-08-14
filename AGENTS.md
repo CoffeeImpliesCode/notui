@@ -1,69 +1,35 @@
 # notui
 
-Zig 0.16 inline-first terminal UI toolkit: cell-buffer primitives, a
-base-ui component layer (spinner, text, gauge, suggestions, …), and an
-Elm-style app framework on top — TUIs that live inside the terminal
-session (main buffer, scrollback preserved) rather than owning the screen.
-Scaffolded to the same conventions as `~/projects/{noapi, nogui, skript,
-wayland}`.
+Zig 0.16 inline-first terminal UI toolkit. It provides cell-buffer primitives, base-ui components (spinner, text, gauge, suggestions), and an Elm-style app framework. Apps use the terminal's main buffer and preserve scrollback instead of owning the screen.
 
-## Stack
+## Stack and layout
 
-- **Language**: Zig 0.16 (module API, `std.Io`, Juicy Main)
-- **Sole dep**: zg (Unicode 16: width, graphemes, text) — vendored elsewhere
-  is hand-copied from zigzag/libvaxis (see notes/research/zig-foundations.md)
-- **VCS**: jj — DO NOT USE GIT COMMANDS
-- **Dev env**: devenv + direnv (`.envrc` → `use devenv`)
-- **Linting**: zlint (`zlint.json` rules) + `zig fmt --check`
-- **Toolchain**: `zig` from devenv (nixpkgs 0.16)
-- **Lint/analyze tools**: prefer the locally built versions (`~/.local/bin/zlint`, `~/tools/ziglint`, `~/tools/zbc`, `~/tools/zcov`) over devenv's nixpkgs ones — they may be patched for this setup.
-
-## Structure
-
-```
-build.zig          # build graph: notui module → exe → run/test steps
-build.zig.zon      # package manifest (fingerprint, paths)
-devenv.nix         # nix dev environment (zig, zig-zlint, pkg-config)
-.envrc             # direnv → devenv hook
-AGENTS.md          # this file
-src/
-├── main.zig       # executable entry (std.process.Init)
-└── root.zig       # library root + unit tests
-notes/             # design research, comparisons, transcripts
-```
+- Zig 0.16: module API, `std.Io`, Juicy Main. Use `zig` from devenv (nixpkgs 0.16).
+- External `zg` provides Unicode 16 width, grapheme, and text support; keep it distinct from local hand-copied zigzag/libvaxis source. `skript` is a separate sibling path dependency used by the REPL example.
+- `src/main.zig` is the `std.process.Init` executable entry; `src/root.zig` is the library root and holds unit tests. `build.zig` defines module, executable, run, and test steps.
+- Use `jj`, not Git commands.
+- Use locally built analysis tools when available: `~/.local/bin/zlint`, `~/tools/ziglint`, `~/tools/zbc`, and `~/tools/zcov`; they may include setup-specific patches.
 
 ## Conventions
 
-- Tiger style: explicit allocators, no hidden allocations, `defer`/`errdefer`
-  cleanup, named `gpa`/`arena` allocator params
-- Zig 0.16 idioms only: `std.Io` threaded through I/O, unmanaged containers
-  with explicit allocator args, `.empty` decl literals, `@import("root")`
-- Error sets explicit; no `anyerror` leaks; no `_ =` discards
-- `zig fmt` before finishing any change; lines ≤ 100 columns
-- Unit tests live next to code in `src/`; run via `zig build test`
-- No backwards compatibility: delete dead code, change directly
+- Use explicit allocators, named `gpa`/`arena` parameters, and `defer`/`errdefer` cleanup. Avoid hidden allocations.
+- Use Zig 0.16 idioms: pass `std.Io` through I/O, pass allocators to unmanaged containers, use `.empty` literals and `@import("root")`.
+- Declare error sets; do not leak `anyerror` or discard errors with `_ =`.
+- Keep lines within 100 columns. Tests belong next to code in `src/`.
+- Do not preserve backward compatibility: remove dead code and update callers directly.
 
-## Development
+## Environment and commands
 
-- Use tools, always use `edit`/`write` for file changes — NEVER patch files
-  with inline python/perl/sed/awk scripts, heredocs, or `echo >` redirection
-- Read with `read`, search with `grep`/`glob`; shell is for builds/tests and
-  one-shot fact queries only
-- NEVER use web_* tools (broken) — for web search use the local server at
-  `localhost:4444`; prefer reading primary sources directly
-- Delegate aggressively: many small subagents over few big ones; give full
-  instructions; assume subagents are dumb
-- Parallelize: N independent files → N workers
-
-## Commands
+`.envrc` loads devenv; `devenv.nix` provides Zig and zlint. Run `direnv allow` on first use or after changing `devenv.nix`.
 
 ```bash
-direnv allow        # enter devenv shell (first time / after devenv.nix edits)
-zig build           # Debug build → zig-out/bin/notui
-zig build run       # build + run
+zig build           # debug build: zig-out/bin/notui
+zig build run       # build and run
 zig build test      # unit tests
-zig fmt --check .   # formatting gate
-zlint               # lint (prefer ~/.local/bin/zlint; devenv nixpkgs is fallback)
-gate                # all quality gates (zig-gate): fmt --check, build, test, ast-check, ziglint, zlint; zbc by default (advisory; strict via ZBC_STRICT=1); optional `--cov`; exit 1 on issues
-jj st               # working-copy status (never git)
+zig fmt --check .   # format check
+zlint               # prefer ~/.local/bin/zlint
+gate                # all gates; zbc advisory unless ZBC_STRICT=1; --cov is optional
+jj st               # working-copy status
 ```
+
+`gate` runs format check, build, tests, AST check, ziglint, and zlint; it exits 1 on issues.

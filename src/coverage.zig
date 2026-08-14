@@ -489,6 +489,236 @@ pub fn coverageRow(curves: []const QuadCurve, y: f32, x_start: f32, out: []f32) 
     }
 }
 
+// ── fast row (step + corrections) ─────────────────────
+
+/// Piece batch for the SIMD hit test: 128 × 24 B = 3 KB of stack. The
+/// practical glyph case is ≤ 32 curves × 4 pieces; larger sets fall back
+/// to a scalar piece loop with identical math.
+const batch_cap = 128;
+
+/// Max row width for the stack difference array (2049 × 4 B = 8 KB of
+/// stack). Wider rows fall back to `coverageRow` — the exact sweep, the
+/// zero-alloc bound on the stack diff.
+const diff_cap = 2048;
+
+/// One hit piece's row contribution: the `dir * span` STEP for every
+/// pixel entirely right of the piece's x-extent (a single difference-array
+/// add at i_step), plus the exact analytic sweep value for the few pixels
+/// whose 1x1 windows overlap that extent (written straight into `out`).
+/// The caller has already hit-tested the piece against the row's y-window.
+inline fn addPiece(diff: []f32, out: []f32, piece: QuadCurve, y: f32, x_start: f32) void {
+    const p0 = piece.p0;
+    const p1 = piece.p1;
+    const p2 = piece.p2;
+
+    // The piece's y-span INSIDE the row's y-slice, from the same clamped
+    // intersection params the sweep uses: the sweep's entirely-left
+    // branch returns (v_max_y - v_min_y) with v_min_y/v_max_y evaluated
+    // AT these t's — reproducing it bit-identically makes the step exact
+    // even for pieces with an interior y-extremum below the monotonicize
+    // split floor (|qa| < 1e-3, deviation up to 2.5e-4: the endpoint
+    // span min(y+1, y_hi) - max(y, y_lo) misses the bulge).
+    const qa_y = p0[1] + p2[1] - 2.0 * p1[1];
+    const t_lo = clamp01(f32, intersectMonotonic(f32, qa_y, p0[1], p1[1], p2[1], y));
+    const t_hi = clamp01(f32, intersectMonotonic(f32, qa_y, p0[1], p1[1], p2[1], y + 1.0));
+    // evalBez at the clamped bounds is exactly the endpoint value
+    // (evalBez(…, 0) == p0, evalBez(…, 1) == p2, bit-identical — the
+    // sweep evaluates at the same clamped t's, so the shortcut never
+    // diverges). Full-row-crossing pieces clamp both ends (t_lo == 0,
+    // t_hi == 1): all four evals collapse to endpoints — the dominant
+    // case in dense glyph rows.
+    const y_at_lo = if (t_lo == 0.0) p0[1] else evalBez(f32, p0[1], p1[1], p2[1], t_lo);
+    const y_at_hi = if (t_hi == 1.0) p2[1] else evalBez(f32, p0[1], p1[1], p2[1], t_hi);
+    const dir = sign(f32, p2[1] - p0[1]);
+    const step_val = dir * (y_at_hi - y_at_lo);
+
+    // The piece's x-extent inside the row's y-slice: the two y-window
+    // intersection parameters (clamped), evaluated in x.
+    const x_lo = if (t_lo == 0.0) p0[0] else evalBez(f32, p0[0], p1[0], p2[0], t_lo);
+    const x_hi = if (t_hi == 1.0) p2[0] else evalBez(f32, p0[0], p1[0], p2[0], t_hi);
+    const extent_min = @min(x_lo, x_hi);
+    const extent_max = @max(x_lo, x_hi);
+
+    // Step. Pixel i's window is [x_start + i, x_start + i + 1); the sweep
+    // returns dir * span exactly when x_start + i >= extent_max, i.e.
+    // i >= i_step. @ceil partitions exactly — the sweep's `<=` includes
+    // the touch, so the extent_max-integer pixel is stepped too (its
+    // correction range stops at i_step - 1, keeping it on dir * span).
+    // NOTE: FAST_COVERAGE.md's literal formulas (floor(extent_max) -
+    // x_start + 1 with corrections through ceil(extent_max)) double-count
+    // non-integer extents: the pixel at ceil(extent_max) would get BOTH
+    // the step and a correction whose sweep value is dir * span. The
+    // ceil(i_step) scheme with corrections capped at i_step - 1 is
+    // equivalent at integer boundaries and exact for fractional x_start.
+    const i_step = @ceil(extent_max - x_start);
+    const out_len_f = @as(f32, @floatFromInt(out.len));
+    if (i_step <= 0) {
+        diff[0] += step_val; // extent left of the whole window
+    } else if (i_step <= out_len_f) {
+        diff[@intFromFloat(i_step)] += step_val;
+    }
+    // else: extent right of the whole window — nothing to step.
+
+    // Corrections: pixels whose windows overlap the extent get the exact
+    // sweep value. The usual extent is 1–2 pixels: scalar sweeps there —
+    // a 16-lane scanlineSweepVec costs ~15 vector ops regardless of how
+    // many lanes are live, so per-piece vector calls lose to scalar
+    // branches (the sweep path's per-piece vector call is the whole cost
+    // fast must beat). Wide extents (shallow, near-horizontal pieces)
+    // still use the vector path — one call amortizes over many pixels.
+    // The f32 bounds are clamped before @intFromFloat so pathological
+    // extents cannot overflow the cast; the p_lo > p_hi guard covers
+    // i_step <= 0 (p_hi negative) and extents right of the window
+    // (p_lo past the end).
+    const p_lo_f = @max(@floor(extent_min - x_start), 0.0);
+    const p_hi_f = @min(i_step - 1.0, out_len_f - 1.0);
+    if (p_lo_f > p_hi_f) return;
+    const p_lo: usize = @intFromFloat(p_lo_f);
+    const p_hi: usize = @intFromFloat(p_hi_f);
+    // One @Vector(4) sweep call per chunk: a 4-wide register runs the
+    // whole general path in ~half the ops of the 16-lane call (and the
+    // scalar path serializes the same math with branchy sqrts — ~3x more
+    // cycles for the usual 1-2 extent pixels).
+    var i: usize = p_lo;
+    while (i <= p_hi) : (i += 4) {
+        const n = @min(4, p_hi - i + 1);
+        var offsets: [4]f32 = undefined;
+        var k: usize = 0;
+        while (k < n) : (k += 1) {
+            offsets[k] = x_start + @as(f32, @floatCast(@as(f64, @floatFromInt(i + k))));
+        }
+        // Defined fill for the discarded tail lanes.
+        while (k < 4) : (k += 1) {
+            if (n > 0) offsets[k] = offsets[n - 1];
+        }
+        const row: [4]f32 = scanlineSweepVec(4, offsets, y, piece);
+        k = 0;
+        while (k < n) : (k += 1) {
+            out[i + k] += row[k];
+        }
+    }
+}
+
+/// Same contract as `coverageRow` — per-pixel coverage of [y, y + 1) for
+/// the pixels [x_start, x_start + out.len), clamped to [0, 1] — via the
+/// fast row-intersection scheme: a monotonic piece's contribution to a
+/// row is a STEP (zero left of its x-extent, `sign(dy) × y-span` right
+/// of it) and only the extent pixels need the analytic sweep. The sweep's
+/// entirely-left branch returns exactly sign(dy) × y-span = dir * span,
+/// so the diff/prefix-sum of steps reproduces it; `scanlineSweepVec`
+/// supplies the exact values for the (usually 1–2) extent pixels. Each
+/// piece's own step sits at i_step, past its corrected pixels, so there
+/// is no double count; multiple pieces are additive.
+///
+/// Monotonic pieces are batch-hit-tested as `lanes`-wide (y_lo, y_hi)
+/// vectors from a fixed stack array; more than `batch_cap` pieces fall
+/// back to a scalar loop with identical math, and rows wider than
+/// `diff_cap` fall back to `coverageRow`. Zero allocation throughout.
+pub fn coverageRowFast(curves: []const QuadCurve, y: f32, x_start: f32, out: []f32) void {
+    // Runtime-safety checks off for this kernel ONLY. ReleaseSafe emits a
+    // panic block (bounds check + integerPartOutOfBounds edge) at every
+    // checked cast/slice; inlined into the giant addPiece →
+    // scanlineSweepVec(4) body, those cold blocks distort the backend's
+    // optimization so badly the fast path runs ~6× slower than the sweep
+    // (measured: 6.0µs vs 1.1µs per row on the lambda fixture). With
+    // checks on, coverageRowFast LOSES to coverageRow at ReleaseSafe;
+    // without them it wins (0.99µs vs 1.1µs). Every index here is
+    // guarded by an adjacent explicit comparison — the checks are
+    // unreachable by construction:
+    //   - out.len ≤ diff_cap (this branch); out.len + 1 cannot wrap.
+    //   - batch[n_pieces]: n_pieces ≤ curves.len * 4 ≤ batch_cap, by the
+    //     `curves.len > batch_cap / 4` fallback above (division, so the
+    //     threshold itself cannot overflow).
+    //   - mono.pieces[0..n]: n ≤ 4, the monotonicize contract.
+    //   - diff[@intFromFloat(i_step)] and the correction pixel bounds
+    //     are pre-clamped by the float compares in addPiece.
+    // The row-level API contract (out.len range, nothing else) is
+    // preserved; all library code outside this function keeps its checks.
+    @setRuntimeSafety(false);
+    if (out.len > diff_cap) {
+        coverageRow(curves, y, x_start, out);
+        return;
+    }
+    @memset(out, 0);
+    var diff: [diff_cap + 1]f32 = undefined;
+    // Only the live slice (out.len + 1 entries) is zeroed — rows are
+    // typically ~10 px, and clearing the whole 2049-entry stack array per
+    // row would dominate the raster cost.
+    const diff_view = diff[0 .. out.len + 1];
+    @memset(diff_view, 0);
+
+    if (curves.len > batch_cap / 4) {
+        // Scalar fallback for very large curve sets: identical math, one
+        // monotonicized piece at a time.
+        for (curves) |c| {
+            // Curve-level early-out (mirrors coverageRow): the control
+            // hull bounds the curve, so a disjoint hull skips the whole
+            // monotonicize + piece loop.
+            const c_y_hi = @max(c.p0[1], @max(c.p1[1], c.p2[1]));
+            const c_y_lo = @min(c.p0[1], @min(c.p1[1], c.p2[1]));
+            if (c_y_hi <= y or c_y_lo >= y + size_y) continue;
+            const mono = monotonicize(c);
+            var pi: u8 = 0;
+            while (pi < mono.n) : (pi += 1) {
+                const piece = mono.pieces[pi];
+                const y_lo = @min(piece.p0[1], piece.p2[1]);
+                const y_hi = @max(piece.p0[1], piece.p2[1]);
+                if (y_hi <= y or y_lo >= y + 1.0) continue;
+                addPiece(diff_view, out, piece, y, x_start);
+            }
+        }
+    } else {
+        // Batch path: monotonicize the surviving curves once, then SIMD
+        // hit-test the (y_lo, y_hi) endpoint bounds in `lanes`-wide
+        // vectors. The test is identical to scanlineSweepScalar's
+        // disjoint early-out.
+        var batch: [batch_cap]QuadCurve = undefined;
+        var n_pieces: usize = 0;
+        for (curves) |c| {
+            const c_y_hi = @max(c.p0[1], @max(c.p1[1], c.p2[1]));
+            const c_y_lo = @min(c.p0[1], @min(c.p1[1], c.p2[1]));
+            if (c_y_hi <= y or c_y_lo >= y + size_y) continue;
+            const mono = monotonicize(c);
+            for (mono.pieces[0..mono.n]) |piece| {
+                batch[n_pieces] = piece;
+                n_pieces += 1;
+            }
+        }
+        const y_splat = fromF32(@Vector(lanes, f32), y);
+        const y1_splat = fromF32(@Vector(lanes, f32), y + 1.0);
+        var pi: usize = 0;
+        while (pi < n_pieces) : (pi += lanes) {
+            const m = @min(lanes, n_pieces - pi);
+            // Tail lanes are filled with non-matching bounds so the mask
+            // never selects them. Vectors are built from arrays (element
+            // writes need comptime indices in 0.16).
+            var y_lo_arr: [lanes]f32 = @splat(1e30);
+            var y_hi_arr: [lanes]f32 = @splat(-1e30);
+            for (0..m) |k| {
+                const piece = batch[pi + k];
+                y_lo_arr[k] = @min(piece.p0[1], piece.p2[1]);
+                y_hi_arr[k] = @max(piece.p0[1], piece.p2[1]);
+            }
+            const y_lo_vec: @Vector(lanes, f32) = y_lo_arr;
+            const y_hi_vec: @Vector(lanes, f32) = y_hi_arr;
+            const mask: @Vector(lanes, bool) = (y_hi_vec > y_splat) & (y_lo_vec < y1_splat);
+            const mask_arr: [lanes]bool = mask;
+            for (0..m) |k| {
+                if (mask_arr[k]) addPiece(diff_view, out, batch[pi + k], y, x_start);
+            }
+        }
+    }
+
+    // Prefix-sum the steps into the corrections, then clamp to [0, 1].
+    // diff[out.len] only ever holds the i_step == out.len add — the
+    // prefix loop never consumes it.
+    var acc: f32 = 0;
+    for (out, 0..) |*v, i| {
+        acc += diff[i];
+        v.* = clamp01(f32, v.* + acc);
+    }
+}
+
 // ── tests ─────────────────────────────────
 
 /// xorshift32 PRNG for the property tests.
@@ -803,4 +1033,317 @@ test "non-monotonic parabola: exact coverage only after splitting" {
     try testing.expectApproxEqAbs(0.235702, out[0], 1e-4);
     coverageRow(&curves, 0.75, 0, &out);
     try testing.expectApproxEqAbs(0.083333, out[0], 1e-4);
+}
+
+// ── coverageRowFast tests ─────────────────────────
+
+/// `coverageRowFast` must equal `coverageRow` on [y, y + 1) ×
+/// [x_start, x_start + n) within 1e-4 (the accumulation order differs,
+/// so exact bits are not required).
+fn expectFastEqSweep(curves: []const QuadCurve, y: f32, x_start: f32, n: usize) !void {
+    var fast: [64]f32 = undefined;
+    var sweep: [64]f32 = undefined;
+    try testing.expect(n <= fast.len);
+    coverageRowFast(curves, y, x_start, fast[0..n]);
+    coverageRow(curves, y, x_start, sweep[0..n]);
+    for (fast[0..n], sweep[0..n]) |a, e| {
+        try testing.expectApproxEqAbs(e, a, 1e-4);
+    }
+}
+
+/// `expectFastEqSweep` for every integer row in [y0, y1].
+fn expectRowsEq(curves: []const QuadCurve, y0: i64, y1: i64, x_start: f32, n: usize) !void {
+    var y: i64 = y0;
+    while (y <= y1) : (y += 1) {
+        try expectFastEqSweep(curves, @floatFromInt(y), x_start, n);
+    }
+}
+
+test "coverageRowFast == coverageRow on the fixed shapes" {
+    // Unit square outline (from "unit square outline row"): y in [0, 1].
+    const square = [_]QuadCurve{
+        .{ .p0 = .{ 0, 0 }, .p1 = .{ 0, 0.5 }, .p2 = .{ 0, 1 } },
+        .{ .p0 = .{ 0, 1 }, .p1 = .{ 0.5, 1 }, .p2 = .{ 1, 1 } },
+        .{ .p0 = .{ 1, 1 }, .p1 = .{ 1, 0.5 }, .p2 = .{ 1, 0 } },
+        .{ .p0 = .{ 1, 0 }, .p1 = .{ 0.5, 0 }, .p2 = .{ 0, 0 } },
+    };
+    // Main window: x-range [0, 1] plus margin. Offset windows: x_start
+    // shifted ±1. Clip window: well right of the shape, small len.
+    try expectRowsEq(&square, -1, 2, -1, 4);
+    try expectRowsEq(&square, -1, 2, 0, 4);
+    try expectRowsEq(&square, -1, 2, -2, 4);
+    try expectRowsEq(&square, -1, 2, 2, 2);
+
+    // The 'o' shape: outer CW square plus inner CCW hole (from the
+    // "winding: hole contour" test): y and x in [0, 4].
+    const outer = [_]QuadCurve{
+        .{ .p0 = .{ 0, 0 }, .p1 = .{ 0, 2 }, .p2 = .{ 0, 4 } },
+        .{ .p0 = .{ 0, 4 }, .p1 = .{ 2, 4 }, .p2 = .{ 4, 4 } },
+        .{ .p0 = .{ 4, 4 }, .p1 = .{ 4, 2 }, .p2 = .{ 4, 0 } },
+        .{ .p0 = .{ 4, 0 }, .p1 = .{ 2, 0 }, .p2 = .{ 0, 0 } },
+    };
+    const hole = [_]QuadCurve{
+        .{ .p0 = .{ 1, 1 }, .p1 = .{ 2, 1 }, .p2 = .{ 3, 1 } },
+        .{ .p0 = .{ 3, 1 }, .p1 = .{ 3, 2 }, .p2 = .{ 3, 3 } },
+        .{ .p0 = .{ 3, 3 }, .p1 = .{ 2, 3 }, .p2 = .{ 1, 3 } },
+        .{ .p0 = .{ 1, 3 }, .p1 = .{ 1, 2 }, .p2 = .{ 1, 1 } },
+    };
+    const o_shape = outer ++ hole;
+    try expectRowsEq(&o_shape, -1, 5, -1, 6);
+    try expectRowsEq(&o_shape, -1, 5, 0, 6);
+    try expectRowsEq(&o_shape, -1, 5, -2, 6);
+    try expectRowsEq(&o_shape, -1, 5, 4.5, 2);
+
+    // The parabola arch plus its base (from "non-monotonic parabola"): y
+    // in [0, 2] — monotonicize splits the arch at its extremum.
+    const arch: QuadCurve = .{ .p0 = .{ 0, 0 }, .p1 = .{ 0.5, 2 }, .p2 = .{ 1, 0 } };
+    const base: QuadCurve = .{ .p0 = .{ 1, 0 }, .p1 = .{ 0.5, 0 }, .p2 = .{ 0, 0 } };
+    const parabola = [_]QuadCurve{ base, arch };
+    try expectRowsEq(&parabola, -1, 3, -1, 4);
+    try expectRowsEq(&parabola, -1, 3, 0, 4);
+    try expectRowsEq(&parabola, -1, 3, -2, 4);
+    try expectRowsEq(&parabola, -1, 3, 2, 2);
+
+    // The vertical line (from "vertical line fast path"): x = 0.5,
+    // y in [0.5, 1.5].
+    const vertical: QuadCurve = .{ .p0 = .{ 0.5, 0.5 }, .p1 = .{ 0.5, 1 }, .p2 = .{ 0.5, 1.5 } };
+    try expectRowsEq(&[_]QuadCurve{vertical}, -1, 2, -1, 4);
+    try expectRowsEq(&[_]QuadCurve{vertical}, -1, 2, 0, 4);
+    try expectRowsEq(&[_]QuadCurve{vertical}, -1, 2, -2, 4);
+    try expectRowsEq(&[_]QuadCurve{vertical}, -1, 2, 2, 2);
+}
+
+test "coverageRowFast == coverageRow property" {
+    var state: u32 = 0x9E3779B9;
+    var curves: [24]QuadCurve = undefined;
+    var it: usize = 0;
+    while (it < 2000) : (it += 1) {
+        const n = 1 + xorshift32(&state) % 24;
+        for (curves[0..n], 0..) |*c, k| {
+            c.* = randCurve(&state, @intCast(k)); // kind cycles 0..4
+        }
+        const y = randF32(&state, -1, 1);
+        const x_start = randF32(&state, -2, 1);
+        // [1, 17] covers the 16-lane tail chunk in the corrections.
+        const len = 1 + xorshift32(&state) % 17;
+        var fast: [17]f32 = undefined;
+        var sweep: [17]f32 = undefined;
+        coverageRowFast(curves[0..n], y, x_start, fast[0..len]);
+        coverageRow(curves[0..n], y, x_start, sweep[0..len]);
+        for (fast[0..len], sweep[0..len]) |a, e| {
+            try testing.expectApproxEqAbs(e, a, 1e-4);
+        }
+    }
+    // Wide window: out.len = 64 exercises the multi-chunk correction
+    // loops (and stays under diff_cap, so no fallback).
+    var wide_fast: [64]f32 = undefined;
+    var wide_sweep: [64]f32 = undefined;
+    for (&curves, 0..) |*c, k| {
+        c.* = randCurve(&state, @intCast(k));
+    }
+    const wy = randF32(&state, -1, 1);
+    const wx = randF32(&state, -2, 1);
+    coverageRowFast(&curves, wy, wx, &wide_fast);
+    coverageRow(&curves, wy, wx, &wide_sweep);
+    for (wide_fast, wide_sweep) |a, e| {
+        try testing.expectApproxEqAbs(e, a, 1e-4);
+    }
+    // Fractional x_start: the ceil-index scheme must stay exact for
+    // windows not aligned to integer pixel boundaries.
+    var frac_fast: [17]f32 = undefined;
+    var frac_sweep: [17]f32 = undefined;
+    const flen = 1 + xorshift32(&state) % 17;
+    const fy = randF32(&state, -1, 1);
+    coverageRowFast(&curves, fy, 0.3, frac_fast[0..flen]);
+    coverageRow(&curves, fy, 0.3, frac_sweep[0..flen]);
+    for (frac_fast[0..flen], frac_sweep[0..flen]) |a, e| {
+        try testing.expectApproxEqAbs(e, a, 1e-4);
+    }
+    // Scalar fallback path: 40 curves × 4 pieces > batch_cap (128).
+    var big: [40]QuadCurve = undefined;
+    for (&big, 0..) |*c, k| {
+        c.* = randCurve(&state, @intCast(k));
+    }
+    var big_fast: [17]f32 = undefined;
+    var big_sweep: [17]f32 = undefined;
+    const blen = 1 + xorshift32(&state) % 17;
+    const by = randF32(&state, -1, 1);
+    const bx = randF32(&state, -2, 1);
+    coverageRowFast(&big, by, bx, big_fast[0..blen]);
+    coverageRow(&big, by, bx, big_sweep[0..blen]);
+    for (big_fast[0..blen], big_sweep[0..blen]) |a, e| {
+        try testing.expectApproxEqAbs(e, a, 1e-4);
+    }
+}
+
+test "fast boundary: extent ends exactly on an integer x" {
+    // A vertical line at x = 2.0 spanning the row: extent_max == 2.0 is
+    // an integer pixel boundary. Pixel 2's window starts AT the line, so
+    // the sweep's entirely-left test (`<=` includes the touch) returns
+    // dir * span there; the step at diff[i_step = 2] delivers exactly
+    // that, and pixels >= 3 get the same step.
+    const curve: QuadCurve = .{ .p0 = .{ 2, 0.4 }, .p1 = .{ 2, 1 }, .p2 = .{ 2, 1.6 } };
+    var fast: [6]f32 = undefined;
+    var sweep: [6]f32 = undefined;
+    coverageRowFast(&[_]QuadCurve{curve}, 0.5, 0, &fast);
+    coverageRow(&[_]QuadCurve{curve}, 0.5, 0, &sweep);
+    for (fast, sweep) |a, e| {
+        try testing.expectApproxEqAbs(e, a, 1e-4);
+    }
+    // dir * span = +1 * (min(1.5, 1.6) - max(0.5, 0.4)) = 1.0.
+    try testing.expectApproxEqAbs(0.0, fast[0], 1e-6);
+    try testing.expectApproxEqAbs(0.0, fast[1], 1e-6);
+    try testing.expectApproxEqAbs(1.0, fast[2], 1e-6);
+    try testing.expectApproxEqAbs(1.0, fast[3], 1e-6);
+}
+
+test "fast boundary: partial-overlap piece (span < 1)" {
+    // A piece whose y-range [0.7, 0.9] lies fully inside the row window
+    // [0.5, 1.5): span = 0.9 - 0.7 = 0.2 < 1, so the step is dir * span,
+    // not ±1. The x-extent spans the row (x 0.5..4.5), so pixels 0..4
+    // are corrected with the exact sweep value and pixel 5 gets the pure
+    // step 0.2 (dir = +1).
+    const curve: QuadCurve = .{ .p0 = .{ 0.5, 0.7 }, .p1 = .{ 2.5, 0.9 }, .p2 = .{ 4.5, 0.9 } };
+    var fast: [6]f32 = undefined;
+    var sweep: [6]f32 = undefined;
+    coverageRowFast(&[_]QuadCurve{curve}, 0.5, 0, &fast);
+    coverageRow(&[_]QuadCurve{curve}, 0.5, 0, &sweep);
+    for (fast, sweep) |a, e| {
+        try testing.expectApproxEqAbs(e, a, 1e-4);
+    }
+    // Pixel 5 lies entirely right of extent_max = 4.5: dir * span = 0.2.
+    try testing.expectApproxEqAbs(0.2, fast[5], 1e-6);
+}
+
+test "fast boundary: row with zero hits" {
+    // Curves whose y-ranges lie entirely below and above the row
+    // [0.5, 1.5): no piece intersects the window, out stays all zeros.
+    const curves = [_]QuadCurve{
+        .{ .p0 = .{ 0, -5 }, .p1 = .{ 0.5, -4 }, .p2 = .{ 1, -3 } },
+        .{ .p0 = .{ 0, 5 }, .p1 = .{ 0.5, 6 }, .p2 = .{ 1, 7 } },
+        .{ .p0 = .{ 2, -3 }, .p1 = .{ 2, -2 }, .p2 = .{ 2, -1 } },
+    };
+    var out: [8]f32 = undefined;
+    coverageRowFast(&curves, 0.5, 0, &out);
+    for (out) |v| {
+        try testing.expectApproxEqAbs(0.0, v, 0.0);
+    }
+    var sweep: [8]f32 = undefined;
+    coverageRow(&curves, 0.5, 0, &sweep);
+    for (out, sweep) |a, e| {
+        try testing.expectApproxEqAbs(e, a, 0.0);
+    }
+}
+
+test "fast boundary: window clipping the extent" {
+    // Extent right of the window: a vertical line at x = 10, window
+    // [0, 3) — i_step = 10 > out.len, so step and corrections both skip.
+    const right: QuadCurve = .{ .p0 = .{ 10, 0 }, .p1 = .{ 10, 1 }, .p2 = .{ 10, 2 } };
+    var out: [3]f32 = undefined;
+    coverageRowFast(&[_]QuadCurve{right}, 0.5, 0, &out);
+    for (out) |v| {
+        try testing.expectApproxEqAbs(0.0, v, 0.0);
+    }
+    var sweep: [3]f32 = undefined;
+    coverageRow(&[_]QuadCurve{right}, 0.5, 0, &sweep);
+    for (out, sweep) |a, e| {
+        try testing.expectApproxEqAbs(e, a, 1e-4);
+    }
+
+    // Extent left of the window: a vertical line at x = -2 — i_step <= 0,
+    // diff[0] steps the whole window: every pixel gets dir * span = 1.
+    const left: QuadCurve = .{ .p0 = .{ -2, 0 }, .p1 = .{ -2, 1 }, .p2 = .{ -2, 2 } };
+    coverageRowFast(&[_]QuadCurve{left}, 0.5, 0, &out);
+    for (out) |v| {
+        try testing.expectApproxEqAbs(1.0, v, 1e-6);
+    }
+    coverageRow(&[_]QuadCurve{left}, 0.5, 0, &sweep);
+    for (out, sweep) |a, e| {
+        try testing.expectApproxEqAbs(e, a, 1e-4);
+    }
+}
+
+test "fast boundary: out.len == 1" {
+    // Single-pixel rows: the diff array is [2]f32 and every branch still
+    // applies. Parabola at y = 0.5 (area 0.235702), the unit square at
+    // y = 0.5 (0.5), and a vertical line at the window's left edge (1.0).
+    const arch: QuadCurve = .{ .p0 = .{ 0, 0 }, .p1 = .{ 0.5, 2 }, .p2 = .{ 1, 0 } };
+    const base: QuadCurve = .{ .p0 = .{ 1, 0 }, .p1 = .{ 0.5, 0 }, .p2 = .{ 0, 0 } };
+    const parabola = [_]QuadCurve{ base, arch };
+    var out: [1]f32 = undefined;
+    var sweep: [1]f32 = undefined;
+    coverageRowFast(&parabola, 0.5, 0, &out);
+    try testing.expectApproxEqAbs(0.235702, out[0], 1e-4);
+    coverageRow(&parabola, 0.5, 0, &sweep);
+    try testing.expectApproxEqAbs(sweep[0], out[0], 1e-4);
+
+    const square = [_]QuadCurve{
+        .{ .p0 = .{ 0, 0 }, .p1 = .{ 0, 0.5 }, .p2 = .{ 0, 1 } },
+        .{ .p0 = .{ 0, 1 }, .p1 = .{ 0.5, 1 }, .p2 = .{ 1, 1 } },
+        .{ .p0 = .{ 1, 1 }, .p1 = .{ 1, 0.5 }, .p2 = .{ 1, 0 } },
+        .{ .p0 = .{ 1, 0 }, .p1 = .{ 0.5, 0 }, .p2 = .{ 0, 0 } },
+    };
+    coverageRowFast(&square, 0.5, 0, &out);
+    try testing.expectApproxEqAbs(0.5, out[0], 1e-6);
+    coverageRow(&square, 0.5, 0, &sweep);
+    try testing.expectApproxEqAbs(sweep[0], out[0], 1e-4);
+
+    const vertical: QuadCurve = .{ .p0 = .{ 0.5, 0.5 }, .p1 = .{ 0.5, 1 }, .p2 = .{ 0.5, 1.5 } };
+    coverageRowFast(&[_]QuadCurve{vertical}, 0.5, 0.5, &out);
+    try testing.expectApproxEqAbs(1.0, out[0], 1e-6);
+    coverageRow(&[_]QuadCurve{vertical}, 0.5, 0.5, &sweep);
+    try testing.expectApproxEqAbs(sweep[0], out[0], 1e-4);
+}
+
+test "coverageRowFast == coverageRow on the lambda glyph" {
+    const fixture = @import("lambda_fixture.zig");
+    const src: []const QuadCurve = std.mem.bytesAsSlice(
+        QuadCurve,
+        std.mem.sliceAsBytes(&fixture.curves),
+    );
+    // The sweep fills interior-to-the-right (CW in Y-up); the fixture is
+    // wound CCW (the CFF convention), so reverse the single contour run
+    // and swap each curve's endpoints — exactly like the real rasterizer
+    // (examples/formula_tui.zig) — before transforming.
+    var curves: [fixture.curves.len]QuadCurve = undefined;
+    for (src, 0..) |_, k| {
+        const r = src[src.len - 1 - k];
+        curves[k] = .{ .p0 = r.p2, .p1 = r.p1, .p2 = r.p0 };
+    }
+    // Pixel scale like the rasterizer: 12 pt at 96 dpi over a 1000-unit
+    // em, translated so the glyph lands at non-negative coordinates.
+    const scale = 12.0 * (96.0 / 72.0) / 1000.0;
+    var min_x: f32 = std.math.inf(f32);
+    var max_x: f32 = -std.math.inf(f32);
+    var min_y: f32 = std.math.inf(f32);
+    var max_y: f32 = -std.math.inf(f32);
+    for (&curves) |*c| {
+        for ([_]*[2]f32{ &c.p0, &c.p1, &c.p2 }) |p| {
+            p[0] = p[0] * scale + 3.0;
+            p[1] = p[1] * scale + 5.0;
+            min_x = @min(min_x, p[0]);
+            max_x = @max(max_x, p[0]);
+            min_y = @min(min_y, p[1]);
+            max_y = @max(max_y, p[1]);
+        }
+    }
+    const x0: i64 = @intFromFloat(@floor(min_x));
+    const x1: i64 = @intFromFloat(@ceil(max_x));
+    const n: usize = @intCast(x1 - x0);
+    const x_start = @as(f32, @floatFromInt(x0));
+    try testing.expect(n > 0);
+    var fast: [64]f32 = undefined;
+    var sweep: [64]f32 = undefined;
+    try testing.expect(n <= fast.len);
+    // Every integer row covering the ink bbox, plus one above and below.
+    var wy: i64 = @as(i64, @intFromFloat(@floor(min_y))) - 1;
+    const wy_end: i64 = @as(i64, @intFromFloat(@floor(max_y))) + 1;
+    while (wy <= wy_end) : (wy += 1) {
+        const y = @as(f32, @floatFromInt(wy));
+        coverageRowFast(&curves, y, x_start, fast[0..n]);
+        coverageRow(&curves, y, x_start, sweep[0..n]);
+        for (fast[0..n], sweep[0..n]) |a, e| {
+            try testing.expectApproxEqAbs(e, a, 1e-4);
+        }
+    }
 }

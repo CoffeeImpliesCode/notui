@@ -87,6 +87,9 @@ const Bitmap = struct {
     height: u32,
 };
 
+/// The coverage row-fill selected by `--algo` (sweep default, fast opt).
+const RowFn = *const fn (curves: []const coverage.QuadCurve, y: f32, x_start: f32, out: []f32) void;
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
@@ -94,18 +97,26 @@ pub fn main(init: std.process.Init) !void {
     // Debug args (piped path): `--ascii [formula]` prints the coverage
     // grid of the rendered formula as an ASCII value map instead of a
     // PPM; `--bench <n> [formula]` times n parse+render iterations and
-    // reports the averages (the vector-length tuning harness).
+    // reports the averages (the vector-length tuning harness);
+    // `--algo fast|sweep` picks the coverage row-fill (default sweep;
+    // cmdline-only — the interactive path keeps sweep).
     var it = std.process.Args.Iterator.init(init.minimal.args);
     defer it.deinit();
     _ = it.next(); // argv[0]: the program name
     var src_arg: ?[]const u8 = null;
     var ascii = false;
     var bench_n: ?usize = null;
+    var row_fn: RowFn = coverage.coverageRow;
     while (it.next()) |a| {
         if (std.mem.eql(u8, a, "--ascii")) {
             ascii = true;
         } else if (std.mem.eql(u8, a, "--bench")) {
             bench_n = if (it.next()) |n| std.fmt.parseInt(usize, n, 10) catch null else null;
+        } else if (std.mem.eql(u8, a, "--algo")) {
+            row_fn = coverage.coverageRow;
+            if (it.next()) |v| {
+                if (std.mem.eql(u8, v, "fast")) row_fn = coverage.coverageRowFast;
+            }
         } else if (src_arg == null) {
             src_arg = a;
         }
@@ -118,7 +129,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Non-TTY degradation: one plain frame (PPM or ASCII dump), no tty.
     if (!Tty.isTty(std.posix.STDIN_FILENO)) {
-        return runPlain(gpa, io, &ctx, src_arg orelse default_formula, ascii, bench_n);
+        return runPlain(gpa, io, &ctx, src_arg orelse default_formula, ascii, bench_n, row_fn);
     }
 
     var tty = try Tty.init(io);
@@ -374,7 +385,7 @@ pub fn main(init: std.process.Init) !void {
                         var dbg_dl = try ztex.render(gpa, dbg_src, size_pt, null);
                         defer dbg_dl.deinit();
                         if (dbg_dl.width > 0) {
-                            const dbg_bmp = try rasterize(gpa, &ctx, &dbg_dl);
+                            const dbg_bmp = try rasterize(gpa, &ctx, &dbg_dl, coverage.coverageRow);
                             defer gpa.free(dbg_bmp.data);
                             asciiDump(&dbg_bmp);
                         }
@@ -528,7 +539,7 @@ fn updatePreview(
     defer dl.deinit();
     if (dl.width <= 0) return error.EmptyFormula;
     const t1 = monoNs();
-    const bmp = rasterize(gpa, ctx, &dl) catch |err| {
+    const bmp = rasterize(gpa, ctx, &dl, coverage.coverageRow) catch |err| {
         stats.render_ms = msSince(t1);
         return err;
     };
@@ -659,6 +670,7 @@ fn rasterize(
     gpa: std.mem.Allocator,
     ctx: *const ztex.Context,
     dl: *ztex.draw.DrawList,
+    row_fn: RowFn,
 ) !Bitmap {
     const width: u32 = @intFromFloat(@ceil(dl.width * pt_px));
     const height: u32 = @intFromFloat(@ceil((dl.height + dl.depth) * pt_px));
@@ -678,7 +690,7 @@ fn rasterize(
 
     for (dl.items.items) |d| {
         switch (d) {
-            .text => |t| try drawText(gpa, ctx, dl, data, width, height, t),
+            .text => |t| try drawText(gpa, ctx, dl, data, width, height, t, row_fn),
             .rect => |r| fillInk(
                 data,
                 width,
@@ -721,6 +733,7 @@ fn drawText(
     width: u32,
     height: u32,
     t: ztex.draw.Text,
+    row_fn: RowFn,
 ) !void {
     const cp: u21 = blk: {
         if (t.bytes.len == 1) break :blk t.bytes[0];
@@ -830,7 +843,7 @@ fn drawText(
 
     var wy = wy0;
     while (wy <= wy1) : (wy += 1) {
-        coverage.coverageRow(cov_curves, @floatFromInt(wy), @floatFromInt(cx0), row_buf);
+        row_fn(cov_curves, @floatFromInt(wy), @floatFromInt(cx0), row_buf);
         const row: usize = @intCast(h_i - 1 - wy);
         for (row_buf, 0..) |c, k| {
             if (c <= 0.0) continue;
@@ -948,7 +961,8 @@ fn isCtrl(k: Key, cp: u21, letter: u8) bool {
 
 /// One plain frame, no interactive sequences: the default formula
 /// rasterized and dumped as a P6 PPM to stdout, then a one-line summary
-/// (drawable counts + pixel size) — the piped verification path.
+/// (drawable counts + pixel size) — the piped verification path. Renders
+/// with `row_fn` (the `--algo` selection; sweep by default).
 fn runPlain(
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -956,6 +970,7 @@ fn runPlain(
     src: []const u8,
     ascii: bool,
     bench_n: ?usize,
+    row_fn: RowFn,
 ) !void {
     // Benchmark mode: time n parse+render iterations, report the averages
     // (the vector-length tuning harness). Skips the bitmap dump.
@@ -970,7 +985,7 @@ fn runPlain(
             defer dl.deinit();
             parse_total += msSince(t0);
             const t1 = monoNs();
-            const bmp = try rasterize(gpa, ctx, &dl);
+            const bmp = try rasterize(gpa, ctx, &dl, row_fn);
             defer gpa.free(bmp.data);
             const rms = msSince(t1);
             render_total += rms;
@@ -984,7 +999,7 @@ fn runPlain(
 
     var dl = try ztex.render(gpa, src, default_size_pt, null);
     defer dl.deinit();
-    const bmp = try rasterize(gpa, ctx, &dl);
+    const bmp = try rasterize(gpa, ctx, &dl, row_fn);
     defer gpa.free(bmp.data);
 
     // ASCII debug view: the coverage grid as digit values (0 = fully
