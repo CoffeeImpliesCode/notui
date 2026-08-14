@@ -1,5 +1,5 @@
 //! framework_counter: a minimal Elm-style counter demo for the
-//! App(Model) framework (notes/research/framework-contract.md §10).
+//! App(Model) framework.
 //!
 //! Demonstrates the framework contract: the `Msg`/`init`/`update`/`view`
 //! model shape with `init` returning `{ model, cmd }` (the init-armed

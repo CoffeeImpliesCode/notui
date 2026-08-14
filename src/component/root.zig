@@ -1,5 +1,4 @@
-//! component module root — the base-ui presentation layer
-//! (baseui-contract.md §6).
+//! component module root — the base-ui presentation layer.
 //!
 //! Components import only the primitives (buffer, style, color, width);
 //! an app composes them against any Buffer (a region's cur, a test

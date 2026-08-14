@@ -5,7 +5,7 @@ Zig 0.16 inline-first terminal UI toolkit. It provides cell-buffer primitives, b
 ## Stack and layout
 
 - Zig 0.16: module API, `std.Io`, Juicy Main. Use `zig` from devenv (nixpkgs 0.16).
-- External `zg` provides Unicode 16 width, grapheme, and text support; keep it distinct from local hand-copied zigzag/libvaxis source. `skript` is a separate sibling path dependency used by the REPL example.
+- External `zg` provides Unicode 16 width, grapheme, and text support; keep it distinct from local hand-copied zigzag/libvaxis source. `skript` is vendored at `vendor/skript` (the Lisp runtime behind the REPL example) — re-vendor with the `jj file list | rsync` recipe in `build.zig.zon`; do not edit it in place.
 - `src/main.zig` is the `std.process.Init` executable entry; `src/root.zig` is the library root and holds unit tests. `build.zig` defines module, executable, run, and test steps.
 - Use `jj`, not Git commands.
 - Use locally built analysis tools when available: `~/.local/bin/zlint`, `~/tools/ziglint`, `~/tools/zbc`, and `~/tools/zcov`; they may include setup-specific patches.
