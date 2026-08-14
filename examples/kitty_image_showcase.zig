@@ -13,20 +13,22 @@
 //! frame id into a fixed placement slot (500), cycling — animation via
 //! placement swap, no accumulation.
 //!
-//! Row 2 — a STATIC GALLERY: two 8x8 RGBA sprites (a red square and a
-//! blue square) placed at cols 0 and 12 (4x1 cells) with text drawn
-//! between and around them ("A", "B", and a caption flowing under the
-//! sprites) — text+image interleaving in one band row.
+//! Row 2 — a GALLERY: two 8x8 RGBA sprites (a red square and a blue
+//! square) placed at cols 1 and 13 (4x1 cells) with text drawn
+//! between and around them — text+image interleaving in one band row.
 //!
 //! Row 3 — status: a spinning base-ui Spinner plus "images: ON" or
 //! "images: unsupported".
 //!
 //! SCROLLING: every 15 ticks a timestamped "scroll line N …" is queued
-//! via `region.append(.line)`, so the band — and the images placed in
-//! it — scroll up into the terminal scrollback (kitty placements scroll
-//! with their cells). The animated ball + star are re-placed at the band
-//! rows every tick, keeping them glued to the band; the gallery sprites
-//! are placed once and ride the scroll with their cells.
+//! via `region.append(.line)` (print-above), marching the band down one
+//! row per append. Every sprite — ball, star, gallery — is re-placed at
+//! the current anchor each tick so they stay glued to the band
+//! (placements are cell-anchored, and the band text moves by repaint,
+//! not by terminal scroll — a placement left alone would detach).
+//! Appends stop when the band bottom reaches the last screen row: the
+//! region's repaint model cannot write past the bottom without the
+//! terminal scrolling mid-paint and garbling the band.
 //!
 //! Transmit/place/delete only happen when `caps.kitty_graphics` is set
 //! (interactive implied); otherwise the same 4 text rows render with the
@@ -199,10 +201,10 @@ pub fn main(init: std.process.Init) !void {
     // Placements need the band's ABSOLUTE screen rows, which are only
     // known once the first CPR reply anchors the band (see the `.cpr`
     // arm below): `region.placeAt` CUP's to the absolute cell, places,
-    // then parks back at the band bottom. The gallery is placed once
-    // at band row 2 and rides the scroll with its cells; the animated
-    // ball and star are re-placed at their band rows every tick,
-    // keeping them glued to the band.
+    // then parks back at the band bottom. Every sprite is re-placed
+    // each tick (cell-anchored placements would detach from the band
+    // otherwise — the band text moves by repaint, not terminal
+    // scroll), keeping them glued to the band.
     if (caps.kitty_graphics) {
         try transmitAll(w);
         try w.flush();
@@ -210,7 +212,12 @@ pub fn main(init: std.process.Init) !void {
 
     var reader = Reader.init(&tty);
 
-    // Animation + scroll state.
+    // Animation + scroll state. `screen_rows` caps the scroll appends:
+    // the region's repaint model paints the band exactly `height` rows
+    // from the cursor and cannot write past the last screen row (a
+    // bottom write scrolls mid-paint, garbling the band), so appends
+    // stop once the band bottom reaches the bottom of the screen.
+    var screen_rows: u32 = ws.rows;
     var tick: u32 = 0;
     var scroll_n: u32 = 0;
     var ball_col: u32 = 0;
@@ -244,23 +251,8 @@ pub fn main(init: std.process.Init) !void {
                     // region's bookkeeping already holds every shift
                     // applied since (CNL reservation + any appends
                     // flushed), so applyFirstCpr re-anchors exactly.
-                    // Anchor it, then place the one-shot gallery via
-                    // `region.placeAt` (CUP to the absolute cell; the
-                    // band rides the scroll with its cells).
                     region.applyFirstCpr(pos.row);
                     anchor_known = true;
-                    if (caps.kitty_graphics) {
-                        try region.placeAt(w, 2, 1, .{
-                            .id = square_red_id,
-                            .placement = square_red_id,
-                            .size = .{ .width = 4, .height = 1 },
-                        });
-                        try region.placeAt(w, 2, 13, .{
-                            .id = square_blue_id,
-                            .placement = square_blue_id,
-                            .size = .{ .width = 4, .height = 1 },
-                        });
-                    }
                 } else {
                     // Steady-state: the cursor parks at the band bottom
                     // after every frame, so the bottom-based correction
@@ -275,6 +267,7 @@ pub fn main(init: std.process.Init) !void {
         // SIGWINCH: re-measure and rebuild the band.
         if (tty.checkResize()) {
             const wsz = try tty.getWinsize();
+            screen_rows = wsz.rows;
             try region.resize(wsz.cols, region.height);
         }
 
@@ -289,12 +282,15 @@ pub fn main(init: std.process.Init) !void {
         // The flip-book: advance to the next star frame.
         frame_index = (frame_index + 1) % star_frame_count;
 
-        // Every ~15 ticks push a timestamped line above the band: the
-        // band — and its placed images — scroll up into scrollback with
-        // it (kitty placements scroll with their cells). The `.line`
-        // slice points into `line_buf`, alive through the render that
-        // flushes the append queue this same iteration.
-        if (tick % scroll_every_ticks == 0) {
+        // Every ~15 ticks push a timestamped line above the band,
+        // marching it down one row (print-above) — until the band
+        // bottom reaches the last screen row, where further appends
+        // would scroll the terminal mid-paint and garble the band. The
+        // `.line` slice points into `line_buf`, alive through the
+        // render that flushes the append queue this same iteration.
+        if (tick % scroll_every_ticks == 0 and
+            region.anchorRow() + region.height <= screen_rows)
+        {
             scroll_n += 1;
             var line_buf: [64]u8 = undefined;
             try region.append(.{ .line = scrollLine(io, &line_buf, scroll_n, region.width) });
@@ -306,10 +302,13 @@ pub fn main(init: std.process.Init) !void {
             // Re-place = animation: `region.placeAt` CUP's to the
             // absolute cell (current anchor + band row), places, then
             // parks back — the images stay glued to the band as append
-            // lines scroll it up. Placement ids make re-placing move
-            // the existing placement instead of stacking a new one
-            // (the ball reuses its image id; the flip-book cycles
-            // frame ids into fixed slot 500).
+            // lines march it down (placements are cell-anchored, so a
+            // placement left alone would detach: the band text moves
+            // by repaint, not by terminal scroll). Placement ids make
+            // re-placing move the existing placement instead of
+            // stacking a new one (the ball and the gallery squares
+            // reuse their image ids; the flip-book cycles frame ids
+            // into fixed slot 500).
             try region.placeAt(w, 0, ball_col + 1, .{
                 .id = ball_id,
                 .placement = ball_id,
@@ -319,6 +318,16 @@ pub fn main(init: std.process.Init) !void {
                 .id = star_id_base + frame_index,
                 .placement = 500,
                 .size = .{ .width = 2, .height = 1 },
+            });
+            try region.placeAt(w, 2, 1, .{
+                .id = square_red_id,
+                .placement = square_red_id,
+                .size = .{ .width = 4, .height = 1 },
+            });
+            try region.placeAt(w, 2, 13, .{
+                .id = square_blue_id,
+                .placement = square_blue_id,
+                .size = .{ .width = 4, .height = 1 },
             });
         }
 
