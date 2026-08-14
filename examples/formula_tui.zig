@@ -139,13 +139,16 @@ pub fn main(init: std.process.Init) !void {
     var preview_ok: bool = false;
     var hint: ?[]const u8 = null;
     var hint_buf: [128]u8 = undefined;
+    // The offending input span of the current parse error (valid when
+    // `hint` is set); the input line renders it red.
+    var err_span: ztex.atom.Span = .{ .start = 0, .end = 0 };
 
     var reader = Reader.init(&tty);
     const w = tty.writer();
 
     // Default formula: render + transmit up front (position-independent);
     // the placement waits for the first CPR reply to anchor the band.
-    preview_ok = preview(gpa, &ctx, default_formula, size_pt, kitty, w, &hint, &hint_buf);
+    preview_ok = preview(gpa, &ctx, default_formula, size_pt, kitty, w, &hint, &hint_buf, &err_span);
     try w.flush();
 
     while (true) {
@@ -180,7 +183,7 @@ pub fn main(init: std.process.Init) !void {
                             // Invalid: do NOT commit, do NOT clear — draw
                             // a one-line hint, keep the prompt as-is.
                             preview_ok = false;
-                            formatErr(&hint, &hint_buf, err, &info, line.items);
+                            formatErr(&hint, &hint_buf, err, &info, line.items, &err_span);
                         }
                     }
                 } else if (k.matches(Key.left, .{})) {
@@ -200,7 +203,7 @@ pub fn main(init: std.process.Init) !void {
                     line.shrinkRetainingCapacity(cursor);
                     hint = null;
                     if (line.items.len > 0) {
-                        preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf);
+                        preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf, &err_span);
                     }
                 } else if (isCtrl(k, 0x15, 'u')) {
                     // ^U: kill to start of line (up to the cursor).
@@ -212,7 +215,7 @@ pub fn main(init: std.process.Init) !void {
                     cursor = 0;
                     hint = null;
                     if (line.items.len > 0) {
-                        preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf);
+                        preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf, &err_span);
                     }
                 } else if (isCtrl(k, 0x17, 'w')) {
                     // ^W: delete the whitespace-delimited word before the
@@ -225,7 +228,7 @@ pub fn main(init: std.process.Init) !void {
                         cursor = start;
                         hint = null;
                         if (line.items.len > 0) {
-                            preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf);
+                            preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf, &err_span);
                         }
                     }
                 } else if (k.matches(Key.backspace, .{})) {
@@ -238,7 +241,7 @@ pub fn main(init: std.process.Init) !void {
                         cursor = start;
                         hint = null;
                         if (line.items.len > 0) {
-                            preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf);
+                            preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf, &err_span);
                         }
                     }
                 } else if (k.matches(Key.delete, .{})) {
@@ -250,7 +253,7 @@ pub fn main(init: std.process.Init) !void {
                         line.shrinkRetainingCapacity(line.items.len - clen);
                         hint = null;
                         if (line.items.len > 0) {
-                            preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf);
+                            preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf, &err_span);
                         }
                     }
                 } else if (k.matches(Key.escape, .{})) {
@@ -268,6 +271,7 @@ pub fn main(init: std.process.Init) !void {
                         w,
                         &hint,
                         &hint_buf,
+                        &err_span,
                     );
                 } else if (k.matches(Key.page_down, .{})) {
                     size_pt = @max(min_size_pt, size_pt - size_step_pt);
@@ -280,6 +284,7 @@ pub fn main(init: std.process.Init) !void {
                         w,
                         &hint,
                         &hint_buf,
+                        &err_span,
                     );
                 } else {
                     // Live preview: re-render on every keystroke. On a
@@ -288,7 +293,7 @@ pub fn main(init: std.process.Init) !void {
                     try insertKeyText(aa, &line, &cursor, k);
                     hint = null;
                     if (line.items.len > 0) {
-                        preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf);
+                        preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf, &err_span);
                     }
                 }
             },
@@ -326,9 +331,10 @@ pub fn main(init: std.process.Init) !void {
             "formula> ";
         const caret = @min(cursor, line.items.len);
         var col = try region.cur.draw(.{}, prompt, 0, 0);
-        col += try region.cur.draw(.{}, line.items[0..caret], col, 0);
+        const err_active = hint != null and line.items.len > 0;
+        col += try drawInput(&region.cur, col, 0, 0, line.items[0..caret], err_active, err_span);
         col += try region.cur.draw(.{}, cursor_marker, col, 0);
-        _ = try region.cur.draw(.{}, line.items[caret..], col, 0);
+        _ = try drawInput(&region.cur, col, 0, caret, line.items[caret..], err_active, err_span);
         if (hint) |h| _ = try region.cur.draw(.{}, h, 0, hint_row);
         try region.render(w);
         if (kitty and anchor_known and preview_ok) {
@@ -406,17 +412,44 @@ fn isParseError(err: anyerror) bool {
     };
 }
 
+/// Draw `text` — a slice of the input line at absolute byte offset `off` —
+/// with the error span (when `active`) rendered red; everything else in
+/// the default style. Used for the two caret-split halves of the line.
+fn drawInput(
+    cur: *notui.buffer.Buffer,
+    x: u16,
+    y: u16,
+    off: usize,
+    text: []const u8,
+    active: bool,
+    span: ztex.atom.Span,
+) !u16 {
+    if (!active) return cur.draw(.{}, text, x, y);
+    const lo = @max(span.start, off);
+    const hi = @min(span.end, off + text.len);
+    if (hi <= lo) return cur.draw(.{}, text, x, y);
+    // draw() returns the relative width; track the absolute column.
+    var cx = x;
+    cx += try cur.draw(.{}, text[0 .. lo - off], cx, y);
+    cx += try cur.draw(.{ .fg = .red }, text[lo - off .. hi - off], cx, y);
+    cx += try cur.draw(.{}, text[hi - off ..], cx, y);
+    return cx - x;
+}
+
 /// Render `err` into `hint` (a one-line band message): the ztex parse
 /// errors show the TeX-style message + 1-based line:col of the offending
-/// span; anything else falls back to the bare error name.
+/// span; anything else falls back to the bare error name. `err_span`
+/// receives the offending span (for the red input-line marking).
 fn formatErr(
     hint: *?[]const u8,
     hint_buf: []u8,
     err: anyerror,
     info: *const ztex.parse.Info,
     src: []const u8,
+    err_span: *ztex.atom.Span,
 ) void {
     if (isParseError(err)) {
+        err_span.* = info.span;
         // 1-based line:col of the span start (formulas are single-line in
         // practice, but the computation is general).
         var line: u32 = 1;
@@ -453,10 +486,11 @@ fn preview(
     w: anytype,
     hint: *?[]const u8,
     hint_buf: []u8,
+    err_span: *ztex.atom.Span,
 ) bool {
     var info: ztex.parse.Info = undefined;
     updatePreview(gpa, ctx, src, size_pt, kitty, w, &info) catch |err| {
-        formatErr(hint, hint_buf, err, &info, src);
+        formatErr(hint, hint_buf, err, &info, src, err_span);
         return false;
     };
     hint.* = null;
