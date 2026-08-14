@@ -123,7 +123,15 @@ inline fn intersectMonotonic(comptime T: type, qa: T, c0: T, c1: T, c2: T, targe
     const sqrt_d = sel(T, d < zeroOf(T), zeroOf(T), @sqrt(d));
     const inv_2a = half / qa;
     const quad = -qb * inv_2a + sign(T, c2 - c0) * sqrt_d * inv_2a;
-    return sel(T, @abs(qa) < fromF32(T, 1e-10), lin, quad);
+    // Linear branch when the quadratic term is negligible RELATIVE to the
+    // linear coefficient. The quad formula is (sd - qb) * inv_2a, which
+    // cancels catastrophically in f32 when qa is small (a curve that is
+    // exactly linear in the coordinate — the λ's foot line has
+    // qa_y = -4e-7 in f32): the absolute 1e-10 floor (the reference's)
+    // sends it down the quad path, sd rounds to qb, and the roots come
+    // out 0/1 — the curve's coverage smears across the whole row.
+    const near_linear = @abs(qa) < fromF32(T, 1e-3) * @abs(qb) + fromF32(T, 1e-10);
+    return sel(T, near_linear, lin, quad);
 }
 
 /// Horizontal check (§8.3 h_check): a >= c -> d; else b <= c -> 1 - d;

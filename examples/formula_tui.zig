@@ -62,7 +62,7 @@ const preview_row: u32 = 1;
 const hint_row: u16 = 2;
 /// The formula rendered on startup and kept on display while the input
 /// is empty.
-const default_formula = "\\frac{x^2+1}{x-1}";
+const default_formula = "\\lambda";
 const default_size_pt: f32 = 12;
 const min_size_pt: f32 = 12;
 const max_size_pt: f32 = 48;
@@ -91,14 +91,30 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
 
+    // Debug args (piped path): `--ascii [formula]` prints the coverage
+    // grid of the rendered formula as an ASCII value map instead of a
+    // PPM — the pixel-level debug view.
+    var it = std.process.Args.Iterator.init(init.minimal.args);
+    defer it.deinit();
+    _ = it.next(); // argv[0]: the program name
+    var src_arg: ?[]const u8 = null;
+    var ascii = false;
+    while (it.next()) |a| {
+        if (std.mem.eql(u8, a, "--ascii")) {
+            ascii = true;
+        } else if (src_arg == null) {
+            src_arg = a;
+        }
+    }
+
     // Font context: owns the embedded LM faces (CFF outlines served by
     // glyphOutline) — "init once, render many".
     var ctx = try ztex.Context.init(gpa);
     defer ctx.deinit();
 
-    // Non-TTY degradation: one plain frame (PPM dump), no tty.
+    // Non-TTY degradation: one plain frame (PPM or ASCII dump), no tty.
     if (!Tty.isTty(std.posix.STDIN_FILENO)) {
-        return runPlain(gpa, io, &ctx);
+        return runPlain(gpa, io, &ctx, src_arg orelse default_formula, ascii);
     }
 
     var tty = try Tty.init(io);
@@ -142,13 +158,16 @@ pub fn main(init: std.process.Init) !void {
     // The offending input span of the current parse error (valid when
     // `hint` is set); the input line renders it red.
     var err_span: ztex.atom.Span = .{ .start = 0, .end = 0 };
+    // Last preview stage timings (parse + render), drawn grey
+    // right-aligned on the hint row.
+    var stats: PreviewStats = .{};
 
     var reader = Reader.init(&tty);
     const w = tty.writer();
 
     // Default formula: render + transmit up front (position-independent);
     // the placement waits for the first CPR reply to anchor the band.
-    preview_ok = preview(gpa, &ctx, default_formula, size_pt, kitty, w, &hint, &hint_buf, &err_span);
+    preview_ok = preview(gpa, &ctx, default_formula, size_pt, kitty, w, &hint, &hint_buf, &err_span, &stats);
     try w.flush();
 
     while (true) {
@@ -169,7 +188,7 @@ pub fn main(init: std.process.Init) !void {
                 } else if (k.matches(Key.enter, .{})) {
                     if (line.items.len > 0) {
                         var info: ztex.parse.Info = undefined;
-                        const result = updatePreview(gpa, &ctx, line.items, size_pt, kitty, w, &info);
+                        const result = updatePreview(gpa, &ctx, line.items, size_pt, kitty, w, &info, &stats);
                         if (result) |_| {
                             // Commit: the displayed formula stays, a fresh
                             // prompt starts.
@@ -203,7 +222,7 @@ pub fn main(init: std.process.Init) !void {
                     line.shrinkRetainingCapacity(cursor);
                     hint = null;
                     if (line.items.len > 0) {
-                        preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf, &err_span);
+                        preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf, &err_span, &stats);
                     }
                 } else if (isCtrl(k, 0x15, 'u')) {
                     // ^U: kill to start of line (up to the cursor).
@@ -215,7 +234,7 @@ pub fn main(init: std.process.Init) !void {
                     cursor = 0;
                     hint = null;
                     if (line.items.len > 0) {
-                        preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf, &err_span);
+                        preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf, &err_span, &stats);
                     }
                 } else if (isCtrl(k, 0x17, 'w')) {
                     // ^W: delete the whitespace-delimited word before the
@@ -228,7 +247,7 @@ pub fn main(init: std.process.Init) !void {
                         cursor = start;
                         hint = null;
                         if (line.items.len > 0) {
-                            preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf, &err_span);
+                            preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf, &err_span, &stats);
                         }
                     }
                 } else if (k.matches(Key.backspace, .{})) {
@@ -241,7 +260,7 @@ pub fn main(init: std.process.Init) !void {
                         cursor = start;
                         hint = null;
                         if (line.items.len > 0) {
-                            preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf, &err_span);
+                            preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf, &err_span, &stats);
                         }
                     }
                 } else if (k.matches(Key.delete, .{})) {
@@ -253,7 +272,7 @@ pub fn main(init: std.process.Init) !void {
                         line.shrinkRetainingCapacity(line.items.len - clen);
                         hint = null;
                         if (line.items.len > 0) {
-                            preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf, &err_span);
+                            preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf, &err_span, &stats);
                         }
                     }
                 } else if (k.matches(Key.escape, .{})) {
@@ -272,6 +291,7 @@ pub fn main(init: std.process.Init) !void {
                         &hint,
                         &hint_buf,
                         &err_span,
+                        &stats,
                     );
                 } else if (k.matches(Key.page_down, .{})) {
                     size_pt = @max(min_size_pt, size_pt - size_step_pt);
@@ -285,7 +305,21 @@ pub fn main(init: std.process.Init) !void {
                         &hint,
                         &hint_buf,
                         &err_span,
+                        &stats,
                     );
+                } else if (k.matches(Key.f1, .{})) {
+                    // Debug: dump the current preview's coverage grid as
+                    // an ASCII value map to stderr (F1; see asciiDump).
+                    const dbg_src = previewSrc(line.items, committed);
+                    if (dbg_src.len > 0) {
+                        var dbg_dl = try ztex.render(gpa, dbg_src, size_pt, null);
+                        defer dbg_dl.deinit();
+                        if (dbg_dl.width > 0) {
+                            const dbg_bmp = try rasterize(gpa, &ctx, &dbg_dl);
+                            defer gpa.free(dbg_bmp.data);
+                            asciiDump(&dbg_bmp);
+                        }
+                    }
                 } else {
                     // Live preview: re-render on every keystroke. On a
                     // parse error the last good preview stays displayed
@@ -293,7 +327,7 @@ pub fn main(init: std.process.Init) !void {
                     try insertKeyText(aa, &line, &cursor, k);
                     hint = null;
                     if (line.items.len > 0) {
-                        preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf, &err_span);
+                        preview_ok = preview(gpa, &ctx, line.items, size_pt, kitty, w, &hint, &hint_buf, &err_span, &stats);
                     }
                 }
             },
@@ -336,6 +370,23 @@ pub fn main(init: std.process.Init) !void {
         col += try region.cur.draw(.{}, cursor_marker, col, 0);
         _ = try drawInput(&region.cur, col, 0, caret, line.items[caret..], err_active, err_span);
         if (hint) |h| _ = try region.cur.draw(.{}, h, 0, hint_row);
+        // Stage timings, grey, right-aligned on the same row (the error
+        // hint, when present, occupies the left).
+        var timing_buf: [64]u8 = undefined;
+        const timing = std.fmt.bufPrint(
+            &timing_buf,
+            "parse {d:.2}ms render {d:.2}ms",
+            .{ stats.parse_ms, stats.render_ms },
+        ) catch "";
+        const tl = @as(u16, @intCast(timing.len));
+        if (tl < region.width) {
+            _ = try region.cur.draw(
+                .{ .fg = .bright_black },
+                timing,
+                region.width - tl,
+                hint_row,
+            );
+        }
         try region.render(w);
         if (kitty and anchor_known and preview_ok) {
             try region.placeAt(w, preview_row, 1, .{
@@ -355,6 +406,26 @@ pub fn main(init: std.process.Init) !void {
     try w.flush();
 }
 
+/// Last preview stage timings (milliseconds), shown grey right-aligned on
+/// the hint row below the preview.
+const PreviewStats = struct {
+    parse_ms: f32 = 0,
+    render_ms: f32 = 0,
+};
+
+/// Monotonic clock in nanoseconds (std.time.Timer was removed in 0.16;
+/// the low-level clock_gettime syscall — the ztex bench pattern).
+fn monoNs() u64 {
+    var ts: std.posix.timespec = undefined;
+    _ = std.os.linux.clock_gettime(std.posix.CLOCK.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
+
+/// Milliseconds since `t0` (nanoseconds from `monoNs`).
+fn msSince(t0: u64) f32 {
+    return @floatCast(@as(f64, @floatFromInt(monoNs() - t0)) / 1e6);
+}
+
 /// Render `src` at `size_pt` through the ztex facade, rasterize the draw
 /// list, and transmit the bitmap under `formula_id`. A re-transmit
 /// replaces the previous image and its placement (kitty spec) — the
@@ -364,7 +435,9 @@ pub fn main(init: std.process.Init) !void {
 /// Returns `EmptyFormula` for blank layouts (no ink), and the parse/
 /// layout error for invalid LaTeX — callers keep the last good preview.
 /// On a parse error `err_info` (when non-null) is filled with the kind +
-/// offending span (ztex.parse.Info).
+/// offending span (ztex.parse.Info). `stats` receives the parse (ztex
+/// render) and render (rasterize) durations; on a parse error the render
+/// stage keeps its previous value.
 fn updatePreview(
     gpa: std.mem.Allocator,
     ctx: *const ztex.Context,
@@ -373,12 +446,23 @@ fn updatePreview(
     kitty: bool,
     w: anytype,
     err_info: ?*ztex.parse.Info,
+    stats: *PreviewStats,
 ) !void {
     if (!kitty) return;
-    var dl = try ztex.render(gpa, src, size_pt, err_info);
+    const t0 = monoNs();
+    var dl = ztex.render(gpa, src, size_pt, err_info) catch |err| {
+        stats.parse_ms = msSince(t0);
+        return err;
+    };
+    stats.parse_ms = msSince(t0);
     defer dl.deinit();
     if (dl.width <= 0) return error.EmptyFormula;
-    const bmp = try rasterize(gpa, ctx, &dl);
+    const t1 = monoNs();
+    const bmp = rasterize(gpa, ctx, &dl) catch |err| {
+        stats.render_ms = msSince(t1);
+        return err;
+    };
+    stats.render_ms = msSince(t1);
     defer gpa.free(bmp.data);
     try notui.image.kitty.transmit(w, .{
         .format = .rgba,
@@ -487,9 +571,10 @@ fn preview(
     hint: *?[]const u8,
     hint_buf: []u8,
     err_span: *ztex.atom.Span,
+    stats: *PreviewStats,
 ) bool {
     var info: ztex.parse.Info = undefined;
-    updatePreview(gpa, ctx, src, size_pt, kitty, w, &info) catch |err| {
+    updatePreview(gpa, ctx, src, size_pt, kitty, w, &info, stats) catch |err| {
         formatErr(hint, hint_buf, err, &info, src, err_span);
         return false;
     };
@@ -616,11 +701,8 @@ fn drawText(
             outline.curves.items[hi] = .{ .p0 = tmp.p2, .p1 = tmp.p1, .p2 = tmp.p0 };
         }
         if (lo == hi) {
-            outline.curves.items[lo] = .{
-                .p0 = outline.curves.items[lo].p2,
-                .p1 = outline.curves.items[lo].p1,
-                .p2 = outline.curves.items[lo].p0,
-            };
+            const c = outline.curves.items[lo];
+            outline.curves.items[lo] = .{ .p0 = c.p2, .p1 = c.p1, .p2 = c.p0 };
         }
         run_start = i + 1;
     }
@@ -709,6 +791,24 @@ fn fillInk(data: []u8, width: u32, height: u32, x0f: f32, x1f: f32, y0f: f32, y1
     }
 }
 
+/// Print the bitmap's alpha channel as an ASCII value map to stderr:
+/// one digit per pixel (0 = fully transparent .. 9 = fully inked), one
+/// line per bitmap row, top-down — the pixel-level debug view.
+fn asciiDump(bmp: *const Bitmap) void {
+    var row: usize = 0;
+    while (row < bmp.height) : (row += 1) {
+        var line: [256]u8 = undefined;
+        var n: usize = 0;
+        var col: usize = 0;
+        while (col < bmp.width and n + 1 < line.len) : (col += 1) {
+            const a = bmp.data[(row * bmp.width + col) * 4 + 3];
+            line[n] = '0' + @as(u8, @intCast((@as(u32, a) * 10) / 256));
+            n += 1;
+        }
+        std.debug.print("{s}\n", .{line[0..n]});
+    }
+}
+
 /// The source to re-render: the typed line when non-empty (live preview),
 /// else the last committed formula (kept on display).
 fn previewSrc(line: []const u8, committed: []const u8) []const u8 {
@@ -779,12 +879,18 @@ fn isCtrl(k: Key, cp: u21, letter: u8) bool {
 /// One plain frame, no interactive sequences: the default formula
 /// rasterized and dumped as a P6 PPM to stdout, then a one-line summary
 /// (drawable counts + pixel size) — the piped verification path.
-fn runPlain(gpa: std.mem.Allocator, io: std.Io, ctx: *const ztex.Context) !void {
-    const src = default_formula;
+fn runPlain(gpa: std.mem.Allocator, io: std.Io, ctx: *const ztex.Context, src: []const u8, ascii: bool) !void {
     var dl = try ztex.render(gpa, src, default_size_pt, null);
     defer dl.deinit();
     const bmp = try rasterize(gpa, ctx, &dl);
     defer gpa.free(bmp.data);
+
+    // ASCII debug view: the coverage grid as digit values (0 = fully
+    // transparent .. 9 = fully inked), one line per bitmap row, top-down.
+    if (ascii) {
+        asciiDump(&bmp);
+        return;
+    }
 
     var texts: usize = 0;
     var rects: usize = 0;
