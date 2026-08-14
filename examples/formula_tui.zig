@@ -165,7 +165,8 @@ pub fn main(init: std.process.Init) !void {
                     break; // `q` quits only on an empty line — else text
                 } else if (k.matches(Key.enter, .{})) {
                     if (line.items.len > 0) {
-                        const result = updatePreview(gpa, &ctx, line.items, size_pt, kitty, w);
+                        var info: ztex.parse.Info = undefined;
+                        const result = updatePreview(gpa, &ctx, line.items, size_pt, kitty, w, &info);
                         if (result) |_| {
                             // Commit: the displayed formula stays, a fresh
                             // prompt starts.
@@ -179,11 +180,7 @@ pub fn main(init: std.process.Init) !void {
                             // Invalid: do NOT commit, do NOT clear — draw
                             // a one-line hint, keep the prompt as-is.
                             preview_ok = false;
-                            hint = std.fmt.bufPrint(
-                                &hint_buf,
-                                "latex error: {s}",
-                                .{@errorName(err)},
-                            ) catch null;
+                            formatErr(&hint, &hint_buf, err, &info, line.items);
                         }
                     }
                 } else if (k.matches(Key.left, .{})) {
@@ -360,6 +357,8 @@ pub fn main(init: std.process.Init) !void {
 ///
 /// Returns `EmptyFormula` for blank layouts (no ink), and the parse/
 /// layout error for invalid LaTeX — callers keep the last good preview.
+/// On a parse error `err_info` (when non-null) is filled with the kind +
+/// offending span (ztex.parse.Info).
 fn updatePreview(
     gpa: std.mem.Allocator,
     ctx: *const ztex.Context,
@@ -367,9 +366,10 @@ fn updatePreview(
     size_pt: f32,
     kitty: bool,
     w: anytype,
+    err_info: ?*ztex.parse.Info,
 ) !void {
     if (!kitty) return;
-    var dl = try ztex.render(gpa, src, size_pt);
+    var dl = try ztex.render(gpa, src, size_pt, err_info);
     defer dl.deinit();
     if (dl.width <= 0) return error.EmptyFormula;
     const bmp = try rasterize(gpa, ctx, &dl);
@@ -382,10 +382,68 @@ fn updatePreview(
     }, bmp.data);
 }
 
+/// The ztex parse errors (the lexer/parser kinds that fill `Info`).
+/// `formatErr` reads the Info only for these — other errors (layout,
+/// allocation) leave it untouched.
+fn isParseError(err: anyerror) bool {
+    return switch (err) {
+        error.DanglingEscape,
+        error.InvalidUtf8,
+        error.UnexpectedRGroup,
+        error.UnexpectedScript,
+        error.DoubleScript,
+        error.UnknownCommand,
+        error.MissingArgument,
+        error.MissingScript,
+        error.UnclosedGroup,
+        error.UnexpectedMiddle,
+        error.UnknownEnvironment,
+        error.MismatchedEnd,
+        error.UnclosedEnvironment,
+        error.StackOverflow,
+        => true,
+        else => false,
+    };
+}
+
+/// Render `err` into `hint` (a one-line band message): the ztex parse
+/// errors show the TeX-style message + 1-based line:col of the offending
+/// span; anything else falls back to the bare error name.
+fn formatErr(
+    hint: *?[]const u8,
+    hint_buf: []u8,
+    err: anyerror,
+    info: *const ztex.parse.Info,
+    src: []const u8,
+) void {
+    if (isParseError(err)) {
+        // 1-based line:col of the span start (formulas are single-line in
+        // practice, but the computation is general).
+        var line: u32 = 1;
+        var col: u32 = 1;
+        const start = @min(info.span.start, src.len);
+        for (src[0..start]) |b| {
+            if (b == '\n') {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+        }
+        hint.* = std.fmt.bufPrint(
+            hint_buf,
+            "{s} at {d}:{d}",
+            .{ info.message(), line, col },
+        ) catch null;
+        return;
+    }
+    hint.* = std.fmt.bufPrint(hint_buf, "latex error: {s}", .{@errorName(err)}) catch null;
+}
+
 /// `updatePreview` as a predicate for the live-preview paths: true when a
 /// fresh bitmap is on screen. On any error the last good preview stays
-/// displayed and `hint` gets the error name (rendered below the preview
-/// at `hint_row`); on success the hint clears.
+/// displayed and `hint` gets the error (rendered below the preview at
+/// `hint_row`); on success the hint clears.
 fn preview(
     gpa: std.mem.Allocator,
     ctx: *const ztex.Context,
@@ -396,8 +454,9 @@ fn preview(
     hint: *?[]const u8,
     hint_buf: []u8,
 ) bool {
-    updatePreview(gpa, ctx, src, size_pt, kitty, w) catch |err| {
-        hint.* = std.fmt.bufPrint(hint_buf, "latex error: {s}", .{@errorName(err)}) catch null;
+    var info: ztex.parse.Info = undefined;
+    updatePreview(gpa, ctx, src, size_pt, kitty, w, &info) catch |err| {
+        formatErr(hint, hint_buf, err, &info, src);
         return false;
     };
     hint.* = null;
@@ -688,7 +747,7 @@ fn isCtrl(k: Key, cp: u21, letter: u8) bool {
 /// (drawable counts + pixel size) — the piped verification path.
 fn runPlain(gpa: std.mem.Allocator, io: std.Io, ctx: *const ztex.Context) !void {
     const src = default_formula;
-    var dl = try ztex.render(gpa, src, default_size_pt);
+    var dl = try ztex.render(gpa, src, default_size_pt, null);
     defer dl.deinit();
     const bmp = try rasterize(gpa, ctx, &dl);
     defer gpa.free(bmp.data);

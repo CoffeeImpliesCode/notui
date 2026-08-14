@@ -94,9 +94,16 @@ pub const Context = struct {
     /// Full pipeline: LaTeX source → draw list, measured from the real
     /// fonts via `self.fm`. The returned `DrawList`'s `text` primitives
     /// alias `src`, so `src` must outlive the draw list. `size_pt` is the
-    /// base font size in points.
-    pub fn render(self: *const Context, gpa: std.mem.Allocator, src: []const u8, size_pt: f32) !draw.DrawList {
-        var ast = try parse.parse(gpa, src);
+    /// base font size in points. On a parse error, `err_info` (when
+    /// non-null) is filled with the kind + span.
+    pub fn render(
+        self: *const Context,
+        gpa: std.mem.Allocator,
+        src: []const u8,
+        size_pt: f32,
+        err_info: ?*parse.Info,
+    ) !draw.DrawList {
+        var ast = try parse.parse(gpa, src, err_info);
         defer ast.deinit();
         var list = layout.box.BoxList.init(gpa);
         defer list.deinit();
@@ -132,7 +139,7 @@ test "context: init once, render many — font metrics match the LM table widths
     defer ctx.deinit();
     // x at 20pt: math-italic U+1D465 advance 0.572em × 20 = 11.44
     // row 5.28pt × 2). The font path answers through the metrics cache.
-    var out = try ctx.render(testing.allocator, "x", 20);
+    var out = try ctx.render(testing.allocator, "x", 20, null);
     defer out.deinit();
     try testing.expectEqual(@as(usize, 1), out.len());
     const t = out.items.items[0].text;
@@ -140,7 +147,7 @@ test "context: init once, render many — font metrics match the LM table widths
     try testing.expectEqual(@as(f32, 20), t.size);
     try testing.expectApproxEqAbs(@as(f32, 11.44), out.width, 0.001);
     // a second render reuses the same context (and its font metric cache)
-    var out2 = try ctx.render(testing.allocator, "x", 20);
+    var out2 = try ctx.render(testing.allocator, "x", 20, null);
     defer out2.deinit();
     try testing.expectApproxEqAbs(out.width, out2.width, 0.0001);
     // The per-(face, cp) cache holds ONE entry after two renders of "x":
@@ -155,7 +162,7 @@ test "context: unmapped codepoint falls back to the static table / estimate" {
     // to the static table's row (CM width kept for codepoints LM Math does
     // not cover) instead of the 0.5em nominal advance, and rendering still
     // produces a glyph box — graceful, no hole.
-    var out = try ctx.render(testing.allocator, "\\triangleright", 20);
+    var out = try ctx.render(testing.allocator, "\\triangleright", 20, null);
     defer out.deinit();
     try testing.expect(out.len() > 0);
     try testing.expectApproxEqAbs(@as(f32, 10.00004), out.width, 0.01);

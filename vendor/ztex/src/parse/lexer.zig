@@ -9,6 +9,7 @@
 const std = @import("std");
 const atom = @import("ztex.atom");
 const zg = @import("zg");
+const parse_err = @import("error.zig");
 
 pub const Error = std.mem.Allocator.Error || error{
     /// a backslash at end of input with nothing after it
@@ -18,7 +19,9 @@ pub const Error = std.mem.Allocator.Error || error{
 };
 
 /// Pre-lex `ast.src` into `ast.tokens`. Whitespace and comments are skipped.
-pub fn lex(ast: *atom.Ast) Error!void {
+/// On a lex error, `err_info` (when non-null) is filled with the kind and
+/// the offending byte span before the error is returned.
+pub fn lex(ast: *atom.Ast, err_info: ?*parse_err.Info) Error!void {
     const src = ast.src;
     var pos: usize = 0;
     while (pos < src.len) {
@@ -26,7 +29,7 @@ pub fn lex(ast: *atom.Ast) Error!void {
         switch (src[pos]) {
             ' ', '\t', '\r', '\n' => pos += 1,
             '%' => pos = commentEnd(src, pos),
-            '\\' => pos = try escape(ast, src, start),
+            '\\' => pos = try escape(ast, src, start, err_info),
             '{' => {
                 pos += 1;
                 try emit(ast, .l_group, start, pos);
@@ -54,7 +57,7 @@ pub fn lex(ast: *atom.Ast) Error!void {
                     if (src[pos] < 0x80) {
                         pos += 1;
                     } else {
-                        pos += try codepointLen(src, pos);
+                        pos += try codepointLen(src, pos, err_info);
                     }
                     try emit(ast, .char, cstart, pos);
                 }
@@ -83,33 +86,50 @@ fn commentEnd(src: []const u8, pos: usize) usize {
 /// Consume a control sequence at `start` (the backslash). The name is a
 /// maximal run of ascii letters, else a single codepoint (control symbol).
 /// Token span: backslash .. just past the name.
-fn escape(ast: *atom.Ast, src: []const u8, start: usize) Error!usize {
+fn escape(ast: *atom.Ast, src: []const u8, start: usize, err_info: ?*parse_err.Info) Error!usize {
     var pos = start + 1; // past the backslash
-    if (pos >= src.len) return error.DanglingEscape;
+    if (pos >= src.len) {
+        // The offending input is the dangling backslash itself.
+        if (err_info) |info| info.* = .{
+            .kind = .dangling_escape,
+            .span = .{ .start = @intCast(start), .end = @intCast(start + 1) },
+        };
+        return error.DanglingEscape;
+    }
     if (isAsciiLetter(src[pos])) {
         while (pos < src.len and isAsciiLetter(src[pos])) pos += 1;
     } else {
-        pos += try codepointLen(src, pos);
+        pos += try codepointLen(src, pos, err_info);
     }
     try emit(ast, .command, start, pos);
     return pos;
 }
 
 /// Byte length of the utf-8 codepoint at `pos`; the full sequence is validated.
-fn codepointLen(src: []const u8, pos: usize) Error!usize {
+fn codepointLen(src: []const u8, pos: usize, err_info: ?*parse_err.Info) Error!usize {
     // ASCII leading byte: always valid, always 1 byte — no decode needed.
     if (src[pos] < 0x80) return 1;
     const len = std.unicode.utf8ByteSequenceLength(src[pos]) catch
-        return error.InvalidUtf8;
-    if (pos + len > src.len) return error.InvalidUtf8;
+        return invalidUtf8(err_info, pos);
+    if (pos + len > src.len) return invalidUtf8(err_info, pos);
     // zg's bjoern.hoehrmann DFA decoder. A well-formed sequence decodes to a
     // codepoint consuming exactly `len` bytes; any ill-formed input is
     // replaced by a shorter maximal subpart, which we report as InvalidUtf8
     // (identical to the previous full-sequence validation).
     var cursor: zg.code_point.uoffset = @intCast(pos);
-    const cp = zg.code_point.decodeAtCursor(src, &cursor) orelse return error.InvalidUtf8;
-    if (cp.len != len) return error.InvalidUtf8;
+    const cp = zg.code_point.decodeAtCursor(src, &cursor) orelse return invalidUtf8(err_info, pos);
+    if (cp.len != len) return invalidUtf8(err_info, pos);
     return len;
+}
+
+/// Record an invalid-utf8 Info (span = the offending leading byte) and
+/// return the error value.
+fn invalidUtf8(err_info: ?*parse_err.Info, pos: usize) Error {
+    if (err_info) |info| info.* = .{
+        .kind = .invalid_utf8,
+        .span = .{ .start = @intCast(pos), .end = @intCast(pos + 1) },
+    };
+    return error.InvalidUtf8;
 }
 
 fn isAsciiLetter(c: u8) bool {
@@ -168,7 +188,7 @@ test {
 fn lexAst(src: []const u8) !atom.Ast {
     var a = atom.Ast.init(testing.allocator, src);
     errdefer a.deinit();
-    try lex(&a);
+    try lex(&a, null);
     return a;
 }
 
@@ -255,9 +275,14 @@ test "lexer: control symbol is a single codepoint" {
 test "lexer: dangling escape is an error" {
     var a = atom.Ast.init(testing.allocator, "abc\\");
     defer a.deinit();
-    try testing.expectError(error.DanglingEscape, lex(&a));
+    var err_info: parse_err.Info = undefined;
+    try testing.expectError(error.DanglingEscape, lex(&a, &err_info));
     // tokens before the error were emitted
     try testing.expectEqual(@as(usize, 3), a.tokens.items.len);
+    // the offending input is the dangling backslash itself
+    try testing.expectEqual(parse_err.Kind.dangling_escape, err_info.kind);
+    try testing.expectEqual(@as(u32, 3), err_info.span.start);
+    try testing.expectEqual(@as(u32, 4), err_info.span.end);
 }
 
 test "lexer: utf-8 codepoint keeps its byte span" {
@@ -271,7 +296,11 @@ test "lexer: utf-8 codepoint keeps its byte span" {
 test "lexer: invalid utf-8 is an error" {
     var a = atom.Ast.init(testing.allocator, "\xff");
     defer a.deinit();
-    try testing.expectError(error.InvalidUtf8, lex(&a));
+    var err_info: parse_err.Info = undefined;
+    try testing.expectError(error.InvalidUtf8, lex(&a, &err_info));
+    try testing.expectEqual(parse_err.Kind.invalid_utf8, err_info.kind);
+    try testing.expectEqual(@as(u32, 0), err_info.span.start);
+    try testing.expectEqual(@as(u32, 1), err_info.span.end);
 }
 
 test "lexer: scanUntilStructural matches the scalar reference" {

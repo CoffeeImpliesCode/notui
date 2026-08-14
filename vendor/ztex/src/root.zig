@@ -20,9 +20,15 @@ pub const Context = context.Context;
 /// Full pipeline: LaTeX source → draw list (SVG-style primitives).
 ///
 /// The returned `DrawList`'s `text` primitives alias `src`, so `src` must
-/// outlive the draw list. `size_pt` is the base font size in points.
-pub fn render(gpa: std.mem.Allocator, src: []const u8, size_pt: f32) !draw.DrawList {
-    var ast = try parse.parse(gpa, src);
+/// outlive the draw list. `size_pt` is the base font size in points. On a
+/// parse error, `err_info` (when non-null) is filled with the kind + span.
+pub fn render(
+    gpa: std.mem.Allocator,
+    src: []const u8,
+    size_pt: f32,
+    err_info: ?*parse.Info,
+) !draw.DrawList {
+    var ast = try parse.parse(gpa, src, err_info);
     defer ast.deinit();
     return layout.render(gpa, &ast, ast.root, size_pt);
 }
@@ -37,7 +43,7 @@ const testing = std.testing;
 
 test "facade: render produces drawables with provenance" {
     const src = "\\frac{1}{2}+x";
-    var out = try render(testing.allocator, src, 20);
+    var out = try render(testing.allocator, src, 20, null);
     defer out.deinit();
     try testing.expect(out.len() > 0);
     // the fraction bar is a rect; plus the char/frac text primitives
@@ -57,7 +63,7 @@ test "facade: render produces drawables with provenance" {
 
 test "facade: frac renders a rect rule and glyphs" {
     const src = "\\frac{1}{2}";
-    var out = try render(testing.allocator, src, 10);
+    var out = try render(testing.allocator, src, 10, null);
     defer out.deinit();
     var saw_rect = false;
     var saw_text = false;
@@ -74,7 +80,7 @@ test "facade: frac renders a rect rule and glyphs" {
 
 test "facade: text renders glyphs with source spans" {
     const src = "\\text{hi}";
-    var out = try render(testing.allocator, src, 10);
+    var out = try render(testing.allocator, src, 10, null);
     defer out.deinit();
     try testing.expectEqual(@as(usize, 2), out.len());
     const t0 = out.items.items[0].text;

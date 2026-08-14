@@ -8,6 +8,7 @@
 const std = @import("std");
 const atom = @import("ztex.atom");
 const lexer = @import("lexer.zig");
+const parse_err = @import("error.zig");
 
 pub const Error = std.mem.Allocator.Error || error{
     UnexpectedRGroup,
@@ -27,13 +28,14 @@ pub const Error = std.mem.Allocator.Error || error{
     MismatchedEnd,
     /// \begin{...} never closed by \end{...} (or \end missing its name).
     UnclosedEnvironment,
-    /// Recursion-depth cap exceeded while parsing a deeply nested row.
+    /// Recursion guard tripped (deeply nested input).
     StackOverflow,
 };
 
-/// Cap on parseRow recursion depth; deeply nested groups/environments bail
-/// out with error.StackOverflow instead of overflowing the call stack.
-const max_row_depth = 512;
+/// Parse rows recursively (groups, scripts, mathstyle); `max_row_depth`
+/// bounds the nesting so deeply nested input fails with StackOverflow
+/// instead of overflowing the call stack.
+const max_row_depth: u32 = 256;
 
 /// Opcode for each supported command name; `cmd_map` returns one of these and
 /// `parseCommand`'s switch applies the command's effect.
@@ -137,6 +139,14 @@ const Command = enum {
     /// style-dependent leading \mkern (18mu display / 8mu otherwise)
     pmod,
     pod,
+    /// \bmod: amsmath's binary mod — a row ['5mu space, roman "mod" word,
+    /// 5mu space'] (the \mskip-\medmuskip\mkern5mu dance around the
+    /// \mathbin{mod} nets to 5mu on each side; see bmod()).
+    bmod,
+    /// \mod{arg}: amsmath's display-style mod — a row [roman "mod" word,
+    /// 6mu space, arg] with a style-dependent leading \mkern (18mu display /
+    /// 12mu otherwise; see mod()).
+    mod,
     /// \begin{env}...\end{env}: a math environment (matrix family, cases,
     /// aligned, array) — parsed by parseBegin into a `.env` atom.
     begin,
@@ -246,8 +256,11 @@ const cmd_map = std.StaticStringMap(Command).initComptime(&[_]struct { []const u
     .{ "Pr", .opname },
     .{ "hom", .opname },
     .{ "deg", .opname },
-    .{ "mod", .opname },
-    .{ "bmod", .opname },
+    // \mod and \bmod are NOT \mathop words: \mod takes an argument and a
+    // style-dependent leading \mkern, \bmod is a \mathbin with 5mu kerns
+    // (see bmod()/mod()).
+    .{ "mod", .mod },
+    .{ "bmod", .bmod },
 });
 
 /// \displaystyle \textstyle \scriptstyle \scriptscriptstyle → forced math
@@ -438,7 +451,7 @@ const symbol_map = std.StaticStringMap(u21).initComptime(&[_]struct { []const u8
     .{ "ldots", 0x2026 },
     .{ "cdots", 0x22EF },
     .{ "vdots", 0x22EE },
-    .{ "ddots", 0x22F0 },
+    .{ "ddots", 0x22F1 },
     .{ "ell", 0x2113 },
     .{ "Re", 0x211C },
     .{ "Im", 0x2111 },
@@ -532,6 +545,20 @@ const pmod_row_data: u32 = 4;
 /// the leading \mkern).
 const pod_row_data: u32 = 5;
 
+/// The `data` a \bmod row node carries (children [5mu space, roman "mod"
+/// word, 5mu space]) so layout routes it through layoutBmod — the pieces
+/// placed back to back with the two 5mu kerns (amsmath's \bmod dance
+/// \mskip-\medmuskip\mkern5mu\mathbin{mod}\penalty900\mkern5mu
+/// \mskip-\medmuskip nets to 5mu on each side once the ord↔bin glue is
+/// summed) — instead of the ordinary row path.
+const bmod_row_data: u32 = 6;
+
+/// The `data` a \mod row node carries (children [roman "mod" word, 6mu
+/// space, arg]) so layout routes it through layoutMod — the
+/// style-dependent leading \mkern (18mu display / 12mu otherwise) plus the
+/// fixed \mkern6mu mod-arg gap — instead of the ordinary row path.
+const mod_row_data: u32 = 7;
+
 /// Relation codepoint → its pre-composed negated form, for \not<relation>.
 /// unicode-math's \not command uses the pre-composed glyph when one exists
 /// (verified against the XeTeX reference: \not\in → U+2209, \not\leq →
@@ -578,11 +605,25 @@ pub const Parser = struct {
     /// .delimited mode): \middle is only valid there (TeX). parseLeftRight
     /// increments before the interior and decrements after.
     delim_depth: u32 = 0,
-    /// Current parseRow recursion depth; capped by max_row_depth.
+    /// parseRow nesting depth; the depth counter doubles as the stack
+    /// guard (zbc wants recursive parse fns to call an explicit guard).
     row_depth: u32 = 0,
+    /// Caller-provided parse-error context: filled (when non-null) with the
+    /// kind + offending span immediately before any error is returned.
+    err_info: ?*parse_err.Info = null,
 
-    pub fn init(gpa: std.mem.Allocator, src: []const u8, tokens: []const atom.Token) Parser {
-        return .{ .gpa = gpa, .src = src, .tokens = tokens };
+    /// Safe to recurse one more parseRow level (zbc stack guard).
+    fn isSafeToRecurse(self: *const Parser) bool {
+        return self.row_depth < max_row_depth;
+    }
+
+    pub fn init(
+        gpa: std.mem.Allocator,
+        src: []const u8,
+        tokens: []const atom.Token,
+        err_info: ?*parse_err.Info,
+    ) Parser {
+        return .{ .gpa = gpa, .src = src, .tokens = tokens, .err_info = err_info };
     }
 
     fn atEnd(self: *const Parser) bool {
@@ -601,18 +642,60 @@ pub const Parser = struct {
         return t;
     }
 
-    /// Whether another parseRow recursion level is safe: the recursion
-    /// depth counter is below its cap. Zig 0.16 std has no stack_check
-    /// API, so the depth counter doubles as the stack guard (zbc wants
-    /// recursive parse fns to call an explicit guard).
-    fn isSafeToRecurse(self: *const Parser) bool {
-        return self.row_depth < max_row_depth;
+    /// Fill the caller's Info (when provided) with a kind + span.
+    fn setErr(self: *Parser, kind: parse_err.Kind, span: atom.Span) void {
+        if (self.err_info) |info| info.* = .{ .kind = kind, .span = span };
+    }
+
+    /// Record the error context and return the matching error-set value.
+    /// Every error-return site goes through here, so the error VALUES are
+    /// unchanged (`expectError` still sees error.Xxx) and the Info is always
+    /// filled before the caller's `catch` observes the failure. This switch
+    /// is the parser's kind→error mapping (the lexer's two kinds never
+    /// reach the parser — `fail` is only called with the 11 parser kinds).
+    fn fail(self: *Parser, kind: parse_err.Kind, span: atom.Span) Error {
+        self.setErr(kind, span);
+        return switch (kind) {
+            .unexpected_r_group => error.UnexpectedRGroup,
+            .unexpected_script => error.UnexpectedScript,
+            .double_script => error.DoubleScript,
+            .unknown_command => error.UnknownCommand,
+            .missing_argument => error.MissingArgument,
+            .missing_script => error.MissingScript,
+            .unclosed_group => error.UnclosedGroup,
+            .unexpected_middle => error.UnexpectedMiddle,
+            .unknown_environment => error.UnknownEnvironment,
+            .mismatched_end => error.MismatchedEnd,
+            .unclosed_environment => error.UnclosedEnvironment,
+            .dangling_escape, .invalid_utf8 => unreachable, // lexer-only kinds
+        };
+    }
+
+    /// Span of the token at `pos`, or a zero-width span at end of source
+    /// (for "expected X but hit end of input" errors).
+    fn spanAt(self: *const Parser, pos: usize) atom.Span {
+        if (pos < self.tokens.len) {
+            const t = self.tokens[pos];
+            return .{ .start = t.start, .end = t.end };
+        }
+        const end: u32 = @intCast(self.src.len);
+        return .{ .start = end, .end = end };
+    }
+
+    /// Span of the CURRENT token (or zero-width at EOF).
+    fn curSpan(self: *const Parser) atom.Span {
+        return self.spanAt(self.pos);
+    }
+
+    /// Span of a token value (from peek/advance).
+    fn spanOf(t: atom.Token) atom.Span {
+        return .{ .start = t.start, .end = t.end };
     }
 
     /// Parse the whole token table into a row atom (the root).
     pub fn parse(self: *Parser, ast: *atom.Ast) Error!u32 {
         const root = try self.parseRow(ast, .top);
-        if (!self.atEnd()) return error.UnexpectedRGroup;
+        if (!self.atEnd()) return self.fail(.unexpected_r_group, self.curSpan());
         return root;
     }
 
@@ -665,10 +748,10 @@ pub const Parser = struct {
         while (self.peek()) |t| {
             switch (t.tag) {
                 .r_group => {
-                    if (mode == .top) return error.UnexpectedRGroup;
+                    if (mode == .top) return self.fail(.unexpected_r_group, spanOf(t));
                     break;
                 },
-                .sup, .sub => return error.UnexpectedScript,
+                .sup, .sub => return self.fail(.unexpected_script, spanOf(t)),
                 .command => {
                     const nm = self.src[t.start + 1 .. t.end];
                     if (mode == .delimited and std.mem.eql(u8, nm, "right")) break;
@@ -714,7 +797,7 @@ pub const Parser = struct {
                         std.mem.eql(u8, nm, "over") or
                         std.mem.eql(u8, nm, "choose"))
                     {
-                        if (frac_line != null) return error.MissingArgument;
+                        if (frac_line != null) return self.fail(.missing_argument, spanOf(t));
                         frac_tok = @intCast(self.pos);
                         _ = self.advance(); // consume the delimiter command
                         frac_line = std.mem.eql(u8, nm, "over");
@@ -776,6 +859,14 @@ pub const Parser = struct {
     /// superscript (TeX: a noad carries both), while `x'^2` still errors
     /// (DoubleScript — TeX's "Double superscript") because the `^2` is left
     /// as a row-leading script.
+    ///
+    /// A trailing prime on an ALREADY-SCRIPTED atom merges into the SAME
+    /// script node (TeX: `f_2'` is one noad with sub 2 AND sup ′, so the
+    /// prime raises by the char-nucleus sup1 floor, not by the script
+    /// box's height − supdrop). A script that already has a superscript
+    /// (`x^2'`, `x_2^3'`) errors — TeX's "Double superscript". The
+    /// merge rewrites the script node with children [base, prime, sub]
+    /// (superflat contiguity: the new node is a fresh pool entry).
     fn parseAtom(self: *Parser, ast: *atom.Ast) Error!u32 {
         const base = try self.parseSingleAtom(ast);
         const result = try self.parseScripts(ast, base);
@@ -792,6 +883,25 @@ pub const Parser = struct {
         const prime = try ast.createLeaf(.char, first_prime_tok, @intCast(prime_count), cp);
         const rn = ast.node(result);
         const pn = ast.node(prime);
+        if (rn.tag == .script) {
+            // Merge into the existing script: [base, sup?, sub?] — a prime
+            // fills the sup slot. A sup already present is TeX's double
+            // superscript.
+            if ((rn.data & atom.ScriptBits.sup) != 0)
+                return self.fail(.double_script, self.curSpan());
+            const sb = ast.child(result, 0);
+            const sub = ast.child(result, rn.num_children - 1);
+            const children = [_]atom.Node{ ast.node(sb), pn, ast.node(sub) };
+            const num_tokens = (first_prime_tok + @as(u32, @intCast(prime_count))) -
+                ast.node(sb).first_token;
+            return ast.createNode(
+                .script,
+                ast.node(sb).first_token,
+                num_tokens,
+                &children,
+                atom.ScriptBits.sup | atom.ScriptBits.sub,
+            );
+        }
         const children = [_]atom.Node{ rn, pn };
         const num_tokens = (first_prime_tok + @as(u32, @intCast(prime_count))) - rn.first_token;
         return ast.createNode(.script, rn.first_token, num_tokens, &children, atom.ScriptBits.sup);
@@ -799,7 +909,7 @@ pub const Parser = struct {
 
     /// Parse exactly one base atom (no scripts).
     fn parseSingleAtom(self: *Parser, ast: *atom.Ast) Error!u32 {
-        const t = self.advance() orelse return error.MissingScript;
+        const t = self.advance() orelse return self.fail(.missing_script, self.spanAt(self.pos));
         return switch (t.tag) {
             .char => self.makeChar(ast),
             .l_group => self.parseGroup(ast),
@@ -807,8 +917,8 @@ pub const Parser = struct {
                 const name = self.src[t.start + 1 .. t.end];
                 break :blk self.parseCommand(ast, name);
             },
-            .r_group => error.UnexpectedRGroup,
-            .sup, .sub => error.UnexpectedScript,
+            .r_group => self.fail(.unexpected_r_group, spanOf(t)),
+            .sup, .sub => self.fail(.unexpected_script, spanOf(t)),
         };
     }
 
@@ -816,7 +926,9 @@ pub const Parser = struct {
     fn parseGroup(self: *Parser, ast: *atom.Ast) Error!u32 {
         const open_tok: u32 = @intCast(self.pos - 1);
         const inner = try self.parseRow(ast, .group);
-        _ = self.advance() orelse return error.UnclosedGroup; // consume }
+        // Unclosed group: point at the group's opening brace.
+        _ = self.advance() orelse
+            return self.fail(.unclosed_group, self.spanAt(open_tok)); // consume }
         const inode = ast.node(inner);
         const num_tokens = (inode.first_token + inode.num_tokens) - open_tok + 1;
         const children = [_]atom.Node{ast.node(inner)};
@@ -864,12 +976,12 @@ pub const Parser = struct {
                 }
             }
             if (t.tag == .sup) {
-                if (sup != null) return error.DoubleScript;
+                if (sup != null) return self.fail(.double_script, spanOf(t));
                 _ = self.advance();
                 sup = try self.parseScriptArg(ast);
                 last_tok = endOf(ast, sup.?);
             } else if (t.tag == .sub) {
-                if (sub != null) return error.DoubleScript;
+                if (sub != null) return self.fail(.double_script, spanOf(t));
                 _ = self.advance();
                 sub = try self.parseScriptArg(ast);
                 last_tok = endOf(ast, sub.?);
@@ -889,7 +1001,8 @@ pub const Parser = struct {
 
     /// The content of one script: a single atom, or a braced group.
     fn parseScriptArg(self: *Parser, ast: *atom.Ast) Error!u32 {
-        const t = self.peek() orelse return error.MissingScript;
+        // Missing script: point at the position where the field was expected.
+        const t = self.peek() orelse return self.fail(.missing_script, self.spanAt(self.pos));
         if (t.tag == .l_group) {
             _ = self.advance(); // consume `{` before parseGroup
             return self.parseGroup(ast);
@@ -915,11 +1028,13 @@ pub const Parser = struct {
 
     /// A required braced argument; returns the inner atom.
     fn parseRequiredArg(self: *Parser, ast: *atom.Ast) Error!u32 {
-        const t = self.peek() orelse return error.MissingArgument;
-        if (t.tag != .l_group) return error.MissingArgument;
+        const open_tok: u32 = @intCast(self.pos);
+        const t = self.peek() orelse return self.fail(.missing_argument, self.spanAt(self.pos));
+        if (t.tag != .l_group) return self.fail(.missing_argument, spanOf(t));
         _ = self.advance();
         const inner = try self.parseRow(ast, .group);
-        _ = self.advance() orelse return error.UnclosedGroup;
+        // Unclosed group: point at the argument's opening brace.
+        _ = self.advance() orelse return self.fail(.unclosed_group, self.spanAt(open_tok));
         return inner;
     }
 
@@ -934,7 +1049,7 @@ pub const Parser = struct {
             // Single-glyph symbols (\alpha, \leq, \infty, ...): a char leaf
             // whose data carries the codepoint, exactly like \cdot.
             if (symbol_map.get(name)) |cp| return self.symbol(ast, cmd_tok, cp);
-            return error.UnknownCommand;
+            return self.fail(.unknown_command, self.spanAt(cmd_tok));
         };
         return switch (cmd) {
             .space_comma => self.space(ast, cmd_tok, 0.166),
@@ -1001,7 +1116,7 @@ pub const Parser = struct {
             .op_oint => self.op(ast, cmd_tok, .oint),
             .opname => self.opname(ast, cmd_tok, name),
             .left => self.parseLeftRight(ast, cmd_tok),
-            .right => error.UnexpectedRGroup,
+            .right => self.fail(.unexpected_r_group, self.spanAt(cmd_tok)),
             .big => self.fixedDelim(ast, cmd_tok, 1),
             .Big => self.fixedDelim(ast, cmd_tok, 2),
             .bigg => self.fixedDelim(ast, cmd_tok, 3),
@@ -1024,6 +1139,8 @@ pub const Parser = struct {
             .substack => self.substack(ast, cmd_tok),
             .pmod => self.pmod(ast, cmd_tok, true),
             .pod => self.pmod(ast, cmd_tok, false),
+            .bmod => self.bmod(ast, cmd_tok),
+            .mod => self.mod(ast, cmd_tok),
             .begin => self.parseBegin(ast, cmd_tok),
         };
     }
@@ -1242,17 +1359,17 @@ pub const Parser = struct {
     /// group yields null (no delimiter). `\genfrac{...}{.}...` — a `.` —
     /// also yields null, like `\left.`.
     fn parseGenfracDelim(self: *Parser) Error!?Delimiter {
-        const t = self.peek() orelse return error.MissingArgument;
-        if (t.tag != .l_group) return error.MissingArgument;
+        const t = self.peek() orelse return self.fail(.missing_argument, self.spanAt(self.pos));
+        if (t.tag != .l_group) return self.fail(.missing_argument, spanOf(t));
         _ = self.advance(); // consume {
-        const n = self.peek() orelse return error.MissingArgument;
+        const n = self.peek() orelse return self.fail(.missing_argument, self.spanAt(self.pos));
         if (n.tag == .r_group) {
             _ = self.advance(); // consume }
             return null;
         }
         const d = try self.parseDelimiter();
-        const c = self.peek() orelse return error.MissingArgument;
-        if (c.tag != .r_group) return error.MissingArgument;
+        const c = self.peek() orelse return self.fail(.missing_argument, self.spanAt(self.pos));
+        if (c.tag != .r_group) return self.fail(.missing_argument, spanOf(c));
         _ = self.advance(); // consume }
         return d;
     }
@@ -1263,16 +1380,17 @@ pub const Parser = struct {
     /// units are accepted (a bare number means pt); negative thicknesses
     /// clamp to 0 (no rule).
     fn parseGenfracThickness(self: *Parser) Error!f32 {
-        const t = self.peek() orelse return error.MissingArgument;
-        if (t.tag != .l_group) return error.MissingArgument;
+        const t = self.peek() orelse return self.fail(.missing_argument, self.spanAt(self.pos));
+        if (t.tag != .l_group) return self.fail(.missing_argument, spanOf(t));
+        const open_tok: u32 = @intCast(self.pos);
         _ = self.advance(); // consume {
         const start: u32 = @intCast(self.pos);
         while (self.peek()) |c| {
             if (c.tag == .r_group) break;
             _ = self.advance();
         }
-        const c = self.peek() orelse return error.UnclosedGroup;
-        if (c.tag != .r_group) return error.UnclosedGroup;
+        const c = self.peek() orelse return self.fail(.unclosed_group, self.spanAt(open_tok));
+        if (c.tag != .r_group) return self.fail(.unclosed_group, self.spanAt(open_tok));
         const end: u32 = @intCast(self.pos);
         _ = self.advance(); // consume }
         if (end <= start) return 0;
@@ -1281,7 +1399,9 @@ pub const Parser = struct {
         var txt = self.src[first..last];
         if (txt.len >= 2 and std.mem.eql(u8, txt[txt.len - 2 ..], "pt")) txt = txt[0 .. txt.len - 2];
         if (txt.len == 0) return 0;
-        const v = std.fmt.parseFloat(f32, txt) catch return error.MissingArgument;
+        // The span covers the unparseable dimension text.
+        const bad: atom.Span = .{ .start = first, .end = last };
+        const v = std.fmt.parseFloat(f32, txt) catch return self.fail(.missing_argument, bad);
         return @max(v, 0);
     }
 
@@ -1289,19 +1409,19 @@ pub const Parser = struct {
     /// Mapping (see genfrac): 0 → display, 1 → text, 2 → script, anything
     /// else → scriptscript (amsmath's \ifcase fall-through).
     fn parseGenfracStyle(self: *Parser) Error!?atom.MathStyle {
-        const t = self.peek() orelse return error.MissingArgument;
-        if (t.tag != .l_group) return error.MissingArgument;
+        const t = self.peek() orelse return self.fail(.missing_argument, self.spanAt(self.pos));
+        if (t.tag != .l_group) return self.fail(.missing_argument, spanOf(t));
         _ = self.advance(); // consume {
-        const n = self.peek() orelse return error.MissingArgument;
+        const n = self.peek() orelse return self.fail(.missing_argument, self.spanAt(self.pos));
         if (n.tag == .r_group) {
             _ = self.advance(); // consume }
             return null;
         }
-        if (n.tag != .char) return error.MissingArgument;
+        if (n.tag != .char) return self.fail(.missing_argument, spanOf(n));
         const ch = self.src[n.start];
         _ = self.advance();
-        const c = self.peek() orelse return error.MissingArgument;
-        if (c.tag != .r_group) return error.MissingArgument;
+        const c = self.peek() orelse return self.fail(.missing_argument, self.spanAt(self.pos));
+        if (c.tag != .r_group) return self.fail(.missing_argument, spanOf(c));
         _ = self.advance(); // consume }
         return switch (ch) {
             '0' => .display,
@@ -1332,13 +1452,14 @@ pub const Parser = struct {
     }
 
     fn text(self: *Parser, ast: *atom.Ast, _: u32) Error!u32 {
-        const open = self.advance() orelse return error.MissingArgument;
-        if (open.tag != .l_group) return error.MissingArgument;
+        const open = self.advance() orelse return self.fail(.missing_argument, self.spanAt(self.pos));
+        if (open.tag != .l_group) return self.fail(.missing_argument, spanOf(open));
         const open_tok: u32 = @intCast(self.pos - 1);
         var depth: u32 = 1;
         var close_tok: u32 = undefined;
         while (depth > 0) {
-            const t = self.advance() orelse return error.UnclosedGroup;
+            // Unclosed \text group: point at its opening brace.
+            const t = self.advance() orelse return self.fail(.unclosed_group, self.spanAt(open_tok));
             if (t.tag == .l_group) {
                 depth += 1;
             } else if (t.tag == .r_group) {
@@ -1361,8 +1482,9 @@ pub const Parser = struct {
             if (t.tag == .char and self.src[t.start] == '[') {
                 _ = self.advance(); // consume `[`
                 degree = try self.parseUntilRBracket(ast);
-                const close = self.advance() orelse return error.MissingArgument;
-                if (close.tag != .char or self.src[close.start] != ']') return error.MissingArgument;
+                const close = self.advance() orelse return self.fail(.missing_argument, self.spanAt(self.pos));
+                if (close.tag != .char or self.src[close.start] != ']')
+                    return self.fail(.missing_argument, spanOf(close));
             }
         }
         const radicand = try self.parseRequiredArg(ast);
@@ -1479,8 +1601,9 @@ pub const Parser = struct {
     /// baseline gaps. Scripts after the stack (`\substack{...}^2`) attach
     /// via the usual parseAtom path, like any base.
     fn substack(self: *Parser, ast: *atom.Ast, cmd_tok: u32) Error!u32 {
-        const t = self.peek() orelse return error.MissingArgument;
-        if (t.tag != .l_group) return error.MissingArgument;
+        const t = self.peek() orelse return self.fail(.missing_argument, self.spanAt(self.pos));
+        if (t.tag != .l_group) return self.fail(.missing_argument, spanOf(t));
+        const open_tok: u32 = @intCast(self.pos);
         _ = self.advance(); // consume `{`
         var lines: std.ArrayList(atom.Node) = .empty;
         defer lines.deinit(self.gpa);
@@ -1489,7 +1612,8 @@ pub const Parser = struct {
             const line = try self.parseRow(ast, .substack_line);
             const ln = ast.node(line);
             try lines.append(self.gpa, ln);
-            const nxt = self.peek() orelse return error.UnclosedGroup;
+            // Unclosed substack: point at its opening brace.
+            const nxt = self.peek() orelse return self.fail(.unclosed_group, self.spanAt(open_tok));
             if (nxt.tag == .r_group) {
                 close_tok = @intCast(self.pos);
                 _ = self.advance(); // consume `}`
@@ -1498,7 +1622,7 @@ pub const Parser = struct {
             // Otherwise the next token is the `\\` line separator (parseRow
             // stopped right at it).
             if (nxt.tag != .command or !std.mem.eql(u8, self.src[nxt.start + 1 .. nxt.end], "\\"))
-                return error.UnclosedGroup;
+                return self.fail(.unclosed_group, spanOf(nxt));
             _ = self.advance(); // consume `\\`
         }
         const num_tokens = (close_tok + 1) - cmd_tok;
@@ -1517,7 +1641,12 @@ pub const Parser = struct {
     /// \left..\right inside a cell all work.
     fn parseBegin(self: *Parser, ast: *atom.Ast, begin_tok: u32) Error!u32 {
         const name = try self.parseEnvName(ast);
-        const kind = env_kind_map.get(name) orelse return error.UnknownEnvironment;
+        const kind = env_kind_map.get(name) orelse {
+            // The offending input is the environment name itself.
+            const start: u32 = @intCast(@intFromPtr(name.ptr) - @intFromPtr(self.src.ptr));
+            const span: atom.Span = .{ .start = start, .end = start + @as(u32, @intCast(name.len)) };
+            return self.fail(.unknown_environment, span);
+        };
         var colspec: []const u8 = "";
         if (kind == .array) colspec = try self.parseColspec(ast);
         var children: std.ArrayList(atom.Node) = .empty;
@@ -1528,18 +1657,24 @@ pub const Parser = struct {
             const leaf = try ast.createLeaf(.char, begin_tok, 1, cp);
             try children.append(self.gpa, ast.node(leaf));
         }
-        const rows = try self.parseEnvBody(ast);
+        var rows = try self.parseEnvBody(ast);
+        defer rows.deinit(self.gpa);
         for (rows.items) |r| try children.append(self.gpa, r);
         if (envCloseDelim(kind)) |cp| {
             const leaf = try ast.createLeaf(.char, begin_tok, 1, cp);
             try children.append(self.gpa, ast.node(leaf));
         }
         // Expect the matching `\end` and verify the name.
-        const t = self.advance() orelse return error.UnclosedEnvironment;
+        const t = self.advance() orelse return self.fail(.unclosed_environment, self.spanAt(self.pos));
         if (t.tag != .command or !std.mem.eql(u8, self.src[t.start + 1 .. t.end], "end"))
-            return error.UnclosedEnvironment;
+            return self.fail(.unclosed_environment, spanOf(t));
         const end_name = try self.parseEnvName(ast);
-        if (!std.mem.eql(u8, end_name, name)) return error.MismatchedEnd;
+        if (!std.mem.eql(u8, end_name, name)) {
+            // The offending input is the mismatched \end name.
+            const start: u32 = @intCast(@intFromPtr(end_name.ptr) - @intFromPtr(self.src.ptr));
+            const span: atom.Span = .{ .start = start, .end = start + @as(u32, @intCast(end_name.len)) };
+            return self.fail(.mismatched_end, span);
+        }
         const num_tokens = @as(u32, @intCast(self.pos)) - begin_tok;
         return ast.createNode(.env, begin_tok, num_tokens, children.items, atom.envData(kind, colspec));
     }
@@ -1557,14 +1692,14 @@ pub const Parser = struct {
             const cell = try self.parseRow(ast, .env_cell);
             try cells.append(self.gpa, ast.node(cell));
             const nxt = self.peek();
-            if (nxt == null) return error.UnclosedEnvironment; // no \end
+            if (nxt == null) return self.fail(.unclosed_environment, self.spanAt(self.pos)); // no \end
             const t = nxt.?;
             switch (t.tag) {
-                .r_group => return error.UnexpectedRGroup, // stray } in the body
+                .r_group => return self.fail(.unexpected_r_group, spanOf(t)), // stray } in the body
                 .char => {
                     // `&` starts the next cell; anything else is a stray
                     // char parseRow left unparsed.
-                    if (self.src[t.start] != '&') return error.UnexpectedRGroup;
+                    if (self.src[t.start] != '&') return self.fail(.unexpected_r_group, spanOf(t));
                     _ = self.advance(); // consume `&`
                 },
                 .command => {
@@ -1588,17 +1723,18 @@ pub const Parser = struct {
                                     if (c.tag == .char and self.src[c.start] == ']') break;
                                     _ = self.advance();
                                 }
-                                const close = self.advance() orelse return error.MissingArgument;
+                                const close = self.advance() orelse
+                                    return self.fail(.missing_argument, self.spanAt(self.pos));
                                 if (close.tag != .char or self.src[close.start] != ']')
-                                    return error.MissingArgument;
+                                    return self.fail(.missing_argument, spanOf(close));
                             }
                         }
                         try self.finishEnvRow(ast, &rows, &cells);
                         continue;
                     }
-                    return error.UnexpectedRGroup;
+                    return self.fail(.unexpected_r_group, spanOf(t));
                 },
-                else => return error.UnexpectedRGroup,
+                else => return self.fail(.unexpected_r_group, spanOf(t)),
             }
         }
     }
@@ -1622,10 +1758,11 @@ pub const Parser = struct {
     /// The environment name after \begin/\end: `{name}` or bare letters
     /// (`\begin matrix`). Returns the name bytes (a slice of the source).
     fn parseEnvName(self: *Parser, _: *atom.Ast) Error![]const u8 {
-        const t = self.peek() orelse return error.MissingArgument;
+        const t = self.peek() orelse return self.fail(.missing_argument, self.spanAt(self.pos));
         var start_tok: u32 = undefined;
         var end_tok: u32 = undefined;
         if (t.tag == .l_group) {
+            const open_tok: u32 = @intCast(self.pos);
             _ = self.advance(); // consume `{`
             start_tok = @intCast(self.pos);
             while (self.peek()) |c| {
@@ -1633,8 +1770,8 @@ pub const Parser = struct {
                 _ = self.advance();
             }
             end_tok = @intCast(self.pos);
-            const close = self.advance() orelse return error.UnclosedGroup;
-            if (close.tag != .r_group) return error.MissingArgument;
+            const close = self.advance() orelse return self.fail(.unclosed_group, self.spanAt(open_tok));
+            if (close.tag != .r_group) return self.fail(.missing_argument, spanOf(close));
         } else if (t.tag == .char and isEnvNameChar(self.src[t.start])) {
             start_tok = @intCast(self.pos);
             while (self.peek()) |c| {
@@ -1643,37 +1780,32 @@ pub const Parser = struct {
             }
             end_tok = @intCast(self.pos);
         } else {
-            return error.MissingArgument;
+            return self.fail(.missing_argument, spanOf(t));
         }
-        if (end_tok == start_tok) return error.MissingArgument; // empty name
-        if (end_tok > 0) {
-            const st = self.tokens[start_tok];
-            const et = self.tokens[end_tok - 1];
-            return self.src[st.start..et.end];
-        }
-        return error.MissingArgument;
+        if (end_tok <= start_tok) return self.fail(.missing_argument, spanOf(t)); // empty name
+        const st = self.tokens[start_tok];
+        const et = self.tokens[end_tok - 1];
+        return self.src[st.start..et.end];
     }
 
     /// The array column spec: a required braced string of l/c/r/| chars
     /// (`\begin{array}{l|r}`). Returns the bytes between the braces.
     fn parseColspec(self: *Parser, _: *atom.Ast) Error![]const u8 {
-        const t = self.advance() orelse return error.MissingArgument;
-        if (t.tag != .l_group) return error.MissingArgument;
+        const t = self.advance() orelse return self.fail(.missing_argument, self.spanAt(self.pos));
+        if (t.tag != .l_group) return self.fail(.missing_argument, spanOf(t));
+        const open_tok: u32 = @intCast(self.pos - 1);
         const start_tok: u32 = @intCast(self.pos);
         while (self.peek()) |c| {
             if (c.tag != .char) break;
             _ = self.advance();
         }
         const end_tok: u32 = @intCast(self.pos);
-        const close = self.advance() orelse return error.UnclosedGroup;
-        if (close.tag != .r_group) return error.MissingArgument;
-        if (end_tok == start_tok) return error.MissingArgument;
-        if (end_tok > 0) {
-            const st = self.tokens[start_tok];
-            const et = self.tokens[end_tok - 1];
-            return self.src[st.start..et.end];
-        }
-        return error.MissingArgument;
+        const close = self.advance() orelse return self.fail(.unclosed_group, self.spanAt(open_tok));
+        if (close.tag != .r_group) return self.fail(.missing_argument, spanOf(close));
+        if (end_tok <= start_tok) return self.fail(.missing_argument, spanOf(t));
+        const st = self.tokens[start_tok];
+        const et = self.tokens[end_tok - 1];
+        return self.src[st.start..et.end];
     }
 
     /// \pmod{n} / \pod{n}: amsmath's parenthesized-mod constructs (the
@@ -1710,6 +1842,51 @@ pub const Parser = struct {
         try children.append(self.gpa, ast.node(close));
         const num_tokens = (an.first_token + an.num_tokens) - cmd_tok;
         return ast.createNode(.row, cmd_tok, num_tokens, children.items, if (with_mod) pmod_row_data else pod_row_data);
+    }
+
+    /// \bmod: amsmath's binary mod. amsmath.sty:
+    ///   \def\bmod{\mskip-\medmuskip\mkern5mu\mathbin{\operator@font mod}
+    ///             \penalty900\mkern5mu\mskip-\medmuskip}
+    /// The ord↔bin glue TeX inserts around the \mathbin (4mu medmuskip) is
+    /// cancelled by the two \mskip-\medmuskip kerns, so the NET spacing is
+    /// exactly 5mu before and after the roman "mod" word (measured on the
+    /// XeTeX reference: `a \bmod 2` at 30pt has 8.334pt = 5mu on each
+    /// side). The parse result is a row marked bmod_row_data whose children
+    /// are [5mu space, opname "mod", 5mu space]; the row's role is ord (the
+    /// space leaves are ord), so layoutRow adds no inter-atom glue around
+    /// it and layoutBmod places the three pieces back to back.
+    fn bmod(self: *Parser, ast: *atom.Ast, cmd_tok: u32) Error!u32 {
+        const word = try self.opname(ast, cmd_tok, "mod");
+        const gap = try ast.createLeaf(.space, cmd_tok, 1, atom.emToFixed(5.0 / 18.0));
+        const wn = ast.node(word);
+        const gn = ast.node(gap);
+        const children = [_]atom.Node{ gn, wn, gn };
+        return ast.createNode(.row, cmd_tok, 1, &children, bmod_row_data);
+    }
+
+    /// \mod{arg}: amsmath's mod with its argument. amsmath.sty:
+    ///   \def\mod#1{\allowbreak \if@display\mkern18mu\else\mkern12mu\fi
+    ///              {\operator@font mod}\,\,#1}
+    /// so \mod = a style-dependent leading \mkern (18mu in display math,
+    /// 12mu in text/script/scriptscript — KaTeX's \mathchoice agrees:
+    /// 18mu display / 12mu otherwise) + the roman "mod" word + TWO thin
+    /// spaces (\, \, = 6mu) + the argument. The parse result is a row
+    /// marked mod_row_data whose children are [opname "mod", 6mu space,
+    /// arg]; layoutMod applies the leading \mkern and places the pieces
+    /// back to back (the composition's inter-atom glues are all zero in
+    /// TeX). The row's left role is forced to ord (the leading \mkern is
+    /// not a noad — TeX's first atom of the construct is the ord "mod"
+    /// group, so the preceding atom gets NO glue).
+    fn mod(self: *Parser, ast: *atom.Ast, cmd_tok: u32) Error!u32 {
+        const arg = try self.parseScriptArg(ast); // single atom or braced group
+        const an = ast.node(arg);
+        const word = try self.opname(ast, cmd_tok, "mod");
+        // \,\,\! — the two thin spaces between the word and the argument
+        // (6/18 em, exactly like \pmod's \mkern6mu).
+        const gap = try ast.createLeaf(.space, cmd_tok, 1, atom.emToFixed(6.0 / 18.0));
+        const children = [_]atom.Node{ ast.node(word), ast.node(gap), an };
+        const num_tokens = (an.first_token + an.num_tokens) - cmd_tok;
+        return ast.createNode(.row, cmd_tok, num_tokens, &children, mod_row_data);
     }
 
     /// Parse the \sqrt[n] degree: atoms until a `]` char at this row level.
@@ -1761,7 +1938,7 @@ pub const Parser = struct {
     /// covering the same req the { fence resolved). `\middle.` renders
     /// nothing, like `\big.`.
     fn middle(self: *Parser, ast: *atom.Ast, cmd_tok: u32) Error!u32 {
-        if (self.delim_depth == 0) return error.UnexpectedMiddle;
+        if (self.delim_depth == 0) return self.fail(.unexpected_middle, self.spanAt(cmd_tok));
         const d = try self.parseDelimiter();
         if (d == null) return self.space(ast, cmd_tok, 0);
         const dd = d.?;
@@ -1778,11 +1955,16 @@ pub const Parser = struct {
         self.delim_depth += 1;
         errdefer self.delim_depth -= 1;
         const inner = try self.parseRow(ast, .delimited);
-        self.delim_depth -= 1;
-        // expect the matching \right
-        const t = self.peek() orelse return error.UnclosedGroup;
+        // expect the matching \right — checked while the pair is still
+        // "open" (delim_depth 1), so an error here unwinds via the
+        // errdefer and the depth is NOT double-decremented. An unclosed
+        // \left points at the \left command itself (nothing was consumed
+        // after the opening delimiter), or at whatever stands in place of
+        // \right.
+        const t = self.peek() orelse return self.fail(.unclosed_group, self.spanAt(left_tok));
         if (t.tag != .command or !std.mem.eql(u8, self.src[t.start + 1 .. t.end], "right"))
-            return error.UnclosedGroup;
+            return self.fail(.unclosed_group, spanOf(t));
+        self.delim_depth -= 1;
         _ = self.advance(); // consume \right
         const close = try self.parseDelimiter();
         var children: std.ArrayList(atom.Node) = .empty;
@@ -1803,17 +1985,20 @@ pub const Parser = struct {
 
     /// Consume one delimiter after \left/\right; null for `\left.` / `\right.`.
     fn parseDelimiter(self: *Parser) Error!?Delimiter {
-        const t = self.advance() orelse return error.MissingArgument;
+        const t = self.advance() orelse return self.fail(.missing_argument, self.spanAt(self.pos));
         const tok: u32 = @intCast(self.pos - 1);
         return switch (t.tag) {
             .char => switch (self.src[t.start]) {
                 '.' => null,
                 '(', ')', '[', ']', '|' => .{ .cp = self.src[t.start], .tok = tok },
-                else => error.MissingArgument,
+                else => self.fail(.missing_argument, spanOf(t)),
             },
-            .command => .{ .cp = delim_map.get(self.src[t.start + 1 .. t.end]) orelse
-                return error.MissingArgument, .tok = tok },
-            else => error.MissingArgument,
+            .command => blk: {
+                const cp = delim_map.get(self.src[t.start + 1 .. t.end]) orelse
+                    return self.fail(.missing_argument, spanOf(t));
+                break :blk .{ .cp = cp, .tok = tok };
+            },
+            else => self.fail(.missing_argument, spanOf(t)),
         };
     }
 };
@@ -1883,8 +2068,8 @@ test {
 fn parseSrc(gpa: std.mem.Allocator, src: []const u8) !atom.Ast {
     var ast = atom.Ast.init(gpa, src);
     errdefer ast.deinit();
-    try lexer.lex(&ast);
-    var p = Parser.init(gpa, src, ast.tokens.items);
+    try lexer.lex(&ast, null);
+    var p = Parser.init(gpa, src, ast.tokens.items, null);
     ast.root = try p.parse(&ast);
     return ast;
 }
@@ -2478,4 +2663,119 @@ test "parser: middle inside a braced group within the pair is accepted" {
     const grow = ast.child(ast.child(inner, 0), 0);
     const mid = ast.node(ast.child(grow, 1));
     try testing.expect(mid.data & middle_marker != 0);
+}
+
+test "parser: substack splits the braced content on double backslash" {
+    var ast = try parseSrc(testing.allocator, "\\substack{i=1 \\\\ j=2}");
+    defer ast.deinit();
+    const st = ast.node(ast.child(ast.root, 0));
+    try testing.expectEqual(.substack, st.tag);
+    // two line children, each a row of three atoms (i, =, 1 / j, =, 2)
+    try testing.expectEqual(@as(u16, 2), st.num_children);
+    for (0..2) |i| {
+        const line = ast.node(ast.child(ast.child(ast.root, 0), i));
+        try testing.expectEqual(.row, line.tag);
+        try testing.expectEqual(@as(u16, 3), line.num_children);
+        try testing.expectEqual(.char, ast.node(ast.child(ast.child(ast.child(ast.root, 0), i), 0)).tag);
+    }
+}
+
+test "parser: substack allows scripts and trailing separators" {
+    // \substack{a^2 \\} → two lines, the second empty
+    var ast = try parseSrc(testing.allocator, "\\substack{a^2 \\\\}");
+    defer ast.deinit();
+    const st = ast.node(ast.child(ast.root, 0));
+    try testing.expectEqual(.substack, st.tag);
+    try testing.expectEqual(@as(u16, 2), st.num_children);
+    const first = ast.node(ast.child(ast.child(ast.root, 0), 0));
+    try testing.expectEqual(.row, first.tag);
+    try testing.expectEqual(@as(u16, 1), first.num_children); // the script atom
+    try testing.expectEqual(.script, ast.node(ast.child(ast.child(ast.child(ast.root, 0), 0), 0)).tag);
+    const second = ast.node(ast.child(ast.child(ast.root, 0), 1));
+    try testing.expectEqual(@as(u16, 0), second.num_children); // empty line
+}
+
+test "parser: substack requires a braced argument" {
+    try testing.expectError(error.MissingArgument, parseSrc(testing.allocator, "\\substack"));
+    try testing.expectError(error.MissingArgument, parseSrc(testing.allocator, "\\substack a"));
+}
+
+test "parser: pmod composes parens, roman mod word, 6mu space and arg" {
+    var ast = try parseSrc(testing.allocator, "a \\equiv b \\pmod{n}");
+    defer ast.deinit();
+    // root row [a, ≡, b, pmod-row]
+    const row = ast.node(ast.child(ast.root, 3));
+    try testing.expectEqual(.row, row.tag);
+    try testing.expectEqual(pmod_row_data, row.data);
+    try testing.expectEqual(@as(u16, 5), row.num_children); // (, mod, 6mu, n, )
+    const open = ast.node(ast.child(ast.child(ast.root, 3), 0));
+    try testing.expectEqual(.char, open.tag);
+    try testing.expectEqual(@as(u21, 0x28), @as(u21, @truncate(open.data))); // (
+    const word = ast.node(ast.child(ast.child(ast.root, 3), 1));
+    try testing.expectEqual(.opname, word.tag);
+    const gap = ast.node(ast.child(ast.child(ast.root, 3), 2));
+    try testing.expectEqual(.space, gap.tag);
+    try testing.expectApproxEqAbs(@as(f32, 6.0 / 18.0), atom.fixedToEm(gap.data), 0.001); // \mkern6mu
+    const close = ast.node(ast.child(ast.child(ast.root, 3), 4));
+    try testing.expectEqual(.char, close.tag);
+    try testing.expectEqual(@as(u21, 0x29), @as(u21, @truncate(close.data))); // )
+}
+
+test "parser: pod omits the mod word" {
+    var ast = try parseSrc(testing.allocator, "a \\pod{n}");
+    defer ast.deinit();
+    const row = ast.node(ast.child(ast.root, 1));
+    try testing.expectEqual(.row, row.tag);
+    try testing.expectEqual(pod_row_data, row.data);
+    try testing.expectEqual(@as(u16, 3), row.num_children); // (, n, )
+}
+
+test "parser: \\begin{pmatrix} builds an env with delimiters and rows" {
+    var ast = try parseSrc(testing.allocator, "\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}");
+    defer ast.deinit();
+    // root row → [env]
+    const env = ast.child(ast.root, 0);
+    const en = ast.node(env);
+    try testing.expectEqual(.env, en.tag);
+    // children: [open '(', row1, row2, close ')']
+    try testing.expectEqual(@as(u16, 4), en.num_children);
+    try testing.expectEqual(.char, ast.node(ast.child(env, 0)).tag);
+    try testing.expectEqual(.row, ast.node(ast.child(env, 1)).tag);
+    try testing.expectEqual(.row, ast.node(ast.child(env, 2)).tag);
+    try testing.expectEqual(.char, ast.node(ast.child(env, 3)).tag);
+    try testing.expectEqual(atom.EnvKind.pmatrix, atom.envKind(en.data));
+    // each row has two cell rows (cells are parsed as rows)
+    try testing.expectEqual(@as(u16, 2), ast.node(ast.child(env, 1)).num_children);
+    try testing.expectEqual(@as(u16, 2), ast.node(ast.child(env, 2)).num_children);
+    // the delimiter codepoints ride in data
+    try testing.expectEqual(@as(u32, 0x28), ast.node(ast.child(env, 0)).data);
+    try testing.expectEqual(@as(u32, 0x29), ast.node(ast.child(env, 3)).data);
+}
+
+test "parser: array packs the colspec and rules skip column slots" {
+    var ast = try parseSrc(testing.allocator, "\\begin{array}{l|r} a & b \\end{array}");
+    defer ast.deinit();
+    const env = ast.child(ast.root, 0);
+    const en = ast.node(env);
+    try testing.expectEqual(.env, en.tag);
+    try testing.expectEqual(atom.EnvKind.array, atom.envKind(en.data));
+    // spec [l, rule, r]: col 0 → l, col 1 → r, rule before col 1
+    try testing.expectEqual(@as(usize, 3), atom.envSpecCount(en.data));
+    try testing.expectEqual(@as(?u32, atom.EnvBits.col_l), atom.envColSpec(en.data, 0));
+    try testing.expectEqual(@as(?u32, atom.EnvBits.col_rule), atom.envColSpec(en.data, 1));
+    try testing.expectEqual(@as(?u32, atom.EnvBits.col_r), atom.envColSpec(en.data, 2));
+}
+
+test "parser: env errors" {
+    try testing.expectError(error.UnknownEnvironment, parseSrc(testing.allocator, "\\begin{foo} x \\end{foo}"));
+    try testing.expectError(error.MismatchedEnd, parseSrc(testing.allocator, "\\begin{pmatrix} a \\end{bmatrix}"));
+    try testing.expectError(error.UnclosedEnvironment, parseSrc(testing.allocator, "\\begin{pmatrix} a"));
+}
+
+test "parser: & outside an environment is an ordinary char" {
+    var ast = try parseSrc(testing.allocator, "a & b");
+    defer ast.deinit();
+    const root = ast.node(ast.root);
+    try testing.expectEqual(@as(u16, 3), root.num_children);
+    try testing.expectEqual(.char, ast.node(ast.child(ast.root, 1)).tag);
 }
