@@ -22,6 +22,58 @@ pub fn build(b: *std.Build) void {
         .enable_libffi = false,
     });
 
+    // ── vendored ztex (vendor/ztex) ──────────────────────
+    // A snapshot of ~/projects/ztex, wired exactly like its own
+    // build.zig (modules ztex.atom / ztex.parse / ztex.layout /
+    // ztex.svg / ztex facade). Changes live here locally — the upstream
+    // checkout is owned by other work and must not be touched. The
+    // formula example consumes the facade + its `font` re-export
+    // (outline extraction added in vendor/ztex/src/font.zig).
+    const ztex_atom = b.addModule("ztex.atom", .{
+        .root_source_file = b.path("vendor/ztex/src/atom.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const ztex_parse = b.addModule("ztex.parse", .{
+        .root_source_file = b.path("vendor/ztex/src/parse/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "ztex.atom", .module = ztex_atom },
+            .{ .name = "zg", .module = zg.module("zg") },
+        },
+    });
+    const ztex_layout = b.addModule("ztex.layout", .{
+        .root_source_file = b.path("vendor/ztex/src/layout/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "ztex.atom", .module = ztex_atom },
+            .{ .name = "zg", .module = zg.module("zg") },
+            .{ .name = "DisplayWidth", .module = zg.module("DisplayWidth") },
+            .{ .name = "Graphemes", .module = zg.module("Graphemes") },
+        },
+    });
+    const ztex_svg = b.addModule("ztex.svg", .{
+        .root_source_file = b.path("vendor/ztex/src/svg.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "ztex.layout", .module = ztex_layout },
+        },
+    });
+    const ztex = b.addModule("ztex", .{
+        .root_source_file = b.path("vendor/ztex/src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "ztex.atom", .module = ztex_atom },
+            .{ .name = "ztex.parse", .module = ztex_parse },
+            .{ .name = "ztex.layout", .module = ztex_layout },
+            .{ .name = "ztex.svg", .module = ztex_svg },
+        },
+    });
+
     // ── notui module ──────────────────────────
     const mod = b.addModule("notui", .{
         .root_source_file = b.path("src/root.zig"),
@@ -158,6 +210,40 @@ pub fn build(b: *std.Build) void {
     run_skript_repl_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_skript_repl_cmd.addArgs(args);
     run_skript_repl_step.dependOn(&run_skript_repl_cmd.step);
+
+    // ── formula TUI example ──────────────────────────
+    // LaTeX → ztex draw list → SIMD coverage rasterizer → kitty
+    // graphics. Imports the vendored ztex modules (facade + atom for
+    // the CharStyle ↔ face mapping).
+    const formula_tui = b.addExecutable(.{
+        .name = "example-formula-tui",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/formula_tui.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "notui", .module = mod },
+                .{ .name = "zg", .module = zg.module("zg") },
+                .{ .name = "DisplayWidth", .module = zg.module("DisplayWidth") },
+                .{ .name = "Graphemes", .module = zg.module("Graphemes") },
+                .{ .name = "ztex", .module = ztex },
+                .{ .name = "ztex.atom", .module = ztex_atom },
+                .{ .name = "ztex.parse", .module = ztex_parse },
+                .{ .name = "ztex.layout", .module = ztex_layout },
+                .{ .name = "ztex.svg", .module = ztex_svg },
+            },
+        }),
+    });
+    b.installArtifact(formula_tui);
+
+    const run_formula_tui_step = b.step(
+        "run-formula-tui",
+        "Run the LaTeX formula TUI example",
+    );
+    const run_formula_tui_cmd = b.addRunArtifact(formula_tui);
+    run_formula_tui_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_formula_tui_cmd.addArgs(args);
+    run_formula_tui_step.dependOn(&run_formula_tui_cmd.step);
 
     // ── unit tests ──────────────────────────
     const unit_tests = b.addTest(.{
