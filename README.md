@@ -172,3 +172,5 @@ zig build run-example-statusline < /dev/null | cat
   ([`src/coverage.zig`](src/coverage.zig)).
 - Open work, known gaps, and what closes them:
   [`NEXT.md`](NEXT.md).
+- What comes next, and the reference implementations it is derived from:
+  [`ROADMAP.md`](ROADMAP.md).

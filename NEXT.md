@@ -1,7 +1,10 @@
 # Open work
 
-Unmerged, unproven, or knowingly deferred. Each item names the gate that
-closes it; delete the item when that gate is green.
+The plan lives in [`ROADMAP.md`](ROADMAP.md): phases F (measurement), B
+(frame-pipeline correctness), C (scrollback ledger), D (input and widgets),
+E (content rendering), A (provenance), each item with its evidence and the
+check that closes it. This file holds the small, repo-local items that are not
+on the roadmap.
 
 ## Non-ASCII key text synthesis in the parser
 
