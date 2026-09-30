@@ -7,6 +7,7 @@
 
 const std = @import("std");
 
+const zg = @import("zg");
 const DisplayWidth = @import("DisplayWidth");
 const Graphemes = @import("Graphemes");
 
@@ -45,7 +46,16 @@ pub fn wrap(
 pub fn firstGraphemeLen(str: []const u8) usize {
     var iter = Graphemes.iterator(str);
     const g = iter.next() orelse return 0;
-    return @intCast(g.len);
+    return g.bytes(str).len;
+}
+
+/// Simple (single-codepoint) uppercase mapping for `cp`. Delegates to
+/// zg LetterCasing, whose tables are comptime-generated: no allocation
+/// and no runtime case-data loading. Codepoints whose full mapping
+/// expands to several codepoints (ß → SS) have no simple mapping and
+/// come back unchanged.
+pub fn toUpper(cp: u21) u21 {
+    return zg.letter_casing.toUpper(cp);
 }
 
 /// Truncate `str` to at most `columns` terminal cells, cutting only at
@@ -59,6 +69,11 @@ pub fn truncate(
     var width: usize = 0;
     var end: usize = 0;
 
+    // zg's iterator hands out a contiguous partition of `str`: the
+    // first cluster starts at 0 and each one starts where the last
+    // ended, so the running sum of cluster lengths is the end offset
+    // of the cluster just read. `end` stays usize throughout, and zg's
+    // u32 offsets never have to be widened.
     var iter = Graphemes.iterator(str);
     while (iter.next()) |g| {
         const gc = g.bytes(str);
@@ -66,13 +81,13 @@ pub fn truncate(
         // Zero-width (combining marks) and negative-width (control)
         // clusters never advance the column; keep them glued on.
         if (w <= 0) {
-            end = @intCast(g.offset + g.len);
+            end += gc.len;
             continue;
         }
         const wu: usize = @intCast(w);
         if (width + wu > columns) break;
         width += wu;
-        end = @intCast(g.offset + g.len);
+        end += gc.len;
     }
 
     return allocator.dupe(u8, str[0..end]);
@@ -199,4 +214,22 @@ test "firstGraphemeLen: vectors" {
     try std.testing.expectEqual(@as(usize, 3), firstGraphemeLen("e\u{301}x"));
     // ZWJ family: U+1F468 (4) + ZWJ (3) + U+1F33E (4) = 11 bytes.
     try std.testing.expectEqual(@as(usize, 11), firstGraphemeLen("👨‍🌾x"));
+}
+
+// ── toUpper (case seam) ───────────────────────
+
+test "toUpper: unicode simple mapping, unmapped codepoints unchanged" {
+    try std.testing.expectEqual(@as(u21, 'A'), toUpper('a'));
+    try std.testing.expectEqual(@as(u21, 'Z'), toUpper('z'));
+    // Latin-1, dotless i, Greek final sigma, Cyrillic.
+    try std.testing.expectEqual(@as(u21, 0x00C4), toUpper(0x00E4)); // ä → Ä
+    try std.testing.expectEqual(@as(u21, 0x0049), toUpper(0x0131)); // ı → I
+    try std.testing.expectEqual(@as(u21, 0x03A3), toUpper(0x03C2)); // ς → Σ
+    try std.testing.expectEqual(@as(u21, 0x042B), toUpper(0x044B)); // ы → Ы
+    // No simple uppercase: the full mapping is ß → SS, which is three
+    // codepoints wide and cannot name one Key.
+    try std.testing.expectEqual(@as(u21, 0x00DF), toUpper(0x00DF));
+    // No case at all.
+    try std.testing.expectEqual(@as(u21, '1'), toUpper('1'));
+    try std.testing.expectEqual(@as(u21, '+'), toUpper('+'));
 }

@@ -1,190 +1,122 @@
-# Fast row-intersection coverage algorithm
+# Fast row-intersection coverage
 
-Implementation instructions for a faster alternative to the analytic sweep in
-`src/coverage.zig`. The current `coverageRow` invokes the full analytic sweep
-for every pixel of every row and every curve piece. The alternative exploits
-the sweep's structure: a monotonic piece's contribution to a row is a STEP —
-zero on one side of its x-extent, `sign(dy) × y-span` on the other — and only
-the extent pixels need the analytic invocation.
+`src/coverage.zig` carries two row rasterizers with one contract. Both fill
+`out[p - x_start]` with the signed-area coverage of the 1×1 window
+`[x, x+1) × [y, y+1)` over `[x_start, x_start + out.len)`, clamp to `[0, 1]`,
+allocate nothing, and sweep `Monotonicize`d pieces (a curve turning inside a
+pixel window breaks the single-root intersections).
 
-## Context (read `src/coverage.zig` first)
+| function | work per row | selected by |
+|----------|--------------|-------------|
+| `coverageRow` | the reference analytic sweep: every curve × every pixel in the row | default |
+| `coverageRowFast` | one difference-array add per hit piece, exact sweep only on the extent pixels | `--algo fast` |
 
-- `QuadCurve { p0, p1, p2: [2]f32 }` — quadratic bezier, Y-up, pixel-window
-  space (curves are pre-scaled/translated by the caller).
-- `monotonicize(curve) -> MonoSplit { pieces: [4]QuadCurve, n }` — splits each
-  quadratic at its x/y extrema; every piece is monotonic in x AND y. This is
-  the algorithm's prerequisite: a monotonic piece crosses a horizontal
-  pixel-center line exactly once.
-- `scanlineSweepScalar(offset_x, offset_y, c) f32` — the exact per-pixel
-  signed-area value for a 1×1 window at `(offset_x, offset_y)`. Its
-  "entirely-left" branch returns `(v_max_y - v_min_y) * size_x` with the sign
-  built into the v_min/v_max ordering (v_min is the lower y, v_max the upper,
-  regardless of travel direction) — i.e. exactly `sign(dy) × (the piece's
-  y-span inside the window)` for a window whose x-range lies entirely right of
-  the piece. Summed over a closed contour these steps give the winding
-  number, which IS the coverage for fully-covered pixels.
-- `scanlineSweepVec(comptime L, offset_xs: @Vector(L, f32), offset_y, c)` — the
-  same sweep with per-lane x offsets; bit-identical to the scalar. Reuse it
-  for the extent-pixel lane renders.
+`coverageRow` stays the definition of correct: `coverageRowFast` is checked
+against it, pixel for pixel, by the tests below.
 
-## The algorithm
+## Why a step is enough
 
-```
-pub fn coverageRowFast(curves: []const QuadCurve, y: f32, x_start: f32, out: []f32) void
-```
+A monotonic piece crosses a horizontal line exactly once, so inside one row
+its contribution is a **step**: 0 on one side of its x-extent, and
+`sign(dy) × y-span` on the other. The reference sweep already knows that —
+its "entirely-left" branch returns `(v_max_y - v_min_y) × size_x`, which is
+exactly `sign(dy) × (the piece's y-span inside the window)`. Summed over a
+closed contour the steps give the winding number, which is the coverage for
+fully-covered pixels.
 
-Per row `y` (the window covers `[y, y+1)`; `out` covers pixels
-`[x_start, x_start + out.len)`):
+So the whole row needs the analytic sweep only for the handful of pixels
+whose 1×1 window actually overlaps a piece's x-extent — usually one or two
+per piece. `coverageRowFast` spends its arithmetic there and makes up the
+rest with a difference array.
 
-1. **Monotonicize** every curve (reuse `monotonicize`); sweep the pieces, not
-   the raw curves.
-2. **Hit test** (SIMD-able): a piece overlaps the row when its y-range
-   `[y_lo, y_hi] = [min(p0.y, p2.y), max(p0.y, p2.y)]` intersects `[y, y+1)`:
-   skip if `y_hi <= y or y_lo >= y + 1`. For hits compute:
-   - `span = min(y + 1, y_hi) - max(y, y_lo)` — the piece's y-overlap with the
-     row (1.0 for pieces that cross the whole row; smaller for pieces whose
-     y-range lies partially inside it).
-   - `dir = sign(p2.y - p0.y)` — the sweep's sign convention.
-   - **x-extent**: the piece's x-range within the row's y-slice.
-     `t_lo = clamp(intersectMonotonic(qa_y, p0.y, p1.y, p2.y, y), 0, 1)`,
-     `t_hi = clamp(intersectMonotonic(qa_y, p0.y, p1.y, p2.y, y + 1), 0, 1)`
-     (qa_y as in the sweep: `p0.y + p2.y - 2*p1.y`), then
-     `x_lo = evalBez.x(p0, p1, p2, t_lo)`, `x_hi = evalBez.x(p0, p1, p2, t_hi)`,
-     `extent = [min(x_lo, x_hi), max(x_lo, x_hi)]`.
-3. **Step array** (the "0 on one side, 1 on the other"): a difference array
-   `diff[0 .. out.len + 1]` zeroed. For each hit piece, the pixels strictly
-   right of its extent get `dir * span`:
-   `idx = @floor(extent_max) - x_start + 1` (as an index into `out`);
-   - `idx <= 0` → `diff[0] += dir * span` (the extent is left of the window:
-     every pixel in `out` gets the step);
-   - `0 < idx <= out.len` → `diff[idx] += dir * span`;
-   - `idx > out.len` → skip (the extent is right of the window).
-   Then the prefix sum: `out[i] = out[i-1] + diff[i]` for `i` in `0..out.len`.
-4. **Corrections** (the fractional pixels): for each hit piece, for every
-   pixel `p` in `[floor(extent_min), ceil(extent_max)]` intersected with
-   `[x_start, x_start + out.len)`:
-   `out[p - x_start] += scanlineSweepScalar(p, y, piece)`.
-   No double count: the piece's own diff sits at `floor(extent_max) + 1`, so
-   the step sum at the extent pixels excludes it; the sweep value replaces
-   the (zero) step contribution at exactly those pixels. Multiple pieces with
-   overlapping extents are additive.
-5. **Clamp** every `out[i]` to `[0, 1]` (same as `coverageRow`).
+## The algorithm as implemented
 
-## Why it is correct
+For row `y` writing `out[0..out.len)`:
 
-For a monotonic piece and a pixel window whose x-range lies entirely right of
-the piece's x-extent in that row, the sweep returns exactly
-`sign(dy) × (the piece's y-span inside the window)` — the "entirely-left"
-shortcut. That is the step value `dir * span`. For a window entirely left of
-the extent the sweep returns 0. Only the extent pixels (where the piece
-crosses the window) need the analytic value; `scanlineSweepScalar` is exact
-there. The per-contour sum of the steps equals the winding number, which is
-the coverage — identical to what `coverageRow` accumulates, only with
-`O(hits × extent_width)` sweeps instead of `O(pieces × row_width)`.
+1. **Curve-level early-out.** The control hull's y-range against the row
+   window; a disjoint curve skips `monotonicize` entirely.
+2. **Monotonicize** each survivor into ≤ 4 x-and-y-monotonic pieces
+   (`monotonicize`).
+3. **Hit test** each piece: its endpoint y-range `[y_lo, y_hi]` must meet
+   `[y, y+1)`. In the batch path the surviving pieces are collected into a
+   fixed 128-entry stack array and hit-tested `lanes`-wide (16) as
+   `(y_hi > y) & (y_lo < y + 1)`; tail lanes are filled with non-matching
+   bounds so the mask cannot select them. The test is the same disjoint
+   early-out `scanlineSweepScalar` applies.
+4. **`addPiece`** per hit piece writes two things:
+   - the step `dir × span` into `diff` at `i_step = floor(extent_max) -
+     x_start + 1` — every pixel entirely right of the extent collects it
+     through the prefix sum. `span = min(y+1, y_hi) - max(y, y_lo)`, so a
+     piece whose y-range lies inside the row steps by a fraction, not by 1.
+     `i_step ≤ 0` (extent left of the window) puts the step at index 0;
+     `i_step > out.len` (extent right of the window) drops it.
+   - the exact `scanlineSweepVec` values straight into `out` for the pixels
+     in `[floor(extent_min), ceil(extent_max)]`. A piece's own step sits at
+     `floor(extent_max) + 1`, i.e. past the pixels it corrects, so nothing is
+     counted twice and overlapping pieces stay additive.
+5. **Prefix sum and clamp.** Only `out.len + 1` of the 2049-entry stack
+   `diff` is cleared and consumed — rows are typically ~10 px wide, and
+   zeroing the whole array per row would dominate the raster cost.
 
-## Edge cases (all must be handled)
+## Bounds, fallbacks, and the scoped `@setRuntimeSafety`
 
-- **Partial-overlap pieces** (y-range inside the row, e.g. a horizontal-ish
-  stroke cap): `span < 1` — the step is `dir * span`, NOT ±1. The extent
-  pixels still get the exact sweep.
-- **Extent exactly on a pixel boundary**: floor/ceil semantics per the
-  formulas above; the step's diff index is `floor(extent_max) + 1` so the
-  boundary pixel is corrected, not stepped.
-- **Wide extents** (steep curves): sweep every pixel of
-  `[floor(extent_min), ceil(extent_max)]` — usually 1–2 pixels, bounded by
-  the curve's deviation in the row.
-- **Extents outside the window**: the diff clamp rules in step 3.
-- **No hits / empty rows**: `out` stays zero (the clamp is a no-op).
-- **Multiple crossings in one pixel**: corrections are additive; each piece's
-  own diff is excluded from its extent pixels by construction.
-- **out.len == 1**: the diff array is `[2]f32`; all indices still apply.
+- `batch_cap = 128`: more than `batch_cap / 4` curves take the scalar piece
+  loop — identical math, one piece at a time.
+- `diff_cap = 2048`: a wider row has no room for the stack difference
+  array and delegates to `coverageRow`.
+- `@setRuntimeSafety(false)` covers `coverageRowFast` only. ReleaseSafe
+  emits a cold panic edge (bounds check + `integerPartOutOfBounds`) at every
+  checked cast, and inlined into the `addPiece → scanlineSweepVec` monolith
+  those blocks distort the backend's optimization badly enough to make the
+  fast path **6× slower** than the sweep (measured 6.0 µs vs 1.1 µs per row
+  on the λ fixture; 0.99 µs vs 1.1 µs with the checks scoped off). Every
+  index in the kernel is guarded by an adjacent explicit comparison — the
+  checks are unreachable by construction:
+  - `out.len ≤ diff_cap` (the fallback branch), so `out.len + 1` cannot wrap;
+  - `n_pieces ≤ curves.len × 4 ≤ batch_cap` by the `curves.len > batch_cap / 4`
+    fallback (a division, so the threshold cannot overflow either);
+  - `mono.pieces[0..n]` with `n ≤ 4`, the `monotonicize` contract;
+  - `diff[@intFromFloat(i_step)]` and the correction pixel bounds, both
+    pre-clamped by the float compares in `addPiece`.
 
-## SIMD (per the design goal)
+  All library code outside this kernel keeps its checks; `zig build test`
+  and the examples run with checks on everywhere else.
 
-- **Hit test**: batch the pieces' `(y_lo, y_hi)` in `@Vector(lanes, f32)`;
-  the overlap mask filters the pieces into a small fixed stack array (no
-  allocation). The pieces array is bounded: `≤ 4 × curves.len` — size a
-  stack buffer for the practical glyph case and fall back to the scalar
-  loop when the count exceeds it.
-- **Corrections**: collect the extent pixels' x-offsets into a
-  `@Vector(lanes, f32)` and call the existing `scanlineSweepVec(lanes, xs, y,
-  piece)` per piece — one vector call per piece with hits instead of one
-  scalar call per extent pixel.
-- The diff/prefix pass is sequential (vectorizing the prefix is optional and
-  only pays for very wide rows).
+## Switching it on
 
-## Tests (prove fast == sweep)
+`examples/formula_tui.zig` takes `--algo sweep|fast` (default `sweep`) for
+the piped path, threaded through `runPlain → rasterize → drawText`; the
+interactive preview keeps the sweep. `--bench <n>` times `n` parse+render
+iterations and prints the averages, which is the comparison harness.
 
-Add inline tests in `src/coverage.zig`:
+## What the tests pin
 
-1. The existing shapes (unit square, hole 'o', parabola, vertical line):
-   `coverageRowFast` must equal `coverageRow` within `1e-4` on every pixel
-   (bit-exactness is NOT required — the addition order differs).
-2. Property: the existing random-curve generator (incl. the forced
-   non-monotonic kind), random rows and windows: fast == sweep within 1e-4.
-3. Boundary cases: a piece whose extent lands exactly on an integer x;
-   a partial-overlap piece (span < 1); a row with zero hits; a window that
-   clips the extent (diff clamps).
-4. The λ glyph curves (or any real glyph): fast == sweep on every row.
+In `src/coverage.zig`, `expectFastEqSweep` holds `coverageRowFast` to
+`coverageRow` within `1e-4` (the accumulation order differs, so bits are not
+required):
 
-## Integration (the cmdline switch)
+- the fixed shapes — unit square, hole `'o'`, parabola, vertical line;
+- a property pass over the random-curve generator (vertical / straight /
+  horizontal / general / forced non-monotonic kinds) across random rows and
+  windows;
+- the boundary cases: extent ending exactly on an integer x, a
+  partial-overlap piece (`span < 1`), a row with zero hits, a window
+  clipping the extent on either side, and `out.len == 1`;
+- the real λ glyph fixture (`src/lambda_fixture.zig`), every row.
 
-- `src/coverage.zig`: add `pub fn coverageRowFast` next to `coverageRow`
-  (same signature, same zero-allocation discipline). Keep everything else.
-- `examples/formula_tui.zig`: add a `--algo fast|sweep` argument (default
-  `sweep`) for the piped path — threaded through `runPlain` → `rasterize` →
-  `drawText`, which picks `coverage.coverageRowFast` vs `coverage.coverageRow`
-  at the call site. The `--bench N` mode already prints parse/render
-  averages; `--bench N --algo fast` is the comparison harness.
-- The interactive path keeps the default (`sweep`) — the switch is
-  cmdline-only.
+## Measured
 
-## Acceptance
+ReleaseSafe, `--bench 300`, this host (2026-09-30). Render average is the
+raster cost; parse is ztex and is unaffected by the algorithm.
 
-- All tests green; fast == sweep within 1e-4 everywhere.
-- `zig build -Doptimize=ReleaseSafe` + `--bench 300 <Euler-Lagrange> --algo
-  fast` reports a render average at or below the sweep's (the goal is
-  measurably fewer analytic invocations: measure and report both).
-- `zig fmt`, zbc/ziglint clean; full gate green.
-
-## Measured (2026-08-15, i7-9750H, zig 0.16.0)
-
-Unit bench (`src/_covbench.zig`, λ glyph: 29 curves / 116 pieces, 15 rows ×
-100k iters; wide: 6 glyph copies = 174 curves / 696 pieces > `batch_cap`,
-exercising the scalar fallback):
-
-| config | sweep ns/row | fast ns/row | ratio |
+| formula | sweep render avg | fast render avg | fast min vs sweep min |
 |---|---|---|---|
-| ReleaseSafe, narrow λ | 1128 | 935 | 0.83 |
-| ReleaseSafe, wide 6×λ | 23387 | 5602 | 0.24 |
-| ReleaseFast, narrow λ | 1106 | 938 | 0.85 |
-| ReleaseFast, wide 6×λ | 23800 | 5579 | 0.23 |
+| `\lambda` | 0.023 ms | 0.030 ms | 0.014 vs 0.011 ms |
+| `\int_0^\infty e^{-x^2}\,dx = \frac{\sqrt{\pi}}{2}` | 0.506 ms | 0.516 ms | 0.231 vs 0.374 ms |
 
-App-level (`zig build -Doptimize=ReleaseSafe` + `--bench 300 --algo`):
-sweep render 0.052 ms, fast 0.064 ms (fast 0.87×, after the safety fix;
-before the fix fast was 0.121 ms — 2.3× worse than sweep).
-
-### ReleaseSafe codegen pathology (why the fix exists)
-
-With runtime-safety checks on, `coverageRowFast` was ~6× SLOWER per row than
-`coverageRow` (6.0 µs vs 1.1 µs on the λ fixture at ReleaseSafe); at
-ReleaseFast the same source ran 0.94 µs and won. Bisected with probe
-variants:
-
-- removing the corrections block, the prefix-sum, or the vector hit-test each
-  moved ≤ 10 % — no single subsystem was the cost;
-- `@setRuntimeSafety(false)` inside `addPiece` alone: no effect (the inline
-  fn's checks are decided at the call site);
-- `@setRuntimeSafety(false)` across the whole row function: 988 ns/row —
-  the full 6× recovered.
-
-Cause: ReleaseSafe emits a cold panic edge (bounds check +
-`integerPartOutOfBounds` → `unreachable`) at every checked cast, and those
-blocks inside the giant inlined `addPiece → scanlineSweepVec(4)` monolith
-break the backend's optimization (block-count/inlining/spill heuristics).
-Every index in the kernel is guarded by an adjacent explicit comparison —
-the checks are unreachable by construction — so the function now carries a
-scoped `@setRuntimeSafety(false)` with a comment enumerating the guards
-(`out.len ≤ diff_cap`, `curves.len > batch_cap / 4`, `mono.n ≤ 4`, the
-pre-clamped `@intFromFloat` inputs). All library code outside this kernel
-keeps its checks; `zig build test` and the examples run with checks on.
+At app scale the two are within noise on the average — the fast path's win
+shows on the minimum for the wide formula, where the row work dominates. The
+per-row unit bench that motivated the path (0.83× narrow, 0.24× wide on the
+λ fixture and a 6-glyph copy) lived in a throwaway `src/_covbench.zig` that
+did not survive; `--bench` above is the reproducible harness, and the
+advantage grows with the number of curves per row.

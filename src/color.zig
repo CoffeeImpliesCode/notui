@@ -360,7 +360,11 @@ fn clamp01(x: f64) f64 {
 }
 
 fn lerpChannel(x: u8, y: u8, t: f64) u8 {
-    return @intFromFloat(@as(f64, @floatFromInt(x)) * (1.0 - t) + @as(f64, @floatFromInt(y)) * t);
+    // `t` is 0..1 (`interpolate` runs `clamp01`) and `x`/`y` are u8, so the
+    // mix is 0..255 up to the rounding of its two products: truncation maps
+    // that last ulp onto 255, so the clamp states the range and is a no-op.
+    const v = @as(f64, @floatFromInt(x)) * (1.0 - t) + @as(f64, @floatFromInt(y)) * t;
+    return @intFromFloat(std.math.clamp(v, 0.0, 255.0));
 }
 
 test {

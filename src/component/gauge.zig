@@ -77,8 +77,18 @@ pub const Gauge = struct {
         }
 
         const r = self.ratio();
+        // `ratio()` is 0..1 (`clamp01` pins a NaN to 1) and `width` is
+        // a u16, so the rounded unit count is 0..total_units, itself at
+        // most `max_units` below: the clamp states that range and is a
+        // no-op.
         const total_units: usize = @as(usize, self.width) * 8;
-        const filled_units: usize = @intFromFloat(@round(r * @as(f64, @floatFromInt(total_units))));
+        // Eighth-block units in the widest bar: `width` is a u16, so a
+        // bar never exceeds 65 535 cells — 524 280 units. Local, so the
+        // clamp carries a comptime-known bound.
+        const max_units: f64 = @as(f64, std.math.maxInt(u16)) * 8;
+        const filled_units: usize = @intFromFloat(
+            std.math.clamp(@round(r * @as(f64, @floatFromInt(total_units))), 0.0, max_units),
+        );
         const full_cells: usize = filled_units / 8;
         const partial: usize = filled_units % 8;
 

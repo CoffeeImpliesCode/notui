@@ -170,3 +170,5 @@ zig build run-example-statusline < /dev/null | cat
 - [`FAST_COVERAGE.md`](FAST_COVERAGE.md) — the fast row-intersection
   rasterizer behind [`examples/formula_tui.zig`](examples/formula_tui.zig)
   ([`src/coverage.zig`](src/coverage.zig)).
+- Open work, known gaps, and what closes them:
+  [`NEXT.md`](NEXT.md).

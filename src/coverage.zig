@@ -501,6 +501,14 @@ const batch_cap = 128;
 /// zero-alloc bound on the stack diff.
 const diff_cap = 2048;
 
+/// Clamped float-to-index cast: `f` pulled into `[0, hi]` and converted to
+/// a pixel index. The clamp is what keeps the cast in range for the
+/// pathological extents `f` and `hi` can hold before the caller's float
+/// compares narrow them.
+inline fn clampedIndex(f: f32, hi: f32) usize {
+    return @intFromFloat(std.math.clamp(f, 0.0, hi));
+}
+
 /// One hit piece's row contribution: the `dir * span` STEP for every
 /// pixel entirely right of the piece's x-extent (a single difference-array
 /// add at i_step), plus the exact analytic sweep value for the few pixels
@@ -551,11 +559,14 @@ inline fn addPiece(diff: []f32, out: []f32, piece: QuadCurve, y: f32, x_start: f
     // ceil(i_step) scheme with corrections capped at i_step - 1 is
     // equivalent at integer boundaries and exact for fractional x_start.
     const i_step = @ceil(extent_max - x_start);
-    const out_len_f = @as(f32, @floatFromInt(out.len));
+    // coverageRowFast falls back above diff_cap, so out.len is small
+    // enough for the f32 conversion to be exact.
+    const out_len_f = @as(f32, @floatFromInt(@min(out.len, diff_cap)));
     if (i_step <= 0) {
         diff[0] += step_val; // extent left of the whole window
     } else if (i_step <= out_len_f) {
-        diff[@intFromFloat(i_step)] += step_val;
+        const i_step_i: usize = clampedIndex(i_step, out_len_f);
+        diff[i_step_i] += step_val;
     }
     // else: extent right of the whole window — nothing to step.
 
@@ -566,15 +577,14 @@ inline fn addPiece(diff: []f32, out: []f32, piece: QuadCurve, y: f32, x_start: f
     // branches (the sweep path's per-piece vector call is the whole cost
     // fast must beat). Wide extents (shallow, near-horizontal pieces)
     // still use the vector path — one call amortizes over many pixels.
-    // The f32 bounds are clamped before @intFromFloat so pathological
-    // extents cannot overflow the cast; the p_lo > p_hi guard covers
-    // i_step <= 0 (p_hi negative) and extents right of the window
-    // (p_lo past the end).
+    // clampedIndex clamps before the cast, so pathological extents cannot
+    // overflow it; the p_lo > p_hi guard covers i_step <= 0 (p_hi
+    // negative) and extents right of the window (p_lo past the end).
     const p_lo_f = @max(@floor(extent_min - x_start), 0.0);
     const p_hi_f = @min(i_step - 1.0, out_len_f - 1.0);
     if (p_lo_f > p_hi_f) return;
-    const p_lo: usize = @intFromFloat(p_lo_f);
-    const p_hi: usize = @intFromFloat(p_hi_f);
+    const p_lo: usize = clampedIndex(p_lo_f, out_len_f - 1.0);
+    const p_hi: usize = clampedIndex(p_hi_f, out_len_f - 1.0);
     // One @Vector(4) sweep call per chunk: a 4-wide register runs the
     // whole general path in ~half the ops of the 16-lane call (and the
     // scalar path serializes the same math with branchy sqrts — ~3x more
@@ -630,8 +640,9 @@ pub fn coverageRowFast(curves: []const QuadCurve, y: f32, x_start: f32, out: []f
     //     `curves.len > batch_cap / 4` fallback above (division, so the
     //     threshold itself cannot overflow).
     //   - mono.pieces[0..n]: n ≤ 4, the monotonicize contract.
-    //   - diff[@intFromFloat(i_step)] and the correction pixel bounds
-    //     are pre-clamped by the float compares in addPiece.
+    //   - diff[i_step_i] and the correction pixel bounds come out of
+    //     clampedIndex; the float compares in addPiece narrow them into
+    //     its clamp range first.
     // The row-level API contract (out.len range, nothing else) is
     // preserved; all library code outside this function keeps its checks.
     @setRuntimeSafety(false);
@@ -1053,9 +1064,12 @@ fn expectFastEqSweep(curves: []const QuadCurve, y: f32, x_start: f32, n: usize) 
 
 /// `expectFastEqSweep` for every integer row in [y0, y1].
 fn expectRowsEq(curves: []const QuadCurve, y0: i64, y1: i64, x_start: f32, n: usize) !void {
+    // Test rows are single-digit; the bound keeps the f32 conversion
+    // exact instead of silently rounding an absurd row index.
+    const max_row: i64 = 1 << 20;
     var y: i64 = y0;
     while (y <= y1) : (y += 1) {
-        try expectFastEqSweep(curves, @floatFromInt(y), x_start, n);
+        try expectFastEqSweep(curves, @floatFromInt(@max(@min(y, max_row), -max_row)), x_start, n);
     }
 }
 

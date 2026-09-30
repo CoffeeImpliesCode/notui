@@ -57,7 +57,15 @@ pub const Progress = struct {
         }
 
         const ratio = if (self.total > 0) clamp01(self.value / self.total) else 0;
-        const filled_all: usize = @intFromFloat(@floor(ratio * @as(f64, @floatFromInt(self.width))));
+        // `ratio` is 0..1 (`clamp01` pins a NaN to 1) and `width` is a
+        // u16, so the floored cell count is 0..width, itself at most
+        // `max_cells` below: the clamp states that range and is a no-op.
+        // Cells in the widest bar; local, so the clamp carries a
+        // comptime-known bound.
+        const max_cells: f64 = std.math.maxInt(u16);
+        const filled_all: usize = @intFromFloat(
+            std.math.clamp(@floor(ratio * @as(f64, @floatFromInt(self.width))), 0.0, max_cells),
+        );
         const bar_cells: u16 = @min(self.width, avail);
         const filled: u16 = @intCast(@min(filled_all, @as(usize, bar_cells)));
         const empty: u16 = bar_cells - filled;

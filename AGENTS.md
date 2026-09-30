@@ -20,7 +20,7 @@ Zig 0.16 inline-first terminal UI toolkit. It provides cell-buffer primitives, b
 
 ## Environment and commands
 
-`.envrc` loads devenv; `devenv.nix` provides Zig and zlint. Run `direnv allow` on first use or after changing `devenv.nix`.
+`.envrc` exports `ZIG_LOCAL_CACHE_DIR` (the NFS `renameat2` workaround) and nothing else; `devenv.nix` provides Zig, zlint, and the `zig-gate` script. Run `direnv allow` on first use or after changing `devenv.nix`.
 
 ```bash
 zig build           # debug build: zig-out/bin/notui
@@ -28,8 +28,8 @@ zig build run       # build and run
 zig build test      # unit tests
 zig fmt --check .   # format check
 zlint               # prefer ~/.local/bin/zlint
-gate                # all gates; zbc advisory unless ZBC_STRICT=1; --cov is optional
+zig-gate            # all gates; zbc advisory unless ZBC_STRICT=1; --cov is optional
 jj st               # working-copy status
 ```
 
-`gate` runs format check, build, tests, AST check, ziglint, and zlint; it exits 1 on issues.
+`zig-gate` runs format check, build, tests, AST check, and zlint, then zbc; it exits 1 on issues. Its zbc step prints only the first 30 lines and counts `error(` lines, so a report with warnings only reads as "0 potential issue(s)" — run `zbc $(find . -name '*.zig' -not -path './zig-pkg/*' -not -path './zig-out/*')` for the full list.

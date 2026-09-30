@@ -71,6 +71,13 @@ const size_step_pt: f32 = 2;
 const tick_ms: i32 = 100;
 /// Points → pixels at 96 dpi (the rasterizer's resolution).
 const pt_px: f32 = 96.0 / 72.0;
+/// Ceiling on a bitmap side, in pixels. Every layout-metric → integer
+/// conversion clamps to it: past this the preview is far wider than any
+/// terminal, and an unclamped cast would trap or ask the allocator for
+/// gigabytes before anything draws. The float clamps below restate it as
+/// literals on purpose — zbc's guard check is a token walk over the cast
+/// expression, so only a literal bound in that expression proves anything.
+const max_bitmap_dim: u32 = 4096;
 /// The text cursor marker drawn after the typed line.
 const cursor_marker = "█";
 /// Ctrl+D, the app's quit key (Key defines only ctrl_c among the ASCII
@@ -459,7 +466,9 @@ pub fn main(init: std.process.Init) !void {
             "parse {d:.2}ms render {d:.2}ms",
             .{ stats.parse_ms, stats.render_ms },
         ) catch "";
-        const tl = @as(u16, @intCast(timing.len));
+        // bufPrint fills at most timing_buf.len bytes; restating that
+        // bound keeps the narrowing to the region's u16 column provable.
+        const tl: u16 = @intCast(@min(timing.len, timing_buf.len));
         if (tl < region.width) {
             _ = try region.cur.draw(
                 .{ .fg = .bright_black },
@@ -663,6 +672,23 @@ fn preview(
     return true;
 }
 
+/// Layout span in points → bitmap pixels, rounded up. Layout metrics are
+/// finite for every real font, but a non-finite one must not reach the
+/// cast: it yields 0 and the caller reports `EmptyFormula` instead of
+/// trapping mid-frame.
+fn spanPx(pts: f32) u32 {
+    const px = @ceil(pts * pt_px);
+    if (!std.math.isFinite(px)) return 0;
+    return @intFromFloat(std.math.clamp(px, 0.0, 4096.0));
+}
+
+/// Float → bitmap window/column index. The ±`max_bitmap_dim` clamp keeps
+/// the cast in range for any finite input and leaves the subsequent
+/// `[0, width)` / `[0, height)` narrowing to one step.
+fn toWindowIndex(v: f32) i64 {
+    return @intFromFloat(std.math.clamp(v, -4096.0, 4096.0));
+}
+
 /// Rasterize a draw list into a white-on-transparent RGBA bitmap sized to the
 /// layout bounds (width × (height+depth), pt→px at 96 dpi — the svg.zig
 /// viewBox convention without the browser padding).
@@ -672,8 +698,8 @@ fn rasterize(
     dl: *ztex.draw.DrawList,
     row_fn: RowFn,
 ) !Bitmap {
-    const width: u32 = @intFromFloat(@ceil(dl.width * pt_px));
-    const height: u32 = @intFromFloat(@ceil((dl.height + dl.depth) * pt_px));
+    const width = spanPx(dl.width);
+    const height = spanPx(dl.height + dl.depth);
     if (width == 0 or height == 0) return error.EmptyFormula;
     const data = try gpa.alloc(u8, @as(usize, width) * @as(usize, height) * 4);
     errdefer gpa.free(data);
@@ -792,7 +818,9 @@ fn drawText(
 
     const gscale = t.size * pt_px / @as(f32, @floatCast(@as(f64, @floatFromInt(face.unitsPerEm()))));
     const ox = t.x * pt_px;
-    const h_f: f32 = @floatFromInt(height);
+    // rasterize caps every bitmap side at max_bitmap_dim; restating the
+    // bound keeps this conversion exact (f32 has a 24-bit mantissa).
+    const h_f: f32 = @floatFromInt(@min(height, max_bitmap_dim));
     // Sweep-space baseline: the sweep is Y-up with 1x1 windows at
     // integer offsets (window wy covers [wy, wy+1) = bitmap row
     // height-1-wy), so the top-down baseline row `baseline` flips to
@@ -821,16 +849,20 @@ fn drawText(
     }
 
     // Clamp the window and column spans to the bitmap (glyph ink may
-    // overflow the layout bounds).
+    // overflow the layout bounds). An outline with no curves leaves the
+    // bbox at ±inf: there is nothing to draw, and the conversions below
+    // would trap on it.
+    if (!std.math.isFinite(min_x) or !std.math.isFinite(max_x) or
+        !std.math.isFinite(min_y) or !std.math.isFinite(max_y)) return;
     const h_i: i64 = @intCast(height);
-    var wy0: i64 = @intFromFloat(@floor(min_y));
-    var wy1: i64 = @intFromFloat(@floor(max_y));
+    var wy0: i64 = toWindowIndex(@floor(min_y));
+    var wy1: i64 = toWindowIndex(@floor(max_y));
     if (wy0 >= h_i or wy1 < 0) return;
     wy0 = @max(wy0, 0);
     wy1 = @min(wy1, h_i - 1);
 
-    var cx0: i64 = @intFromFloat(@floor(min_x));
-    var cx1: i64 = @intFromFloat(@ceil(max_x));
+    var cx0: i64 = toWindowIndex(@floor(min_x));
+    var cx1: i64 = toWindowIndex(@ceil(max_x));
     cx0 = @max(cx0, 0);
     cx1 = @min(cx1, @as(i64, @intCast(width)));
     if (cx1 <= cx0) return;
@@ -841,15 +873,20 @@ fn drawText(
     const cov_curves: []const coverage.QuadCurve =
         std.mem.bytesAsSlice(coverage.QuadCurve, std.mem.sliceAsBytes(outline.curves.items));
 
+    // Window rows and columns are bitmap coordinates (≤ max_bitmap_dim),
+    // so the i64 → f32 sweep coordinates are exact; the column offset is
+    // loop-invariant.
+    const cx0_f: f32 = @floatFromInt(@min(cx0, @as(i64, max_bitmap_dim)));
     var wy = wy0;
     while (wy <= wy1) : (wy += 1) {
-        row_fn(cov_curves, @floatFromInt(wy), @floatFromInt(cx0), row_buf);
+        const wy_f: f32 = @floatFromInt(@max(@min(wy, 4096), 0));
+        row_fn(cov_curves, wy_f, cx0_f, row_buf);
         const row: usize = @intCast(h_i - 1 - wy);
         for (row_buf, 0..) |c, k| {
             if (c <= 0.0) continue;
             // RGB is already white; the alpha channel carries the
             // coverage (SRC-OVER of white over white = max alpha).
-            const a: u8 = @intFromFloat(@round(c * 255.0));
+            const a: u8 = @intFromFloat(@round(std.math.clamp(@as(f32, c), 0.0, 1.0) * 255.0));
             const idx = (row * @as(usize, width) + @as(usize, @intCast(cx0)) + k) * 4;
             data[idx + 3] = @max(data[idx + 3], a);
         }
@@ -860,10 +897,10 @@ fn drawText(
 /// to the bitmap) with fully-inked pixels (alpha 255; RGB stays white) —
 /// fraction bars, rules, lines.
 fn fillInk(data: []u8, width: u32, height: u32, x0f: f32, x1f: f32, y0f: f32, y1f: f32) void {
-    const c0: i64 = @max(@as(i64, @intFromFloat(@floor(x0f))), 0);
-    const c1: i64 = @min(@as(i64, @intFromFloat(@ceil(x1f))), @as(i64, @intCast(width)));
-    const r0: i64 = @max(@as(i64, @intFromFloat(@floor(y0f))), 0);
-    const r1: i64 = @min(@as(i64, @intFromFloat(@ceil(y1f))), @as(i64, @intCast(height)));
+    const c0: i64 = @max(toWindowIndex(@floor(x0f)), 0);
+    const c1: i64 = @min(toWindowIndex(@ceil(x1f)), @as(i64, @intCast(width)));
+    const r0: i64 = @max(toWindowIndex(@floor(y0f)), 0);
+    const r1: i64 = @min(toWindowIndex(@ceil(y1f)), @as(i64, @intCast(height)));
     var r = r0;
     while (r < r1) : (r += 1) {
         var c = c0;

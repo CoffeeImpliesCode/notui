@@ -1,6 +1,8 @@
 const std = @import("std");
 const testing = std.testing;
 
+const width = @import("width.zig");
+
 const Key = @This();
 
 /// Modifier Keys for a Key Match Event.
@@ -118,11 +120,11 @@ pub fn matchText(self: Key, cp: u21, mods: Modifiers) bool {
     self_mods.caps_lock = false;
     var arg_mods = mods;
 
-    // TODO: Use zg case_data for full unicode support. We'll need to allocate the case data
-    // somewhere
-    const upper_cp: u21 = if (cp < 128 and (mods.shift or mods.caps_lock))
-        // Uppercase our codepoint
-        std.ascii.toUpper(@intCast(cp))
+    // Uppercase our codepoint through the zg seam: full Unicode simple
+    // casing, not ASCII-only. Full mappings that expand (ß → SS) have
+    // no single-codepoint form and come back unchanged.
+    const upper_cp: u21 = if (mods.shift or mods.caps_lock)
+        width.toUpper(cp)
     else
         cp;
 
@@ -458,6 +460,24 @@ test "matches 'shift+;'" {
         .mods = .{},
     };
     try testing.expect(colon.matches(':', .{}));
+}
+
+test "matches shift+non-ASCII reported as text only" {
+    // A terminal that swallows the shift modifier still reports the text
+    // it produced. Rule 1 cannot see this — the key carries no shift, so
+    // the text match has to case the codepoint through the Unicode
+    // mapping ('ä' → 'Ä'), not an ASCII table.
+    const key: Key = .{ .codepoint = 0x00E4, .mods = .{}, .text = "\u{00C4}" };
+    try testing.expect(key.matches(0x00E4, .{ .shift = true }));
+    try testing.expect(!key.matches(0x00E4, .{ .shift = true, .ctrl = true }));
+
+    const cyrillic: Key = .{ .codepoint = 0x044B, .mods = .{}, .text = "\u{042B}" };
+    try testing.expect(cyrillic.matches(0x044B, .{ .shift = true }));
+
+    // Text that is not the uppercased codepoint must not match.
+    const lower: Key = .{ .codepoint = 0x00E4, .mods = .{}, .text = "\u{00E4}" };
+    try testing.expect(!lower.matches(0x00E4, .{ .shift = true }));
+    try testing.expect(lower.matches(0x00E4, .{}));
 }
 
 test "modifiers: eql strips nothing, compares raw bits" {

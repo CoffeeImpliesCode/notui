@@ -744,6 +744,10 @@ inline fn parseParam(comptime T: type, buf: []const u8, default: ?T) ?T {
 /// Parse a mouse event
 inline fn parseMouse(input: []const u8, full_input: []const u8) Result {
     const null_event: Result = .{ .event = null, .n = input.len };
+    // Defensive: both decode branches need three bytes or more, so an empty
+    // sequence falls through to `else` and yields `null_event`; the guard
+    // keeps the tail index in `.type` unreachable-but-safe.
+    if (input.len == 0) return null_event;
 
     var button_mask: u16 = undefined;
     var px: i16 = undefined;
@@ -814,7 +818,7 @@ inline fn parseMouse(input: []const u8, full_input: []const u8) Result {
                 }
                 break :blk .press;
             }
-            if (input[input.len - 1] == 'm') break :blk .release;
+            if (input.len > 0 and input[input.len - 1] == 'm') break :blk .release;
             break :blk .press;
         },
     };

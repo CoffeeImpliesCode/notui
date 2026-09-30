@@ -820,13 +820,16 @@ fn ownLibOut(aa: std.mem.Allocator, raw: []const u8) []const u8 {
 /// Cap the captured lib output shown in the scrollback: first 5 lines
 /// plus a "… N more captured line(s)" suffix.
 fn libPreview(aa: std.mem.Allocator, raw: []const u8) ![]const u8 {
+    // An empty capture has nothing to show, and the trailing-newline strip
+    // below has no byte to read.
+    if (raw.len == 0) return raw;
     const max_lines = 5;
     var end: usize = 0;
     var line_count: usize = 0;
     while (line_count < max_lines) : (line_count += 1) {
         const nl = std.mem.findScalarPos(u8, raw, end, '\n') orelse {
             // Fewer lines than the cap: show everything (strip a trailing NL).
-            return if (raw.len > 0 and raw[raw.len - 1] == '\n') raw[0 .. raw.len - 1] else raw;
+            return if (std.mem.endsWith(u8, raw, "\n")) raw[0 .. raw.len - 1] else raw;
         };
         end = nl + 1;
     }
