@@ -8,27 +8,22 @@ on the roadmap.
 
 ## Non-ASCII key text synthesis in the parser
 
-**Decided and implemented.** The parser's "no text reported" fallback now
-synthesizes `text` for any printable scalar, not just ASCII, and
-`shifted_codepoint` is set only for ASCII.
+**Implemented.** For shift-only CSI u events, the parser preserves explicit
+text. Without text, it uses the terminal's reported `shifted_codepoint`.
+If neither field exists, it uses `width.toUpper` through the zg seam.
+Caps Lock and Num Lock do not disable this fallback.
 
-The split follows what each field means. `text` is "what the key typed", and
-`Key.matchText` already case-folds through the zg seam, so a non-ASCII
-layout's shift+letter had to reach it or no declared binding could ever
-match. `isTextCodepoint` admits every scalar that is not a control, a
-surrogate, a noncharacter, a private-use codepoint (kitty encodes `f1`,
-`home` and the rest there) or `Key.multicodepoint`. The upper form comes
-from `width.toUpper`, so an expansion like ß → SS degrades to the codepoint
-itself instead of a truncated byte.
+The parser synthesizes a missing `shifted_codepoint` only for ASCII.
+It preserves reported shifted codepoints on every layout.
 
-`shifted_codepoint` names the codepoint shift produces *on this layout*,
-which is the terminal's to report. Inventing it from a case mapping would
-claim a shifted key the layout may not have, so a non-ASCII key gets none.
+The fallback excludes C0, DEL, C1, surrogates, private-use areas,
+Unicode noncharacters, and values above U+10FFFF. Noncharacters include
+U+FDD0–U+FDEF and the last two codepoints of each plane.
+The simple uppercase mapping keeps ß unchanged because its full mapping,
+SS, needs more than one codepoint.
 
-Three decoder regressions cover it: shift+U+00E4 synthesizes `Ä` and
-matches through `matchText` with no shifted codepoint; `Key.home` in the
-private use area gets no text; ctrl+U+0061, a C0 modifier shortcut, gets
-none either.
+Decoder regressions cover Unicode text, reported-field precedence,
+named keys, modifier shortcuts, and noncharacter and scalar boundaries.
 
 ## Reading `zbc` reports
 

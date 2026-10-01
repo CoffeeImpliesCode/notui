@@ -101,8 +101,10 @@ remote is `https://github.com/CoffeeImpliesCode/notui` (private).
 
 Every item above is implemented and verified on this host. The evidence:
 
-- `zig build test` — 623/623 pass (`zig ast-check src/root.zig` clean,
-  `zig fmt --check .` clean, `zlint` 0 errors).
+- `zig build test` — 625/625 pass in Debug and ReleaseSafe.
+- `zig-gate` — formatting, build, tests, AST checks, and zlint pass.
+- ReleaseSafe `Parser`→`Editor` smoke — 36 scenarios cover Unicode fallback,
+  reported-field precedence, controls, named keys, and scalar boundaries.
 - A standalone path-dependency consumer at
   `../.notui-roadmap-consumer` builds against `src/root.zig` alone and
   asserts the shipped behaviour end to end: dependency module graph,
@@ -118,9 +120,8 @@ Every item above is implemented and verified on this host. The evidence:
   live file exercised capture/kill/yank/yank-pop/undo/redo and the
   grapheme cursor boundary.
 
-Nothing on the roadmap is open. `NEXT.md` holds the two remaining notes:
-how to read a `zbc` report, and the non-ASCII key text synthesis decision
-this change closed.
+No implementation items remain open. `NEXT.md` records the key text
+synthesis contract and explains the advisory `zbc` reports.
 
 ## Non-goals
 
