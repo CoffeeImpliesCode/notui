@@ -14,6 +14,7 @@ const std = @import("std");
 const posix = std.posix;
 const Tty = @import("tty.zig").Tty;
 const Region = @import("region.zig").Region;
+const ResizeMode = @import("region.zig").ResizeMode;
 const Reader = @import("input.zig").Reader;
 const caps = @import("caps.zig");
 const emit = @import("emit.zig");
@@ -23,6 +24,61 @@ const Buffer = @import("buffer.zig").Buffer;
 const Parser = @import("Parser.zig");
 const builtin = @import("builtin");
 const view_mod = @import("view.zig");
+const output = @import("output.zig");
+const transcript = @import("transcript.zig");
+const watchdog = @import("watchdog.zig");
+
+/// Adaptive frame pacing: a nominal input cadence plus a ~50% duty cap.
+/// The loop waits `nominal` for input; when the last frame cost more
+/// than half of that, the wait grows to twice the measured cost, so
+/// composing frames can occupy at most ~50% of the loop's time however
+/// slow the renderer is (roadmap intro: cadence + duty cycle +
+/// backpressure). A slow frame therefore costs animation smoothness,
+/// never input latency.
+pub const Pacer = struct {
+    /// Cost of the last measured frame, in nanoseconds.
+    last_cost_ns: u64 = 0,
+    /// Frames measured (telemetry).
+    samples: u64 = 0,
+    /// Longest single frame cost seen (bench p-max).
+    worst_ns: u64 = 0,
+
+    pub fn noteFrameCost(self: *Pacer, cost_ns: u64) void {
+        self.last_cost_ns = cost_ns;
+        self.samples += 1;
+        self.worst_ns = @max(self.worst_ns, cost_ns);
+    }
+
+    /// The input wait in milliseconds. `fps == 0` blocks on input.
+    pub fn delayMs(self: *const Pacer, fps: u32) i32 {
+        if (fps == 0) return -1;
+        const nominal_ms: i32 = @max(1, @as(i32, @intCast(1000 / fps)));
+        const nominal_ns = @as(u64, @intCast(nominal_ms)) * std.time.ns_per_ms;
+        if (self.last_cost_ns * 2 <= nominal_ns) return nominal_ms;
+        const wanted: u64 = (self.last_cost_ns * 2) / std.time.ns_per_ms;
+        return @max(nominal_ms, @as(i32, @intCast(@min(wanted, @as(u64, std.math.maxInt(i32))))));
+    }
+};
+
+/// Per-frame measurements, published by the bench and the debug server.
+/// Every field is a real observation of the frame path, not an estimate.
+pub const FrameStats = struct {
+    /// Frames composed since the session started.
+    frames: u64 = 0,
+    /// Cells that differed from the previous frame: the damage the diff
+    /// had to paint.
+    dirty_cells: usize = 0,
+    /// Bytes staged into the output queue for this frame.
+    staged_bytes: usize = 0,
+    /// Bytes the transport accepted for this frame.
+    written_bytes: usize = 0,
+    /// Largest pending output at any point in the session.
+    peak_pending: usize = 0,
+    /// Nanoseconds the last frame cost (composition plus submit).
+    frame_cost_ns: u64 = 0,
+    /// Frames deferred by output backpressure.
+    deferred_frames: u64 = 0,
+};
 
 /// The framework surface, re-exported from app.zig (framework-contract.md
 /// file layout): `App` itself plus the Context/View/Cmd types it threads.
@@ -90,6 +146,13 @@ pub fn App(comptime Model: type) type {
             /// Optional default event→Msg translator (also settable via
             /// setFilter).
             filter: ?*const fn (*Context, Event) ?Msg = null,
+            /// Bounded output staging (roadmap B1): `capacity` is the
+            /// hard bound on staged bytes, `watermark` the point at
+            /// which the App stops composing frames until the terminal
+            /// drains.
+            output: output.OutputQueue.Options = .{},
+            /// Width-change behaviour for the inline band (C2).
+            resize_mode: ResizeMode = .append,
         };
 
         const Self = @This();
@@ -109,11 +172,15 @@ pub fn App(comptime Model: type) type {
         reader: ?Reader = null,
         arena: ?std.heap.ArenaAllocator = null, // app arena (long-lived, never reset)
         scratch: ?std.heap.ArenaAllocator = null, // per-tick scratch arena
+        /// Bounded pending-byte queue in front of the terminal (B1).
+        /// Every frame is staged here and submitted with one nonblocking
+        /// write attempt; bytes the terminal has not taken stay queued
+        /// and composition stops at the watermark.
+        out: ?output.OutputQueue = null,
 
         // loop state
         running: bool = false,
-        /// Terminal modes currently active (alt_screen tracked but never
-        /// emitted in v1, orchestrator Q1).
+        /// Terminal modes currently active (diffed per frame).
         modes: view_mod.Modes = .{},
         /// Signature of the last rendered View (idle-frame skip).
         last_sig: u64 = std.math.maxInt(u64),
@@ -131,6 +198,21 @@ pub fn App(comptime Model: type) type {
         every_interval: ?u32 = null,
         /// Last periodic Msg.tick dispatch time.
         last_fire: ?std.Io.Timestamp = null,
+
+        /// Adaptive pacing state (~50% duty cap).
+        pacer: Pacer = .{},
+        /// Loop watchdog (F3): the previous frame is observed BEFORE
+        /// this one re-pings, so a stall inside a frame is caught rather
+        /// than swallowed by the reset.
+        watchdog: watchdog.Watchdog = .init(watchdog.default_budget_ns),
+        /// Per-frame measurements for the bench and the debug server.
+        frame_stats: FrameStats = .{},
+        /// Streaming transcript (C3), allocated only by
+        /// `initTranscript`. The product settles blocks; the App retires
+        /// them inside the frame budget, writes each delta as one ledger
+        /// batch, and commits the blocks when the transport accepted the
+        /// receipt.
+        transcript: ?transcript.Transcript = null,
 
         // ── construction ──
         /// The model is NOT passed in: `start` owns init — it calls
@@ -202,6 +284,12 @@ pub fn App(comptime Model: type) type {
             self.last_tick = now;
             self.frame_count += 1;
 
+            // 1b. Watchdog: observe the PREVIOUS frame before this one
+            //     re-pings, so a stall inside a frame is caught instead
+            //     of being swallowed by the reset.
+            if (self.watchdog.tripped(now)) try self.degradeStall();
+            self.watchdog.ping(now);
+
             // 2. Timers: the one-shot `tick` deadline and the periodic
             //    `every` timer dispatch `Msg.tick` through the queue.
             if (self.tick_deadline) |dl| {
@@ -223,10 +311,9 @@ pub fn App(comptime Model: type) type {
             // 3. Read one event (paced to fps; pipe EOF quits).
             var ev: ?Event = null;
             if (self.reader) |*r| {
-                const timeout: i32 = if (self.opts.fps > 0)
-                    @intCast(1000 / self.opts.fps)
-                else
-                    -1;
+                // Adaptive pacing: the nominal cadence, widened when the
+                // last frame cost more than half of it (~50% duty cap).
+                const timeout: i32 = self.pacer.delayMs(self.opts.fps);
                 ev = r.nextTimeout(timeout) catch |err| blk: {
                     switch (err) {
                         error.EndOfStream => {
@@ -289,41 +376,206 @@ pub fn App(comptime Model: type) type {
             const vw = Model.view(&self.model, &ctx);
             self.render_requested = ctx.render_requested;
 
-            // 8. Frame-level modes: dynamic band height (inline only) and
-            //    the terminal title (on content change, every tick).
+            // 8. Frame-level declaration: the dynamic band height. The
+            //    terminal title is staged inside the frame (step 9) so
+            //    it shares the frame's single write.
             if (vw.height != 0 and vw.height != self.region.?.height) {
                 try self.region.?.setHeight(vw.height);
             }
-            if (vw.title) |vt| {
-                if (self.title == null or !std.mem.eql(u8, vt, self.title.?)) {
-                    if (w) |ww| try self.writeTitle(vt, ww);
-                    self.title = vt;
-                }
+
+            // 9. The frame: staged into the bounded output queue and
+            //    submitted once (see `renderStep`). The degraded
+            //    (non-TTY) session renders its single plain frame in
+            //    `run`, never from tick.
+            if (self.tty != null) {
+                _ = try self.renderStep(vw, &ctx, dispatched, output.Transport.from(&self.tty.?));
+            }
+        }
+
+        /// One frame: stage the mode diff, the title and the band into
+        /// the output queue, commit the staging, then submit it with a
+        /// SINGLE nonblocking write attempt. Returns the bytes the
+        /// transport accepted.
+        ///
+        /// Backpressure (B1): at the watermark the frame is neither
+        /// composed nor committed — the render stays requested and the
+        /// identical frame is retried next tick after a drain. Input is
+        /// read on every tick regardless, so a slow reader costs
+        /// animation latency, never responsiveness and never history.
+        ///
+        /// Idle tick: a tick that wants no new frame still drains the
+        /// queue, so a frame the transport accepted only in part stops
+        /// being half-painted without waiting for the next repaint.
+        ///
+        /// Failure discipline (B2): a composition that overflows the
+        /// queue aborts before any frame state advances (no prev, no
+        /// dirty flag, no ledger receipt, no last_sig), so the retry
+        /// paints the whole frame again.
+        /// Terminal modes follow the same rule: the mode diff is staged
+        /// with the frame, so a failed composition restores the mode
+        /// state it would have advanced and the retry re-emits it.
+        ///
+        /// Acknowledgement (C1): the ledger is acknowledged exactly when
+        /// the transport has taken every staged byte and never before,
+        /// and the transcript block behind a receipt is committed then —
+        /// at enqueue time the block is merely out of the mutable view.
+        ///
+        /// The error set is inferred because `View.draw` is an
+        /// `anyerror` callback owned by the model.
+        fn renderStep(self: *Self, vw: Vw, ctx: *Context, force: bool, sink: output.Transport) !usize {
+            const q = if (self.out) |*queue| queue else return 0;
+            // The stats describe THIS attempt, so a deferred frame never
+            // reports the previous one's bytes.
+            self.frame_stats.staged_bytes = 0;
+            self.frame_stats.written_bytes = 0;
+            self.frame_stats.dirty_cells = 0;
+            self.frame_stats.frame_cost_ns = 0;
+
+            const sig = view_mod.signature(vw);
+            const mode_pending = vw.mouse != self.modes.mouse or
+                vw.hide_cursor != self.modes.hide_cursor;
+            const wanted = force or self.render_requested or sig != self.last_sig or
+                mode_pending or vw.print_above or self.regionPending();
+            // No new frame is owed, yet an earlier one may sit in the
+            // queue half-written (a short write or a would-block
+            // transport accepted part of it). The idle tick drains that
+            // tail — one nonblocking attempt, no draw — instead of
+            // leaving the band truncated until the next repaint.
+            if (!wanted) return self.drainQueued(q, sink);
+
+            if (!q.canCompose()) {
+                self.frame_stats.deferred_frames += 1;
+                self.render_requested = true;
+                return self.drainQueued(q, sink);
             }
 
-            // 9. Render decision (render-on-demand + whole-View hash
-            //    skip): an event/msg was dispatched, the frame asked for a
-            //    repaint, the declaration changed, a mode transition is
-            //    pending, print_above is set, or the region has pending
-            //    work (first frame / resize / height change / appends).
-            //    Else: idle — skip draw+render (the Region would emit
-            //    zero bytes anyway; this avoids the draw call). The
-            //    degraded (non-TTY) path never renders from tick.
-            const sig = view_mod.signature(vw);
-            const mode_pending = vw.alt_screen != self.modes.alt_screen or
-                vw.mouse != self.modes.mouse or
-                vw.hide_cursor != self.modes.hide_cursor;
-            const region_pending = self.regionPending();
-            if (self.tty != null and
-                (dispatched or self.render_requested or sig != self.last_sig or
-                    mode_pending or vw.print_above or region_pending))
-            {
-                _ = try view_mod.applyModeDiff(vw, w.?, &self.modes);
-                try vw.draw(&self.model, &ctx, &self.region.?.cur);
-                try self.region.?.render(w.?);
-                self.last_sig = sig;
+            const started = std.Io.Timestamp.now(self.io.?, .awake);
+            const pending_before = q.pending();
+            const dirty = try self.stageFrame(vw, ctx);
+            q.commitFrame();
+            self.last_sig = sig;
+            // This frame's own bytes, measured BEFORE the drain: a
+            // drain can empty the queue entirely (accepting older
+            // frames' bytes too), and `pending` would then read 0 for a
+            // frame that is still pending.
+            const staged = q.pending() - pending_before;
+
+            const taken = try q.drain(sink);
+            const cost_ns: u64 = @intCast(@max(
+                0,
+                started.durationTo(std.Io.Timestamp.now(self.io.?, .awake)).nanoseconds,
+            ));
+            self.pacer.noteFrameCost(cost_ns);
+            self.frame_stats.frames += 1;
+            self.frame_stats.dirty_cells = dirty;
+            self.frame_stats.staged_bytes = staged;
+            self.frame_stats.written_bytes = taken;
+            self.frame_stats.peak_pending = q.peak_pending;
+            self.frame_stats.frame_cost_ns = cost_ns;
+            // The transport took every staged byte: the ledger receipts
+            // are acknowledged exactly once (C1) and the transcript
+            // blocks that produced them are committed (C3).
+            if (q.pending() == 0) self.commitHistory();
+            return taken;
+        }
+
+        /// Compose the frame in progress — the mode diff, the title and
+        /// the band — into the output queue. Nothing is published here
+        /// (`commitFrame` does that), so a failure rolls the staged
+        /// bytes AND the mode state back together: the retry emits the
+        /// very same mode sequences instead of declaring a mode the
+        /// terminal never received. Returns the damage the frame paints.
+        fn stageFrame(self: *Self, vw: Vw, ctx: *Context) !usize {
+            const q = &self.out.?;
+            const modes_before = self.modes;
+            errdefer {
+                q.abortFrame();
+                self.modes = modes_before;
+                self.render_requested = true;
             }
-            if (w) |ww| try ww.flush();
+            q.beginFrame();
+            const w = q.writer();
+            _ = try view_mod.applyModeDiff(vw, w, &self.modes);
+            if (vw.title) |vt| try self.stageTitle(vt, w);
+            self.region.?.setCursorHidden(vw.hide_cursor);
+            try vw.draw(&self.model, ctx, &self.region.?.cur);
+            const dirty = self.region.?.dirtyCells();
+            try self.retireTranscript();
+            try self.region.?.render(w);
+            if (q.frameOverflowed()) return error.FrameTooLarge;
+            return dirty;
+        }
+
+        /// One nonblocking drain for a tick that composes no frame: the
+        /// queued bytes leave, the accepted count is this attempt's
+        /// `written_bytes`, and the ledger receipts are acknowledged
+        /// only once the queue has taken every staged byte (C1).
+        fn drainQueued(self: *Self, q: *output.OutputQueue, sink: output.Transport) !usize {
+            if (q.pending() == 0) return 0;
+            const taken = try q.drain(sink);
+            self.frame_stats.written_bytes = taken;
+            if (q.pending() == 0) self.commitHistory();
+            return taken;
+        }
+
+        /// One frame without input — the headless seam the bench and the
+        /// debug server drive (`tick` also reads input, so it is not
+        /// usable headlessly). Runs view + draw, stages the frame into the
+        /// output queue, and attempts ONE drain into `sink`. Returns the
+        /// bytes the transport accepted; 0 means the frame is still
+        /// pending and the next call continues it.
+        pub fn frameHeadless(self: *Self, sink: output.Transport) !usize {
+            if (self.scratch) |*s| _ = s.reset(.retain_capacity);
+            self.render_requested = false;
+            var ctx = self.makeCtx();
+            const vw = Model.view(&self.model, &ctx);
+            if (vw.height != 0 and vw.height != self.region.?.height) {
+                try self.region.?.setHeight(vw.height);
+            }
+            return self.renderStep(vw, &ctx, true, sink);
+        }
+
+        /// Allocate the streaming transcript (C3). The 8 ms retirement
+        /// budget and the 256-block live bound are the defaults; an app
+        /// without streaming output never allocates one.
+        pub fn initTranscript(self: *Self, gpa: std.mem.Allocator, opts: transcript.Transcript.Options) !void {
+            self.transcript = try transcript.Transcript.init(gpa, opts);
+        }
+
+        /// Retire settled transcript blocks (C3) and stage the delta as
+        /// one ledger batch. Finality is the product's decision: this only
+        /// moves blocks the product settled, oldest first, within the
+        /// frame's time budget, and defers the rest to the next frame.
+        ///
+        /// The three steps are one transaction. `retire` reserves the
+        /// seal before a block leaves the mutable view and keeps an
+        /// unsealed delta alive, `writeTranscript` is the only step
+        /// that can fail, and a failure here aborts the frame with the
+        /// delta still pending: the next frame re-emits the same rows
+        /// and the same block ids, so a refused batch is retried, never
+        /// lost and never written twice.
+        fn retireTranscript(self: *Self) !void {
+            const t = if (self.transcript) |*t| t else return;
+            var delta: transcript.Transcript.Delta = .{};
+            const io = self.io.?;
+            try t.retire(transcript.Clock.fromIo(&io), &delta);
+            if (delta.isEmpty()) return;
+            const receipt = try self.region.?.writeTranscript(delta.rows);
+            try t.sealDelta(receipt);
+        }
+
+        /// The queue drained empty: acknowledge the ledger receipts and
+        /// commit the transcript blocks behind them. A receipt the
+        /// transcript does not know is reported, never silently dropped.
+        fn commitHistory(self: *Self) void {
+            const receipts = if (self.region) |*r| r.acknowledgeDrained() else return;
+            const t = if (self.transcript) |*t| t else return;
+            for (receipts) |id| {
+                t.commitReceipt(id) catch |err| std.log.scoped(.notui_app).warn(
+                    "transcript receipt {d} is not pending: {s}",
+                    .{ id, @errorName(err) },
+                );
+            }
         }
 
         /// start + loop until quit + teardown (Region.exit → caps.restore
@@ -357,9 +609,14 @@ pub fn App(comptime Model: type) type {
         }
 
         /// Render the degraded (non-TTY) session's single plain frame into
-        /// `w` (§5.5): fresh scratch, view, band height, title, draw, then
-        /// the region's plain-frame render. The app's `view` runs so a
+        /// `w` (§5.5): fresh scratch, view, band height, draw, then the
+        /// region's plain-frame render. The app's `view` runs so a
         /// non-TTY user sees the same content.
+        ///
+        /// The declared title is deliberately NOT written: a pipe has no
+        /// window, so an OSC 0 sequence would be literal garbage in the
+        /// transcript. The degraded frame carries no escape byte at all
+        /// — not from the envelope, not from styles, not from here.
         fn renderPlainFrame(self: *Self, w: anytype) !void {
             if (self.scratch) |*s| _ = s.reset(.retain_capacity);
             var ctx = self.makeCtx();
@@ -367,14 +624,18 @@ pub fn App(comptime Model: type) type {
             if (vw.height != 0 and vw.height != self.region.?.height) {
                 try self.region.?.setHeight(vw.height);
             }
-            if (vw.title) |vt| try self.writeTitle(vt, w);
             try vw.draw(&self.model, &ctx, &self.region.?.cur);
             try self.region.?.render(w);
             try w.flush();
         }
 
-        /// Tear down arena/scratch/region/tty. Idempotent; called by run.
+        /// Tear down transcript/queue/arena/scratch/region/tty.
+        /// Idempotent; called by run.
         pub fn deinit(self: *Self) void {
+            if (self.transcript) |*t| t.deinit();
+            self.transcript = null;
+            if (self.out) |*q| q.deinit();
+            self.out = null;
             if (self.arena) |*a| {
                 a.deinit();
                 self.arena = null;
@@ -460,33 +721,94 @@ pub fn App(comptime Model: type) type {
                     self.render_requested = true;
                 },
                 .set_title => |t| {
-                    if (w) |ww| try self.writeTitle(t, ww);
+                    try self.stageTitleNow(t, w);
                     self.title = t;
                 },
                 .mouse => |on| {
                     // Immediate mode op; the next frame's View.mouse wins.
-                    if (w) |ww| {
-                        if (on) {
-                            try ww.writeAll("\x1b[?1006h\x1b[?1000h");
-                        } else {
-                            try ww.writeAll("\x1b[?1006l\x1b[?1000l");
-                        }
-                    }
+                    try self.stageBytes(if (on) mouse_on else mouse_off, w);
                     self.modes.mouse = on;
                 },
                 .cursor => |show| {
-                    if (w) |ww| {
-                        if (show) try emit.showCursor(ww) else try emit.hideCursor(ww);
-                    }
+                    try self.stageBytes(if (show) emit.cursor_show else emit.cursor_hide, w);
                     self.modes.hide_cursor = show;
                 },
-                .alt_screen => |alt| {
-                    // Parsed-but-noop in v1 (Q1): tracked for the
-                    // signature/mode gating; the full-screen renderer is
-                    // the deferred architecture §7 item.
-                    self.modes.alt_screen = alt;
-                },
             }
+        }
+
+        /// SGR 1006 mouse reporting on/off (the only mode ops the
+        /// framework writes on demand).
+        const mouse_on = "\x1b[?1006h\x1b[?1000h";
+        const mouse_off = "\x1b[?1006l\x1b[?1000l";
+
+        /// A staged byte run (a mode op).
+        const StageBytes = struct {
+            bytes: []const u8,
+            pub fn write(self: StageBytes, out: *std.Io.Writer) error{WriteFailed}!void {
+                try out.writeAll(self.bytes);
+            }
+        };
+
+        /// A staged OSC 0 title change.
+        const StageTitle = struct {
+            title: []const u8,
+            pub fn write(self: StageTitle, out: *std.Io.Writer) error{WriteFailed}!void {
+                try out.writeAll("\x1b]0;");
+                try out.writeAll(self.title);
+                try out.writeByte(0x07);
+            }
+        };
+
+        /// Stage an immediate effect (a title or a mode op) through the
+        /// output queue and submit it with one nonblocking write
+        /// attempt — still never blocking. Above the watermark the effect
+        /// is deferred, not grown: the next frame re-applies the
+        /// declaration and emits it. A session without a queue (the
+        /// degraded path) writes through the writer it was handed.
+        fn stageWith(
+            self: *Self,
+            w: ?*std.Io.Writer,
+            ctx: anytype,
+            comptime stage: fn (@TypeOf(ctx), *std.Io.Writer) error{WriteFailed}!void,
+        ) error{ FrameTooLarge, WriteFailed }!void {
+            if (self.out) |*q| {
+                if (!q.canCompose()) {
+                    self.render_requested = true;
+                    return;
+                }
+                q.beginFrame();
+                stage(ctx, q.writer()) catch {
+                    q.abortFrame();
+                    self.render_requested = true;
+                    return error.FrameTooLarge;
+                };
+                if (q.frameOverflowed()) {
+                    q.abortFrame();
+                    self.render_requested = true;
+                    return error.FrameTooLarge;
+                }
+                q.commitFrame();
+                _ = try q.drain(&self.tty.?);
+                return;
+            }
+            if (w) |ww| try stage(ctx, ww);
+        }
+
+        fn stageBytes(self: *Self, bytes: []const u8, w: ?*std.Io.Writer) error{ FrameTooLarge, WriteFailed }!void {
+            try self.stageWith(w, StageBytes{ .bytes = bytes }, StageBytes.write);
+        }
+
+        /// Stage the View's declared title into the frame in progress,
+        /// so the OSC 0 change shares the frame's single write instead
+        /// of becoming a write of its own.
+        fn stageTitle(self: *Self, title: []const u8, w: *std.Io.Writer) error{WriteFailed}!void {
+            _ = self;
+            try (StageTitle{ .title = title }).write(w);
+        }
+
+        /// The same OSC 0 write as an immediate effect, outside a frame.
+        fn stageTitleNow(self: *Self, title: []const u8, w: ?*std.Io.Writer) error{ FrameTooLarge, WriteFailed }!void {
+            try self.stageWith(w, StageTitle{ .title = title }, StageTitle.write);
         }
 
         // ── internals ──
@@ -500,12 +822,21 @@ pub fn App(comptime Model: type) type {
             self.region = try Region.init(gpa, .{
                 .height = self.opts.region_height,
                 .append_lines = self.opts.append_lines,
-                .sync_output = true,
+                // The B2 split: an interactive session, and DEC 2026
+                // only when the terminal advertised it.
+                .interactive = true,
+                .sync_output = self.caps.?.sync_output,
+                .resize_mode = self.opts.resize_mode,
                 .width_policy = self.caps.?.widthPolicy(),
             });
             errdefer {
                 self.region.?.deinit();
                 self.region = null;
+            }
+            self.out = try output.OutputQueue.init(gpa, self.opts.output);
+            errdefer {
+                self.out.?.deinit();
+                self.out = null;
             }
             const ws = try self.tty.?.getWinsize();
             try self.region.?.resize(ws.cols, self.region.?.height);
@@ -524,7 +855,10 @@ pub fn App(comptime Model: type) type {
             self.region = try Region.init(gpa, .{
                 .height = self.opts.region_height,
                 .append_lines = self.opts.append_lines,
+                // Piped output: no envelope, one plain frame at exit.
+                .interactive = false,
                 .sync_output = false,
+                .resize_mode = self.opts.resize_mode,
                 .width_policy = caps.Capabilities.WidthPolicy.zg_unicode,
             });
             errdefer {
@@ -536,13 +870,62 @@ pub fn App(comptime Model: type) type {
             self.running = true;
         }
 
-        /// Emit the exit sequences in order: Region.exit then caps.restore
-        /// (contract §5.4; the alt-screen exit is skipped — alt is a no-op
-        /// in v1, Q1). `run` calls this before `deinit`.
+        /// Emit the exit sequences in order: Region.exit (cursor,
+        /// autowrap, sync) then caps.restore (contract §5.4). `run` calls
+        /// this before `deinit`.
+        ///
+        /// An interactive session stages the teardown into the output
+        /// queue and then blocks the remainder out, so the terminal never
+        /// keeps an envelope half-open and nothing staged is lost.
         fn emitTeardown(self: *Self, w: anytype) !void {
+            if (self.out) |*q| {
+                q.beginFrame();
+                self.writeTeardown(q.writer()) catch |err| {
+                    q.abortFrame();
+                    return err;
+                };
+                if (q.frameOverflowed()) {
+                    q.abortFrame();
+                    return error.FrameTooLarge;
+                }
+                q.commitFrame();
+                try q.drainAll(self.tty.?.writer());
+                return;
+            }
+            try self.writeTeardown(w);
+            try w.flush();
+        }
+
+        fn writeTeardown(self: *Self, w: anytype) !void {
             if (self.region) |*r| try r.exit(w);
             if (self.caps) |*c| try c.restore(w);
-            try w.flush();
+        }
+
+        /// The loop stalled (the watchdog saw a frame blow its budget).
+        /// Push out what is staged, restore the terminal, stop
+        /// composing, and propagate: a wedged loop must unwind, not keep
+        /// painting into a terminal nobody is reading.
+        fn degradeStall(self: *Self) error{ WriteFailed, FrameTooLarge, WatchdogTripped }!noreturn {
+            if (self.out) |*q| q.abortFrame();
+            if (self.tty) |*t| {
+                const w = t.writer();
+                if (self.out) |*q| {
+                    q.drainAll(w) catch |err| std.log.scoped(.notui_app).warn(
+                        "could not flush the output queue after a stall: {s}",
+                        .{@errorName(err)},
+                    );
+                }
+                self.writeTeardown(w) catch |err| std.log.scoped(.notui_app).warn(
+                    "could not restore the terminal after a stall: {s}",
+                    .{@errorName(err)},
+                );
+                w.flush() catch |err| std.log.scoped(.notui_app).warn(
+                    "could not flush the terminal after a stall: {s}",
+                    .{@errorName(err)},
+                );
+            }
+            self.running = false;
+            return error.WatchdogTripped;
         }
 
         /// Build a fresh Context for this tick. Call before every model
@@ -566,25 +949,18 @@ pub fn App(comptime Model: type) type {
         }
 
         /// True when the region has unflushed work (first frame, a pending
-        /// resize/height change, or queued appends) — forces a render.
+        /// resize/height change, queued appends, or a ledger batch the
+        /// terminal has not been sent yet) — forces a render.
         fn regionPending(self: *Self) bool {
-            const r = &self.region.?;
+            const r = self.region.?;
             return r.first_frame or r.width_dirty or r.height_dirty or
-                r.append_queue.items.len > 0;
+                r.append_queue.items.len > 0 or r.history.items.len > r.history_written;
         }
 
         /// Enqueue `Msg.tick` (the single periodic message name; models
         /// map it to their own timer message in update, §6).
         fn enqueueTick(self: *Self) !void {
             try self.msg_queue.append(self.gpa, @as(Msg, .tick));
-        }
-
-        /// Write an OSC 0 title change (`\x1b]0;{s}\x07`).
-        fn writeTitle(self: *Self, title: []const u8, w: anytype) !void {
-            _ = self;
-            try w.writeAll("\x1b]0;");
-            try w.writeAll(title);
-            try w.writeAll("\x07");
         }
     };
 }
@@ -652,25 +1028,6 @@ const RecModel = struct {
     fn draw(_: *RecModel, _: *Context, _: *Buffer) anyerror!void {}
 };
 
-/// A model whose view declares the alt-screen target (a no-op in v1).
-const AltModel = struct {
-    pub const Msg = union(enum) { tick };
-    alt: bool = false,
-
-    fn init(_: std.mem.Allocator) !struct { model: AltModel, cmd: Cmd(AltModel.Msg) } {
-        return .{ .model = .{}, .cmd = .none };
-    }
-    fn update(_: *AltModel, _: Msg, _: *Context) !Cmd(Msg) {
-        return .none;
-    }
-    fn view(self: *const AltModel, _: *Context) View(AltModel) {
-        return .{ .draw = &draw, .alt_screen = self.alt };
-    }
-    fn draw(_: *AltModel, _: *Context, buf: *Buffer) anyerror!void {
-        _ = try buf.draw(.{}, "alt", 0, 0);
-    }
-};
-
 /// A model for the Ctrl+C filter test.
 const CtrlModel = struct {
     pub const Msg = union(enum) { tick, quit };
@@ -723,7 +1080,9 @@ const TestWriter = struct {
 /// createPair defaults to AF_INET, which fails with EOPNOTSUPP).
 const FakeTty = struct {
     a: posix.fd_t, // the "tty" end (owned by App's Tty)
-    b: posix.fd_t, // the test end
+    b: posix.fd_t, // the test end (input)
+    out_w: posix.fd_t, // the app's nonblocking output transport
+    out_r: posix.fd_t, // the test reads output here
 
     fn init() !FakeTty {
         var fds: [2]posix.fd_t = undefined;
@@ -734,14 +1093,19 @@ const FakeTty = struct {
             const rc = posix.system.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds);
             if (posix.errno(rc) != .SUCCESS) return error.SystemResources;
         }
-        return .{ .a = fds[0], .b = fds[1] };
+        // A real O_NONBLOCK pipe for output, so the App's drain hits a
+        // real WouldBlock instead of a simulated counter.
+        const pipe_fds = try std.Io.Threaded.pipe2(.{ .NONBLOCK = true });
+        return .{ .a = fds[0], .b = fds[1], .out_w = pipe_fds[1], .out_r = pipe_fds[0] };
     }
 
-    /// Close only the test end: end `a` is closed by App.deinit →
-    /// Tty.deinit.
+    /// Close only the test ends: end `a` and `out_w` are closed by
+    /// App.deinit → Tty.deinit.
     fn deinit(self: *FakeTty) void {
         const f: std.Io.File = .{ .handle = self.b, .flags = .{ .nonblocking = false } };
         f.close(testing.io);
+        const r: std.Io.File = .{ .handle = self.out_r, .flags = .{ .nonblocking = true } };
+        r.close(testing.io);
         self.* = undefined;
     }
 
@@ -749,6 +1113,7 @@ const FakeTty = struct {
         return .{
             .io = testing.io,
             .fd = .{ .handle = self.a, .flags = .{ .nonblocking = false } },
+            .out = .{ .handle = self.out_w, .flags = .{ .nonblocking = true } },
         };
     }
 
@@ -758,18 +1123,43 @@ const FakeTty = struct {
         try f.writeStreamingAll(testing.io, bytes);
     }
 
-    /// Read whatever output the app flushed into the socket (poll 0, then
-    /// a blocking read — the data is present after a flush).
+    /// Read whatever the App's transport wrote into the pipe. A
+    /// nonblocking read: the test decides when the reader drains, which
+    /// is what makes the backpressure test real.
     fn drainOutput(self: *FakeTty, buf: []u8) usize {
-        var pollfds = [_]posix.pollfd{.{
-            .fd = self.b,
-            .events = posix.POLL.IN,
-            .revents = 0,
-        }};
-        const n = posix.poll(&pollfds, 0) catch return 0;
-        if (n == 0 or (pollfds[0].revents & posix.POLL.IN) == 0) return 0;
-        const f: std.Io.File = .{ .handle = self.b, .flags = .{ .nonblocking = false } };
+        const f: std.Io.File = .{ .handle = self.out_r, .flags = .{ .nonblocking = true } };
         return f.readStreaming(testing.io, &.{buf}) catch 0;
+    }
+
+    /// Drain the pipe completely, so a "terminal that is reading" can be
+    /// simulated after a blocked stretch.
+    fn drainAll(self: *FakeTty, sink: *std.ArrayListUnmanaged(u8)) !void {
+        var buf: [4096]u8 = undefined;
+        while (true) {
+            const n = self.drainOutput(&buf);
+            if (n == 0) break;
+            try sink.appendSlice(testing.allocator, buf[0..n]);
+        }
+    }
+
+    /// Stop the fake terminal from reading: fill its output buffer, so
+    /// the App's next drain hits a real WouldBlock instead of a
+    /// simulated one. Returns the filler byte count left queued, so a
+    /// test that later drains the pipe can tell the filler from the
+    /// App's own bytes. Nothing but backpressure tests need this: an
+    /// empty 64 KiB pipe absorbs tens of frames, so a handful of
+    /// never blocks and the deferral path would never run.
+    fn stopReading(self: *FakeTty) !usize {
+        const f: std.Io.File = .{ .handle = self.out_w, .flags = .{ .nonblocking = true } };
+        const chunk = [_]u8{'.'} ** 4096;
+        var filled: usize = 0;
+        while (true) {
+            const n = f.writeStreaming(testing.io, "", &.{&chunk}, 1) catch |err| switch (err) {
+                error.WouldBlock => return filled,
+                else => return err,
+            };
+            filled += n;
+        }
     }
 };
 
@@ -787,10 +1177,17 @@ fn setupInteractive(comptime M: type, opts: App(M).Options) !struct { app: App(M
     app.region = try Region.init(testing.allocator, .{
         .height = opts.region_height,
         .append_lines = opts.append_lines,
+        .interactive = true,
         .sync_output = true,
+        .resize_mode = opts.resize_mode,
     });
     errdefer app.region.?.deinit();
     try app.region.?.resize(80, opts.region_height);
+    app.out = try output.OutputQueue.init(testing.allocator, opts.output);
+    errdefer {
+        app.out.?.deinit();
+        app.out = null;
+    }
     app.arena = std.heap.ArenaAllocator.init(testing.allocator);
     app.scratch = std.heap.ArenaAllocator.init(testing.allocator);
     app.reader = Reader.init(&app.tty.?);
@@ -831,7 +1228,7 @@ fn cmdApp(comptime M: type) !App(M) {
     app.model = (try M.init(testing.allocator)).model;
     app.io = testing.io;
     app.gpa = testing.allocator;
-    app.region = try Region.init(testing.allocator, .{ .height = 2, .sync_output = false });
+    app.region = try Region.init(testing.allocator, .{ .height = 2, .interactive = false });
     app.arena = std.heap.ArenaAllocator.init(testing.allocator);
     app.scratch = std.heap.ArenaAllocator.init(testing.allocator);
     return app;
@@ -858,7 +1255,7 @@ test "app: degraded path renders one plain frame, no raw mode" {
     try testing.expect(app.tty == null); // no raw mode, no /dev/tty
     try testing.expect(app.caps == null);
     try testing.expect(app.reader == null);
-    try testing.expect(!app.region.?.opts.sync_output);
+    try testing.expect(!app.region.?.opts.interactive);
     try testing.expect(app.isRunning());
 
     // The degraded tick runs the update/view pass but never emits output;
@@ -872,7 +1269,45 @@ test "app: degraded path renders one plain frame, no raw mode" {
     try app.renderPlainFrame(&tw.w);
     try testing.expect(!app.region.?.first_frame); // exactly one plain frame
     try testing.expect(std.mem.indexOf(u8, tw.w.buffered(), "hi") != null);
-    try testing.expect(std.mem.indexOf(u8, tw.w.buffered(), "\x1b[?25l") == null); // no interactive sequences
+    // Not one escape byte: no envelope, no SGR, no cursor switch.
+    try testing.expect(std.mem.indexOf(u8, tw.w.buffered(), "\x1b") == null);
+}
+
+/// A model that declares a window title and styles its text: a pipe has
+/// neither a window nor a terminal, so neither may reach the bytes.
+const PlainModel = struct {
+    pub const Msg = union(enum) { tick };
+
+    fn init(_: std.mem.Allocator) !struct { model: PlainModel, cmd: Cmd(Msg) } {
+        return .{ .model = .{}, .cmd = .none };
+    }
+    fn update(_: *PlainModel, _: Msg, _: *Context) !Cmd(Msg) {
+        return .none;
+    }
+    fn view(_: *const PlainModel, _: *Context) View(PlainModel) {
+        return .{ .draw = &draw, .title = "window" };
+    }
+    fn draw(_: *PlainModel, _: *Context, buf: *Buffer) anyerror!void {
+        _ = try buf.draw(.{ .fg = .{ .ansi = .red } }, "hi", 0, 0);
+    }
+};
+
+test "app: the degraded frame drops the title and the style, not the text" {
+    var app = App(PlainModel).init();
+    app.io = testing.io;
+    try app.startPlain(testing.allocator);
+    try app.processInit();
+    defer app.deinit();
+    try app.tick();
+
+    var tw: TestWriter = .{};
+    tw.init();
+    try app.renderPlainFrame(&tw.w);
+    const out = tw.w.buffered();
+    // The content is there, and nothing else rode along: no OSC 0 for
+    // the declared title, no SGR for the styled cell.
+    try testing.expect(std.mem.indexOf(u8, out, "hi") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b") == null);
 }
 
 test "app: run in degraded mode stops after one plain frame" {
@@ -940,28 +1375,6 @@ test "app: unchanged View signature skips draw on idle ticks" {
     try testing.expectEqual(@as(usize, 2), setup.app.model.draws);
 }
 
-test "app: alt_screen is parsed but a no-op — no smcup/rmcup (Q1)" {
-    var setup = try setupInteractive(AltModel, .{ .fps = 1000 });
-    defer setup.app.deinit();
-    defer setup.tty.deinit();
-    setup.app.model.alt = true;
-
-    try setup.app.tick(); // alt declared: renders normally, no smcup
-    var out: [4096]u8 = undefined;
-    const n = setup.tty.drainOutput(&out);
-    try testing.expect(n > 0); // the frame WAS rendered
-    try testing.expect(std.mem.indexOf(u8, out[0..n], "\x1b[?1049h") == null);
-    try testing.expect(std.mem.indexOf(u8, out[0..n], "\x1b[?1049l") == null);
-    try testing.expect(setup.app.modes.alt_screen);
-
-    setup.app.model.alt = false;
-    try setup.app.tick(); // flipping back: still no rmcup
-    const n2 = setup.tty.drainOutput(&out);
-    try testing.expect(std.mem.indexOf(u8, out[0..n2], "\x1b[?1049h") == null);
-    try testing.expect(std.mem.indexOf(u8, out[0..n2], "\x1b[?1049l") == null);
-    try testing.expect(!setup.app.modes.alt_screen);
-}
-
 /// A model whose drawn text is allocated from the app-lifetime
 /// `frame_arena` (the frame Buffer borrows the slice, cell.zig) and
 /// changes every tick — the soundness regression: with a per-tick-reset
@@ -1010,9 +1423,9 @@ test "app: frame_arena text repaints when the content changes (no prev aliasing)
 test "app: teardown emits Region.exit then caps.restore" {
     var app = try cmdApp(TestModel);
     defer app.deinit();
-    // Region.exit emits only for interactive regions (sync_output).
+    // Region.exit emits only for an interactive region.
     app.region.?.deinit();
-    app.region = try Region.init(testing.allocator, .{ .height = 2, .sync_output = true });
+    app.region = try Region.init(testing.allocator, .{ .height = 2, .interactive = true, .sync_output = true });
     app.caps = .{};
 
     var tw: TestWriter = .{};
@@ -1226,18 +1639,556 @@ test "cmd: mouse and cursor mode ops write the expected bytes" {
     try testing.expect(app.modes.hide_cursor);
 }
 
-test "cmd: alt_screen mode op is tracked, not emitted (Q1)" {
-    var app = try cmdApp(RecModel);
+// ── B1: the bounded frame path ────────────────────────
+
+/// A transport that records every write attempt: one submit per frame
+/// and the byte totals are read straight off it.
+const CountingSink = struct {
+    buf: [16384]u8 = undefined,
+    len: usize = 0,
+    calls: usize = 0,
+    /// The reader stopped draining: every attempt would block.
+    block: bool = false,
+    /// The terminal accepted this many bytes of the FIRST attempt and
+    /// everything after it: a short write that leaves a frame pending.
+    short: ?usize = null,
+
+    pub fn tryWrite(self: *CountingSink, bytes: []const u8) output.OutputQueue.WriteError!usize {
+        self.calls += 1;
+        if (self.block) return 0;
+        const offer = if (self.calls == 1) self.short orelse bytes.len else bytes.len;
+        const n = @min(@min(bytes.len, offer), self.buf.len - self.len);
+        @memcpy(self.buf[self.len..][0..n], bytes[0..n]);
+        self.len += n;
+        return n;
+    }
+
+    fn delivered(self: *const CountingSink) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
+/// An app wired for headless frames: region, arenas, queue and the
+/// initial Cmd, but no tty, no reader, no input.
+fn setupHeadless(comptime M: type) !App(M) {
+    var app = App(M).init();
+    app.io = testing.io;
+    app.gpa = testing.allocator;
+    app.region = try Region.init(testing.allocator, .{
+        .height = 2,
+        .interactive = true,
+        .sync_output = true,
+    });
+    errdefer app.region.?.deinit();
+    try app.region.?.resize(80, 2);
+    app.out = try output.OutputQueue.init(testing.allocator, .{});
+    errdefer {
+        app.out.?.deinit();
+        app.out = null;
+    }
+    app.arena = std.heap.ArenaAllocator.init(testing.allocator);
+    app.scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    app.running = true;
+    try app.processInit();
+    return app;
+}
+
+/// Repaints a fresh marker every frame: the backpressure and headless
+/// frame fixture.
+const ChurnModel = struct {
+    pub const Msg = union(enum) { tick };
+    frame: usize = 0,
+    draws: usize = 0,
+
+    fn init(_: std.mem.Allocator) !struct { model: ChurnModel, cmd: Cmd(ChurnModel.Msg) } {
+        return .{ .model = .{}, .cmd = .none };
+    }
+    fn update(_: *ChurnModel, _: Msg, _: *Context) !Cmd(Msg) {
+        return .none;
+    }
+    fn view(_: *const ChurnModel, _: *Context) View(ChurnModel) {
+        return .{ .draw = &draw };
+    }
+    fn draw(self: *ChurnModel, ctx: *Context, buf: *Buffer) anyerror!void {
+        const text = try std.fmt.allocPrint(ctx.frame_arena, "f{d}", .{self.frame});
+        _ = try buf.draw(.{}, text, 0, 0);
+        self.draws += 1;
+    }
+};
+
+test "app: headless frames stage and submit in one write each" {
+    var app = try setupHeadless(ChurnModel);
     defer app.deinit();
+    var sink = CountingSink{};
+    const transport = output.Transport.from(&sink);
+
+    for (0..5) |i| {
+        app.model.frame = i;
+        const taken = try app.frameHeadless(transport);
+        try testing.expect(taken > 0);
+        // The whole staged frame left in the single attempt.
+        try testing.expectEqual(app.frame_stats.staged_bytes, taken);
+    }
+    try testing.expectEqual(@as(usize, 5), sink.calls); // one submit per frame
+    try testing.expectEqual(@as(u64, 5), app.frame_stats.frames);
+    // The damage measurement is real: each frame changed a cell.
+    try testing.expect(app.frame_stats.dirty_cells > 0);
+    try testing.expect(app.frame_stats.peak_pending > 0);
+    // Every frame's marker reached the transport, in order.
+    for (0..5) |i| {
+        var needle: [8]u8 = undefined;
+        const want = try std.fmt.bufPrint(&needle, "f{d}", .{i});
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sink.delivered(), want));
+    }
+    try testing.expectEqual(@as(usize, 0), app.out.?.pending());
+}
+
+test "app: headless frames follow a blocked transport without losing bytes" {
+    var app = try setupHeadless(ChurnModel);
+    defer app.deinit();
+    var sink = CountingSink{ .block = true };
+    const transport = output.Transport.from(&sink);
+
+    // The transport is not draining: nothing is accepted, the frame stays
+    // pending, and the App keeps composing (the queue is below its
+    // watermark here, so this is the queue's own bound doing the work).
+    for (0..4) |i| {
+        app.model.frame = i;
+        const taken = try app.frameHeadless(transport);
+        try testing.expectEqual(@as(usize, 0), taken);
+    }
+    try testing.expect(sink.delivered().len == 0);
+    try testing.expect(app.out.?.pending() > 0);
+    // Bounded: the queue never grew past its declared capacity, and the
+    // deferred frame is still in it, in order.
+    try testing.expect(app.out.?.pending() <= app.out.?.buf.len);
+    try testing.expect(
+        std.mem.indexOf(u8, app.out.?.buf[app.out.?.start..app.out.?.end], "f0") != null,
+    );
+
+    // The reader catches up: the pending bytes leave in order, and the
+    // queue compacts at the next frame instead of failing.
+    sink.block = false;
+    _ = try app.frameHeadless(transport);
+    try testing.expectEqual(@as(usize, 0), app.out.?.pending());
+    try testing.expect(std.mem.indexOf(u8, sink.delivered(), "f0") != null);
+    try testing.expect(std.mem.indexOf(u8, sink.delivered(), "f3") != null);
+}
+
+test "app: a short-written frame drains on the next idle tick, receipts commit once" {
+    var app = try setupHeadless(ChurnModel);
+    defer app.deinit();
+    // The terminal takes part of the first write and everything after.
+    var sink = CountingSink{ .short = 5 };
+    const transport = output.Transport.from(&sink);
+    try app.initTranscript(testing.allocator, .{ .budget_ns = 0 });
+
+    const block = try app.transcript.?.push(&.{"idle"});
+    try app.transcript.?.settle(block);
+    app.model.frame = 4;
+    _ = try app.frameHeadless(transport);
+    try testing.expectEqual(@as(usize, 5), sink.len);
+    try testing.expect(app.out.?.pending() > 0);
+    // The frame is half-written, so the receipt behind its ledger rows
+    // is still outstanding and the block is still retained.
+    try testing.expectEqual(@as(usize, 1), app.region.?.historyPending().len);
+    try testing.expectEqual(@as(usize, 1), app.transcript.?.liveBlocks());
+
+    // Nothing is owed a new frame — same View, same modes, no ledger
+    // work — yet bytes are still queued. The idle tick drains them and
+    // composes nothing.
     var ctx = app.makeCtx();
-    var tw: TestWriter = .{};
-    tw.init();
+    const vw = ChurnModel.view(&app.model, &ctx);
+    const frames = app.frame_stats.frames;
+    const draws = app.model.draws;
+    const taken = try app.renderStep(vw, &ctx, false, transport);
+    try testing.expect(taken > 0);
+    try testing.expectEqual(@as(usize, 0), app.out.?.pending());
+    try testing.expectEqual(frames, app.frame_stats.frames);
+    try testing.expectEqual(draws, app.model.draws);
+    try testing.expectEqual(@as(usize, 0), app.frame_stats.staged_bytes);
+    try testing.expectEqual(taken, app.frame_stats.written_bytes);
 
-    try app.processCmd(.{ .alt_screen = true }, &ctx, &tw.w);
-    try testing.expectEqualStrings("", tw.w.buffered());
-    try testing.expect(app.modes.alt_screen);
+    // Every staged byte reached the terminal, the rows exactly once,
+    // and the receipt was acknowledged with them (C1).
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sink.delivered(), "idle\r\n"));
+    try testing.expectEqual(@as(usize, 0), app.region.?.historyPending().len);
+    try testing.expectEqual(@as(usize, 0), app.transcript.?.liveBlocks());
+    try testing.expectEqual(@as(?transcript.State, null), app.transcript.?.stateOf(block));
 
-    try app.processCmd(.{ .alt_screen = false }, &ctx, &tw.w);
-    try testing.expectEqualStrings("", tw.w.buffered());
-    try testing.expect(!app.modes.alt_screen);
+    // A further idle tick has nothing queued: no write attempt, no
+    // draw, no second commit, no duplicated row.
+    const calls = sink.calls;
+    try testing.expectEqual(@as(usize, 0), try app.renderStep(vw, &ctx, false, transport));
+    try testing.expectEqual(calls, sink.calls);
+    try testing.expectEqual(draws, app.model.draws);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sink.delivered(), "idle\r\n"));
+}
+
+test "app: a terminal that stopped reading defers frames and stays bounded" {
+    var setup = try setupInteractive(ChurnModel, .{
+        .fps = 1000,
+        .output = .{ .capacity = 2048, .watermark = 512 },
+    });
+    defer setup.app.deinit();
+    defer setup.tty.deinit();
+
+    // The fake terminal's buffer is full and nobody drains it, so every
+    // submit would block. Each tick sends a message because a frame is
+    // only owed when something asks for one: mutating the model behind
+    // an unchanged View signature composes nothing at all.
+    const filler = try setup.tty.stopReading();
+    var staged: usize = 0;
+    for (0..40) |i| {
+        setup.app.send(.tick);
+        setup.app.model.frame = i;
+        try setup.app.tick();
+        staged += setup.app.frame_stats.staged_bytes;
+    }
+    const q = &setup.app.out.?;
+    try testing.expect(staged > 0);
+    try testing.expect(setup.app.frame_stats.deferred_frames > 0);
+    // The declared bound held for the whole blocked stretch: neither the
+    // live pending window nor its peak exceeded the queue's capacity.
+    try testing.expect(q.peak_pending <= q.buf.len);
+    try testing.expect(q.pending() <= q.buf.len);
+
+    // Bounded: the watermark, not the capacity, is what stops the App.
+    // More blocked ticks compose no frame and queue no byte.
+    const composed = setup.app.frame_stats.frames;
+    const queued = q.pending();
+    for (0..20) |_| {
+        setup.app.send(.tick);
+        try setup.app.tick();
+    }
+    try testing.expectEqual(composed, setup.app.frame_stats.frames);
+    try testing.expectEqual(queued, q.pending());
+
+    // The reader drains: every staged byte arrives, byte for byte, so
+    // backpressure cost latency, never content. The filler the stopped
+    // terminal left behind is not the App's and is not counted.
+    var delivered: std.ArrayListUnmanaged(u8) = .empty;
+    defer delivered.deinit(testing.allocator);
+    for (0..20) |i| {
+        try setup.tty.drainAll(&delivered);
+        setup.app.send(.tick);
+        setup.app.model.frame = 100 + i;
+        try setup.app.tick();
+        staged += setup.app.frame_stats.staged_bytes;
+    }
+    try setup.tty.drainAll(&delivered);
+    try testing.expectEqual(staged, delivered.items.len - filler);
+    try testing.expectEqual(@as(usize, 0), q.pending());
+}
+
+test "app: the pacer caps the frame duty cycle near 50%" {
+    var pacer: Pacer = .{};
+    // fps == 0 blocks on input; the pacer never invents a cadence.
+    try testing.expectEqual(@as(i32, -1), pacer.delayMs(0));
+    try testing.expectEqual(@as(i32, 16), pacer.delayMs(60));
+    // A cadence faster than a millisecond still waits a millisecond:
+    // 1000/4000 truncates to zero, so the nominal wait is clamped.
+    try testing.expectEqual(@as(i32, 1), pacer.delayMs(4000));
+
+    // A cheap frame leaves the cadence alone.
+    pacer.noteFrameCost(std.time.ns_per_ms);
+    try testing.expectEqual(@as(i32, 16), pacer.delayMs(60));
+    try testing.expectEqual(@as(u64, 1), pacer.samples);
+
+    // A frame that ate more than half the interval pushes the next wait
+    // out to twice its cost, so composing cannot exceed ~50% of the loop.
+    // The cap is that cost, not the fps: the same frame holds the wait at
+    // 30 ms whatever cadence the app asked for.
+    pacer.noteFrameCost(15 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(i32, 30), pacer.delayMs(60));
+    try testing.expectEqual(@as(i32, 30), pacer.delayMs(4000));
+    try testing.expectEqual(@as(u64, 15 * std.time.ns_per_ms), pacer.worst_ns);
+}
+
+test "app: input stays responsive while output is backed up" {
+    var setup = try setupInteractive(ChurnQuitModel, .{
+        .fps = 1000,
+        .output = .{ .capacity = 1024, .watermark = 256 },
+    });
+    defer setup.app.deinit();
+    defer setup.tty.deinit();
+    setup.app.setFilter(&ctrlCQuitFilter);
+
+    // The fake terminal's buffer is full and nobody drains it, so the
+    // transport blocks, the watermark stops composition, and frames
+    // queue up behind it.
+    _ = try setup.tty.stopReading();
+    for (0..40) |i| {
+        setup.app.send(.tick);
+        setup.app.model.frame = i;
+        try setup.app.tick();
+    }
+    try testing.expect(setup.app.frame_stats.deferred_frames > 0);
+    try testing.expect(setup.app.out.?.pending() > 0);
+
+    // Ctrl+C is still read and dispatched while output is backed up.
+    try setup.tty.writeInput("\x03");
+    try setup.app.tick();
+    try testing.expect(!setup.app.isRunning());
+}
+
+/// Churns a marker every frame and quits on demand: the "slow terminal,
+/// responsive input" fixture.
+const ChurnQuitModel = struct {
+    pub const Msg = union(enum) { tick, quit };
+    frame: usize = 0,
+
+    fn init(_: std.mem.Allocator) !struct { model: ChurnQuitModel, cmd: Cmd(ChurnQuitModel.Msg) } {
+        return .{ .model = .{}, .cmd = .none };
+    }
+    fn update(_: *ChurnQuitModel, msg: Msg, _: *Context) !Cmd(Msg) {
+        return switch (msg) {
+            .quit => .quit,
+            .tick => .none,
+        };
+    }
+    fn view(_: *const ChurnQuitModel, _: *Context) View(ChurnQuitModel) {
+        return .{ .draw = &draw };
+    }
+    fn draw(self: *ChurnQuitModel, ctx: *Context, buf: *Buffer) anyerror!void {
+        const text = try std.fmt.allocPrint(ctx.frame_arena, "c{d}", .{self.frame});
+        _ = try buf.draw(.{}, text, 0, 0);
+    }
+};
+
+/// Ctrl+C routes to the model's own quit message — the library still
+/// never hard-quits. Both wire forms are matched: a terminal without the
+/// kitty protocol sends the legacy `\x03` byte, which the parser reports
+/// as ctrl+'c', and that is what this fake terminal sends.
+fn ctrlCQuitFilter(_: *Context, ev: Event) ?ChurnQuitModel.Msg {
+    return switch (ev) {
+        .key_press => |k| if (k.matches(Key.ctrl_c, .{}) or
+            k.matches('c', .{ .ctrl = true })) .quit else null,
+        else => null,
+    };
+}
+
+// ── C3: the transcript inside the App ─────────────────
+
+test "app: settled transcript blocks reach the ledger exactly once" {
+    var app = try setupHeadless(GoodModel);
+    defer app.deinit();
+    var sink = CountingSink{};
+    const transport = output.Transport.from(&sink);
+    // A zero retirement budget retires exactly one block per frame, so
+    // the ledger is seen arriving as a strict prefix (transcript.zig:
+    // "at least one block is retired per call so a zero budget still
+    // makes progress" — with no budget, that is one).
+    try app.initTranscript(testing.allocator, .{ .budget_ns = 0 });
+
+    const a = try app.transcript.?.push(&.{"alpha"});
+    const b = try app.transcript.?.push(&.{"beta"});
+    // Nothing is settled yet: finality is the product's call, not a
+    // function of time.
+    _ = try app.frameHeadless(transport);
+    try testing.expect(std.mem.indexOf(u8, sink.delivered(), "alpha") == null);
+
+    // b before a: order holds it back until the older block settles.
+    try app.transcript.?.settle(b);
+    _ = try app.frameHeadless(transport);
+    try testing.expect(std.mem.indexOf(u8, sink.delivered(), "beta") == null);
+    try app.transcript.?.settle(a);
+
+    // The older block retires first and its receipt is acknowledged
+    // with it; the newer one still waits its turn.
+    _ = try app.frameHeadless(transport);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sink.delivered(), "alpha\r\n"));
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, sink.delivered(), "beta\r\n"));
+    try testing.expectEqual(@as(usize, 0), app.region.?.historyPending().len);
+    try testing.expectEqual(@as(?transcript.State, null), app.transcript.?.stateOf(a));
+    try testing.expectEqual(@as(usize, 1), app.transcript.?.liveBlocks());
+
+    // The next frame retires `beta` behind its own receipt: both rows
+    // reached the terminal and both blocks left the mutable view for
+    // good.
+    _ = try app.frameHeadless(transport);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sink.delivered(), "beta\r\n"));
+    try testing.expectEqual(@as(usize, 0), app.region.?.historyPending().len);
+    try testing.expectEqual(@as(?transcript.State, null), app.transcript.?.stateOf(b));
+    try testing.expectEqual(@as(usize, 0), app.transcript.?.liveBlocks());
+
+    // Exactly once: later frames find nothing to retire, so neither row
+    // is ever written a second time.
+    _ = try app.frameHeadless(transport);
+    _ = try app.frameHeadless(transport);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sink.delivered(), "alpha\r\n"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sink.delivered(), "beta\r\n"));
+    try testing.expectEqual(@as(usize, 0), app.region.?.historyPending().len);
+    try testing.expectEqual(@as(usize, 0), app.transcript.?.liveBlocks());
+}
+
+test "app: a blocked transport defers the transcript delta, then commits once" {
+    var app = try setupHeadless(GoodModel);
+    defer app.deinit();
+    var sink = CountingSink{ .block = true };
+    const transport = output.Transport.from(&sink);
+    try app.initTranscript(testing.allocator, .{ .budget_ns = 0 });
+
+    const a = try app.transcript.?.push(&.{"held"});
+    try app.transcript.?.settle(a);
+    // The first frame stages the delta but the transport takes nothing.
+    _ = try app.frameHeadless(transport);
+    try testing.expectEqual(@as(usize, 0), sink.len);
+    try testing.expectEqual(@as(usize, 1), app.transcript.?.liveBlocks());
+    // The block is out of the mutable view but not committed: it is
+    // retained until the receipt is accepted.
+    try testing.expectEqual(@as(usize, 0), app.transcript.?.mutableBlocks());
+    try testing.expectEqual(@as(usize, 1), app.region.?.historyPending().len);
+
+    sink.block = false;
+    _ = try app.frameHeadless(transport);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sink.delivered(), "held\r\n"));
+    try testing.expectEqual(@as(usize, 0), app.transcript.?.liveBlocks());
+    try testing.expectEqual(@as(usize, 0), app.region.?.historyPending().len);
+}
+
+test "app: a refused ledger enqueue retries the same delta, losing nothing" {
+    var app = try setupHeadless(GoodModel);
+    defer app.deinit();
+    var sink = CountingSink{};
+    const transport = output.Transport.from(&sink);
+    try app.initTranscript(testing.allocator, .{ .budget_ns = 0 });
+
+    const a = try app.transcript.?.push(&.{"kept"});
+    try app.transcript.?.settle(a);
+
+    // The ledger refuses the batch: the frame aborts and the delta is
+    // still pending, so nothing reached the terminal and nothing was
+    // committed behind a receipt that was never handed over.
+    app.region.?.opts.max_history_bytes = 1;
+    try testing.expectError(error.HistoryTooLarge, app.frameHeadless(transport));
+    try testing.expectEqual(@as(usize, 0), sink.len);
+    try testing.expectEqual(@as(usize, 0), app.region.?.historyPending().len);
+    try testing.expectEqual(@as(usize, 1), app.transcript.?.liveBlocks());
+
+    // The retry re-emits the SAME rows and the SAME block: they reach
+    // the terminal exactly once, and the block is committed behind its
+    // own receipt.
+    app.region.?.opts.max_history_bytes = 256 * 1024;
+    _ = try app.frameHeadless(transport);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sink.delivered(), "kept\r\n"));
+    try testing.expectEqual(@as(usize, 0), app.region.?.historyPending().len);
+    try testing.expectEqual(@as(?transcript.State, null), app.transcript.?.stateOf(a));
+}
+
+test "app: an overflowing frame leaves the region retryable, nothing doubled" {
+    var app = try setupHeadless(ChurnModel);
+    defer app.deinit();
+    var sink = CountingSink{};
+    const transport = output.Transport.from(&sink);
+
+    // A queue far too small for the frame: the staging writer fails
+    // instead of truncating, so not one staged byte reaches the
+    // transport and the caller sees the failure.
+    app.out.?.deinit();
+    app.out = null;
+    app.out = try output.OutputQueue.init(testing.allocator, .{ .capacity = 24, .watermark = 8 });
+    app.model.frame = 7;
+    try testing.expectError(error.WriteFailed, app.frameHeadless(transport));
+    try testing.expectEqual(@as(usize, 0), sink.len);
+    // The frame is still owed whole: the band never published, the
+    // ledger never advanced and the next tick must paint again.
+    try testing.expect(app.region.?.first_frame);
+    try testing.expectEqual(@as(usize, 0), app.region.?.history_written);
+    try testing.expect(app.render_requested);
+
+    // The retry produces the complete frame, once.
+    app.out.?.deinit();
+    app.out = null;
+    app.out = try output.OutputQueue.init(testing.allocator, .{});
+    app.model.frame = 7;
+    _ = try app.frameHeadless(transport);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sink.delivered(), "f7"));
+    try testing.expect(!app.region.?.first_frame);
+}
+
+/// Declares a mode change and a title on demand: the frame's staged
+/// header, which must never outlive a composition that failed.
+const HeaderModel = struct {
+    pub const Msg = union(enum) { tick };
+    mouse: bool = false,
+    title: ?[]const u8 = null,
+    draws: usize = 0,
+
+    fn init(_: std.mem.Allocator) !struct { model: HeaderModel, cmd: Cmd(HeaderModel.Msg) } {
+        return .{ .model = .{}, .cmd = .none };
+    }
+    fn update(_: *HeaderModel, _: Msg, _: *Context) !Cmd(Msg) {
+        return .none;
+    }
+    fn view(self: *const HeaderModel, _: *Context) View(HeaderModel) {
+        return .{ .draw = &draw, .mouse = self.mouse, .title = self.title };
+    }
+    fn draw(self: *HeaderModel, _: *Context, buf: *Buffer) anyerror!void {
+        self.draws += 1;
+        _ = try buf.draw(.{}, "hdr", 0, 0);
+    }
+};
+
+test "app: a failed mode or title stage re-emits on retry, nothing published" {
+    var app = try setupHeadless(HeaderModel);
+    defer app.deinit();
+    var sink = CountingSink{};
+    const transport = output.Transport.from(&sink);
+
+    // A queue with room for the mode sequence but not for the title
+    // behind it: the frame's header fails after the modes were applied.
+    app.out.?.deinit();
+    app.out = null;
+    app.out = try output.OutputQueue.init(testing.allocator, .{ .capacity = 16, .watermark = 8 });
+    app.model.mouse = true;
+    app.model.title = "hdr";
+    try testing.expectError(error.WriteFailed, app.frameHeadless(transport));
+    try testing.expectEqual(@as(usize, 0), sink.len);
+    // The terminal was told nothing, so the mode state must not claim
+    // mouse reporting is on: the frame is still owed that sequence.
+    try testing.expect(!app.modes.mouse);
+    try testing.expect(app.render_requested);
+    // The aborted frame staged nothing and published nothing.
+    try testing.expectEqual(@as(usize, 0), app.out.?.pending());
+    try testing.expect(app.region.?.first_frame);
+    try testing.expectEqual(@as(usize, 0), app.model.draws);
+
+    // The retry re-emits the mode sequence it never delivered, then the
+    // title, then the band.
+    app.out.?.deinit();
+    app.out = null;
+    app.out = try output.OutputQueue.init(testing.allocator, .{});
+    _ = try app.frameHeadless(transport);
+    try testing.expect(app.modes.mouse);
+    try testing.expect(!app.region.?.first_frame);
+    try testing.expectEqual(@as(usize, 1), app.model.draws);
+    const on = "\x1b[?1006h\x1b[?1000h";
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sink.delivered(), on));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sink.delivered(), "\x1b]0;hdr\x07"));
+}
+
+// ── F3: the loop watchdog ────────────────────────────
+
+test "app: a stalled loop trips the watchdog and stops the session" {
+    var setup = try setupInteractive(GoodModel, .{ .fps = 1000 });
+    defer setup.app.deinit();
+    defer setup.tty.deinit();
+
+    // The previous frame's heartbeat is ancient: `tick` observes it
+    // BEFORE re-pinging, so the stall is caught rather than swallowed.
+    setup.app.watchdog.budget_ns = 0;
+    setup.app.watchdog.last_ping = .{ .nanoseconds = 0 };
+    try testing.expectError(error.WatchdogTripped, setup.app.tick());
+    try testing.expect(!setup.app.isRunning());
+}
+
+test "app: a healthy loop never trips the default watchdog budget" {
+    var setup = try setupInteractive(GoodModel, .{ .fps = 1000 });
+    defer setup.app.deinit();
+    defer setup.tty.deinit();
+    try setup.app.tick();
+    try testing.expect(setup.app.watchdog.armed());
+    try testing.expect(setup.app.watchdog.budget_ns == watchdog.default_budget_ns);
+    try testing.expect(setup.app.isRunning());
 }

@@ -7,12 +7,19 @@
 //! `ensureVisible` rule, list.zig:341-344). Zero-alloc draw: truncation
 //! writes to the caller-owned `scratch` only (the borrow model,
 //! baseui-contract.md §3).
+//!
+//! `setItemsFuzzy` binds the list to the fuzzy matcher (fuzzy.zig): it
+//! re-ranks `items` for a query into a caller-owned buffer and points
+//! `candidates` at the filled prefix, keeping the selected ITEM pinned
+//! when the reorder moves it. The whole path is allocation-free, like
+//! the draw path — the result buffer is the caller's.
 
 const std = @import("std");
 const Buffer = @import("../buffer.zig").Buffer;
 const Style = @import("../style.zig").Style;
 const Width = @import("../width.zig");
 const Clock = @import("component.zig").Clock;
+const Fuzzy = @import("fuzzy.zig");
 
 /// Shared zero-config scratch; only written when a default-configured
 /// Suggestions truncates (single-threaded UI; callers that care pass their
@@ -26,8 +33,18 @@ var default_scratch: std.ArrayList(u8) = .empty;
 /// `selected` when candidates exceed `max_rows` (the zigzag `ensureVisible`
 /// rule, list.zig:341-344). Zero-alloc draw: truncation writes to `scratch`
 /// only. Candidates MUST NOT contain '\n' (a completion is one symbol); the
-/// draw splits scratch on '\n' to find row boundaries.
+/// draw splits scratch on '\n' to find row boundaries. When the fuzzy
+/// path runs, `candidates` is the derived view `setItemsFuzzy` points
+/// at the caller's result buffer.
 pub const Suggestions = struct {
+    /// The full item pool the fuzzy path filters, in its ORIGINAL
+    /// order. `setItemsFuzzy` always filters this slice, so a shrinking
+    /// query brings back items a wider one dropped; the pool is never
+    /// reordered, never allocated, and owned by the caller exactly like
+    /// `candidates`.
+    items: []const []const u8 = &.{},
+    /// Knobs for the fuzzy path (case folding); see `fuzzy.Options`.
+    fuzzy_options: Fuzzy.Options = .{},
     /// Candidate strings, BORROWED (never freed, never allocated). The app
     /// owns them (e.g. the REPL's arena).
     candidates: []const []const u8 = &.{},
@@ -52,6 +69,89 @@ pub const Suggestions = struct {
         _ = self;
         _ = now;
         return false;
+    }
+
+    /// Re-rank `items` for `query` through the fuzzy matcher, write the
+    /// visible order into the caller-owned `out`, and point
+    /// `candidates` at the filled prefix. Returns the number of rows
+    /// written. Nothing is allocated.
+    ///
+    /// `out` is the whole result buffer, so its length is the bound on
+    /// the window: a match set longer than `out` keeps its best `out.len`
+    /// rows and drops the rest (the caller sizes the popup window).
+    /// `out` MUST NOT alias `items` — the pool keeps its original order,
+    /// which is what lets a shrinking query bring dropped items back.
+    ///
+    /// The selection follows the selected row's TEXT into the new order,
+    /// so a reorder never moves the highlight onto another item; when
+    /// the query drops that text the selection falls back to the row it
+    /// sat on, clamped into the shorter list. `fuzzy_options` picks the
+    /// folding. Fails only when `query` exceeds `fuzzy.max_needle`
+    /// graphemes.
+    pub fn setItemsFuzzy(
+        self: *Suggestions,
+        query: []const u8,
+        out: [][]const u8,
+    ) Fuzzy.Error!usize {
+        // The pin follows the selected row's TEXT, not its index:
+        // capture both before the reorder moves anything.
+        const pinned_text: ?[]const u8 = if (self.selected < self.candidates.len)
+            self.candidates[self.selected]
+        else
+            null;
+        const pinned_index = self.selected;
+
+        // The matcher's bound is a property of the query alone, so check
+        // it before the pool: the failure does not depend on the items.
+        const query_graphemes = try Fuzzy.needleGraphemes(query);
+
+        // Insertion into a best-first list: the insertion point is the
+        // first row that does not already outrank this one. A row
+        // already in `out` is re-ranked per comparison instead of
+        // cached: that costs one rank pass per comparison but keeps the
+        // path free of any scratch beyond `out`, and the scan is bounded
+        // by `out.len`. Only a tie CONTINUES the scan, so equal ranks
+        // keep pool order and an empty query preserves `items` exactly.
+        var n: usize = 0;
+        if (query_graphemes == 0) {
+            // An empty query matches every item with a zero rank, so the
+            // pool order is already the answer.
+            for (self.items) |item| {
+                if (n == out.len) break;
+                out[n] = item;
+                n += 1;
+            }
+        } else {
+            for (self.items) |item| {
+                const got = try Fuzzy.score(item, query, self.fuzzy_options) orelse continue;
+                var at: usize = 0;
+                while (at < n) : (at += 1) {
+                    const before = (try Fuzzy.score(out[at], query, self.fuzzy_options)).?;
+                    if (got.rank.betterThan(before.rank)) break;
+                }
+                if (at == out.len) continue; // the window is full and this row is the worst
+                // A full window drops its last row, so that shift starts
+                // one slot lower; otherwise it starts at the free tail.
+                var k = if (n < out.len) n else out.len - 1;
+                while (k > at) : (k -= 1) out[k] = out[k - 1];
+                out[at] = item;
+                if (n < out.len) n += 1;
+            }
+        }
+
+        self.candidates = out[0..n];
+        // The pin: find the pinned text again in the new order, and hold
+        // the row it used to sit on when the query dropped it.
+        self.selected = if (n == 0) 0 else @min(pinned_index, n - 1);
+        if (pinned_text) |text| {
+            for (out[0..n], 0..) |row, i| {
+                if (std.mem.eql(u8, row, text)) {
+                    self.selected = i;
+                    break;
+                }
+            }
+        }
+        return n;
     }
 
     /// First visible candidate index: a window of `min(candidates.len,
@@ -284,4 +384,132 @@ test "suggestions: truncation allocates only through the caller allocator" {
     defer buf.deinit();
 
     try std.testing.expectError(error.OutOfMemory, s.draw(alloc, &buf, 0, 0, .fromNanoseconds(0)));
+}
+
+// ── fuzzy binding ──────────────────────────────────────
+
+test "suggestions: fuzzy reorders candidates by rank" {
+    // The pool is in anti-rank order, so only the matcher can produce
+    // the expected output.
+    const pool = [_][]const u8{ "sprint", "scribe", "printer", "print" };
+    var out: [8][]const u8 = undefined;
+    var s: Suggestions = .{ .items = &pool };
+
+    try std.testing.expectEqual(@as(usize, 3), try s.setItemsFuzzy("pr", &out));
+    try std.testing.expectEqual(@as(usize, 3), s.candidates.len);
+    // "print" beats "printer" on rule 4 (shorter haystack) and both beat
+    // "sprint" on rule 2 (their match is anchored, its is mid-word);
+    // "scribe" has no 'p' and is dropped.
+    try std.testing.expectEqualStrings("print", s.candidates[0]);
+    try std.testing.expectEqualStrings("printer", s.candidates[1]);
+    try std.testing.expectEqualStrings("sprint", s.candidates[2]);
+    try std.testing.expectEqual(@as(usize, 0), s.selected);
+}
+
+test "suggestions: fuzzy keeps the selected item pinned across the reorder" {
+    const pool = [_][]const u8{ "sprint", "printer", "print" };
+    var out: [8][]const u8 = undefined;
+    var s: Suggestions = .{
+        .items = &pool,
+        .candidates = &pool,
+        .selected = 0, // "sprint", which ranks last for "pr"
+    };
+
+    try std.testing.expectEqual(@as(usize, 3), try s.setItemsFuzzy("pr", &out));
+    try std.testing.expectEqualStrings("sprint", s.candidates[2]);
+    // The highlight followed the ITEM into row 2, not the row.
+    try std.testing.expectEqual(@as(usize, 2), s.selected);
+    try std.testing.expectEqualStrings("sprint", s.candidates[s.selected]);
+}
+
+test "suggestions: fuzzy drops a pin the query no longer matches" {
+    const pool = [_][]const u8{ "ab", "cd" };
+    var out: [8][]const u8 = undefined;
+    var s: Suggestions = .{ .items = &pool, .candidates = &pool, .selected = 1 };
+
+    try std.testing.expectEqual(@as(usize, 1), try s.setItemsFuzzy("ab", &out));
+    try std.testing.expectEqualStrings("ab", s.candidates[0]);
+    // "cd" is gone: the selection falls back inside the shorter list.
+    try std.testing.expectEqual(@as(usize, 0), s.selected);
+}
+
+test "suggestions: an empty query restores the whole pool in pool order" {
+    const pool = [_][]const u8{ "b", "a", "c" };
+    var out: [8][]const u8 = undefined;
+    var s: Suggestions = .{ .items = &pool };
+
+    // A narrow query first: only "a" survives.
+    try std.testing.expectEqual(@as(usize, 1), try s.setItemsFuzzy("a", &out));
+    try std.testing.expectEqualStrings("a", s.candidates[0]);
+
+    // The pool kept its own order, so clearing the query brings the
+    // dropped items back; zero ranks tie, so pool order survives. The
+    // pin follows "a" to its new row.
+    try std.testing.expectEqual(@as(usize, 3), try s.setItemsFuzzy("", &out));
+    try std.testing.expectEqualStrings("b", s.candidates[0]);
+    try std.testing.expectEqualStrings("a", s.candidates[1]);
+    try std.testing.expectEqualStrings("c", s.candidates[2]);
+    try std.testing.expectEqual(@as(usize, 1), s.selected);
+}
+
+test "suggestions: the out buffer bounds the fuzzy window" {
+    const pool = [_][]const u8{ "sprint", "printer", "print" };
+    var out: [2][]const u8 = undefined;
+    var s: Suggestions = .{ .items = &pool };
+
+    // Three candidates match, but the window is the caller's two rows.
+    try std.testing.expectEqual(@as(usize, 2), try s.setItemsFuzzy("pr", &out));
+    try std.testing.expectEqual(@as(usize, 2), s.candidates.len);
+    try std.testing.expectEqualStrings("print", s.candidates[0]);
+    try std.testing.expectEqualStrings("printer", s.candidates[1]);
+}
+
+test "suggestions: a zero-length out buffer writes nothing" {
+    var out: [0][]const u8 = undefined;
+    var s: Suggestions = .{ .items = &.{ "ab", "cd" }, .candidates = &.{ "ab", "cd" } };
+
+    try std.testing.expectEqual(@as(usize, 0), try s.setItemsFuzzy("a", &out));
+    try std.testing.expectEqual(@as(usize, 0), s.candidates.len);
+    try std.testing.expectEqual(@as(usize, 0), s.selected);
+}
+
+test "suggestions: fuzzy_options reaches the matcher" {
+    const pool = [_][]const u8{"Apple"};
+    var out: [4][]const u8 = undefined;
+
+    var folded: Suggestions = .{ .items = &pool };
+    try std.testing.expectEqual(@as(usize, 1), try folded.setItemsFuzzy("appl", &out));
+
+    var exact: Suggestions = .{ .items = &pool, .fuzzy_options = .{ .fold_case = false } };
+    try std.testing.expectEqual(@as(usize, 0), try exact.setItemsFuzzy("appl", &out));
+    try std.testing.expectEqual(@as(usize, 0), exact.candidates.len);
+}
+
+test "suggestions: a query past the matcher bound surfaces the error" {
+    const long: [Fuzzy.max_needle + 1]u8 = @splat('a');
+    var out: [4][]const u8 = undefined;
+    var s: Suggestions = .{ .items = &.{"aaaa"} };
+
+    try std.testing.expectError(error.NeedleTooLong, s.setItemsFuzzy(&long, &out));
+}
+
+test "suggestions: draw renders the fuzzy order with the selection highlight" {
+    const pool = [_][]const u8{ "sprint", "print" };
+    var out: [4][]const u8 = undefined;
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(test_alloc);
+    var s: Suggestions = .{ .items = &pool, .scratch = &scratch };
+    try std.testing.expectEqual(@as(usize, 2), try s.setItemsFuzzy("print", &out));
+
+    var buf = try Buffer.init(test_alloc, 6, 2);
+    defer buf.deinit();
+    const shown = try s.draw(test_alloc, &buf, 0, 0, .fromNanoseconds(0));
+
+    try std.testing.expectEqual(@as(u16, 2), shown);
+    var rowbuf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("print ", rowStr(&buf, 0, &rowbuf));
+    try std.testing.expectEqualStrings("sprint", rowStr(&buf, 1, &rowbuf));
+    // The top hit is selected: row 0 reverse-video, row 1 plain.
+    try std.testing.expect(buf.get(0, 0).style.eql(.{ .attrs = .{ .reverse = true } }));
+    try std.testing.expect(buf.get(0, 1).style.eql(.{}));
 }

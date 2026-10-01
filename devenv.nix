@@ -19,5 +19,7 @@ rec {
   # https://devenv.sh/languages/
   # languages.zig.enable = true;
 
-  scripts.gate.exec = "zig-gate";
+  scripts.gate.exec = ''
+    zig-gate "$@" && zig build bench -Doptimize=ReleaseFast
+  '';
 }

@@ -137,16 +137,6 @@ test {
     std.testing.refAllDecls(@This());
 }
 
-/// Fixed-buffer writer for golden tests (same pattern as src/buffer.zig).
-const TestWriter = struct {
-    buf: [1024]u8 = undefined,
-    w: std.Io.Writer = undefined,
-
-    fn init(self: *TestWriter) void {
-        self.w = .fixed(&self.buf);
-    }
-};
-
 const test_alloc = std.testing.allocator;
 
 test "progress: ratio fills cells, full and empty styles differ" {
@@ -159,14 +149,6 @@ test "progress: ratio fills cells, full and empty styles differ" {
     try std.testing.expect(buf.get(0, 0).style.fg.?.eql(.{ .ansi = .cyan }));
     try std.testing.expectEqualStrings("░", buf.get(9, 0).grapheme);
     try std.testing.expect(buf.get(9, 0).style.fg.?.eql(.{ .ansi256 = 245 }));
-
-    var tw: TestWriter = .{};
-    tw.init();
-    try buf.renderAll(&tw.w);
-    try std.testing.expectEqualStrings(
-        "\r\x1b[K\x1b[36m█████\x1b[0m\x1b[38;5;245m░░░░░\x1b[0m",
-        tw.w.buffered(),
-    );
 }
 
 test "progress: head char sits at the fill edge" {

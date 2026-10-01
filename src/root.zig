@@ -30,6 +30,14 @@ pub const context = @import("context.zig");
 pub const command = @import("command.zig");
 pub const view = @import("view.zig");
 pub const app = @import("app.zig");
+pub const keybindings = @import("keybindings.zig");
+pub const markdown = @import("markdown.zig");
+pub const theme = @import("theme.zig");
+pub const watchdog = @import("watchdog.zig");
+pub const debug_server = @import("debug_server.zig");
+pub const frame_testing = @import("testing/frame.zig");
+pub const output = @import("output.zig");
+pub const transcript = @import("transcript.zig");
 
 test {
     std.testing.refAllDecls(@This());

@@ -273,6 +273,48 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 
+    // ── bench ──────────────────────────
+    // The render-pipeline benchmark (ROADMAP F2): frame time p50/p99,
+    // bytes per frame and allocations per frame for the static, streaming
+    // and region-repaint cases. It is built at `bench_optimize`, which
+    // defaults to ReleaseFast so the numbers measure the pipeline rather
+    // than a Debug build; an explicit `-Doptimize` (or `--release=…`)
+    // still wins. The whole compilation must be optimized, so the bench
+    // gets its own `notui` module instance and its own zg dependency
+    // instance, both at `bench_optimize`, wired exactly like `mod` below
+    // (zg / DisplayWidth / Graphemes). The bench artifact is not
+    // installed: `zig build bench` alone compiles it.
+    const bench_optimize: std.builtin.OptimizeMode = blk: {
+        if (b.user_input_options.contains("optimize")) break :blk optimize;
+        if (b.release_mode != .off) break :blk optimize;
+        break :blk .ReleaseFast;
+    };
+    const bench_zg = b.dependency("zg", .{ .optimize = bench_optimize });
+    const bench_mod = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = bench_optimize,
+        .imports = &.{
+            .{ .name = "zg", .module = bench_zg.module("zg") },
+            .{ .name = "DisplayWidth", .module = bench_zg.module("DisplayWidth") },
+            .{ .name = "Graphemes", .module = bench_zg.module("Graphemes") },
+        },
+    });
+    const bench_exe = b.addExecutable(.{
+        .name = "notui-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/bench.zig"),
+            .target = target,
+            .optimize = bench_optimize,
+            .imports = &.{
+                .{ .name = "notui", .module = bench_mod },
+            },
+        }),
+    });
+    const run_bench = b.addRunArtifact(bench_exe);
+    const bench_step = b.step("bench", "Run the render-pipeline benchmark");
+    bench_step.dependOn(&run_bench.step);
+
     const install_docs = b.addInstallDirectory(.{
         .source_dir = exe.getEmittedDocs(),
         .install_dir = .prefix,

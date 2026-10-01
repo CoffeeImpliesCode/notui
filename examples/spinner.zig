@@ -119,7 +119,7 @@ fn runPlain(gpa: std.mem.Allocator, io: std.Io) !void {
     var region = try Region.init(gpa, .{
         .height = 1,
         .append_lines = false,
-        .sync_output = false,
+        .interactive = false,
     });
     defer region.deinit();
 

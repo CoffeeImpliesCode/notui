@@ -7,11 +7,70 @@
 //! §5 std.Io-threaded handle; the notifyWinsize callback registry is
 //! dropped — v0 uses one atomic flag (the single sanctioned global, plan
 //! §0). Windows paths are not copied (deferred to v1).
+//!
+//! Output has two descriptors. `fd` is the original read/write
+//! `/dev/tty`: it stays blocking, it owns the termios, the ioctls and
+//! the buffered writer used for capability probes and teardown.
+//! `out` is a SECOND, write-only `/dev/tty` opened `O_NONBLOCK`, and
+//! it is the frame transport (`tryWrite`). The split is what makes the
+//! event loop nonblocking: a full terminal buffer reports EAGAIN, the
+//! frame stays in the `OutputQueue`, and nothing blocks — while input
+//! still reads with the same blocking descriptor it always used.
 
 const std = @import("std");
 const builtin = @import("builtin");
+const output = @import("output.zig");
 const posix = std.posix;
 const Winsize = @import("event.zig").Winsize;
+
+/// The terminal device, opened twice: read/write for input and
+/// termios, write-only for the nonblocking frame transport.
+const tty_path = "/dev/tty";
+
+/// Whether the frame transport can be opened with a real `O_NONBLOCK`.
+/// Windows and WASI have no `/dev/tty` at all, and where the open flags
+/// cannot carry `O_NONBLOCK` the descriptor would be *blocking* —
+/// installing it would make `tryWrite` block the event loop instead of
+/// reporting 0 bytes, which is the one failure this seam exists to
+/// prevent. There the transport stays absent and `tryWrite` reports
+/// `error.WriteFailed` rather than blocking in secret.
+const can_open_nonblocking = switch (builtin.os.tag) {
+    .windows, .wasi, .plan9 => false,
+    else => @hasField(posix.O, "NONBLOCK") and @hasField(posix.O, "ACCMODE"),
+};
+
+/// Open `path` write-only and `O_NONBLOCK`. `null` when this platform's
+/// open flags cannot express a nonblocking descriptor
+/// (`can_open_nonblocking`). Open errors are propagated: a transport
+/// that cannot be opened is a failure the caller must see, not a
+/// silently blocking fallback.
+fn openNonblockingWrite(path: []const u8) !?std.Io.File {
+    if (!can_open_nonblocking) return null;
+    var flags: posix.O = .{ .ACCMODE = .WRONLY };
+    // No controlling-terminal theft on open, no descriptor inherited
+    // across an exec, and EAGAIN instead of a block when the terminal
+    // buffer is full.
+    if (@hasField(posix.O, "NOCTTY")) flags.NOCTTY = true;
+    if (@hasField(posix.O, "CLOEXEC")) flags.CLOEXEC = true;
+    if (@hasField(posix.O, "NONBLOCK")) flags.NONBLOCK = true;
+    const handle = try posix.openat(posix.AT.FDCWD, path, flags, 0);
+    return .{ .handle = handle, .flags = .{ .nonblocking = true } };
+}
+
+/// Whether the kernel put `fd` in nonblocking mode (`O_NONBLOCK`).
+/// False where the platform has no `O_NONBLOCK` bit to ask about.
+fn isNonblocking(fd: posix.fd_t) bool {
+    if (!@hasField(posix.O, "NONBLOCK")) return false;
+    const rc = posix.system.fcntl(fd, posix.F.GETFL, @as(usize, 0));
+    if (posix.errno(rc) != .SUCCESS) return false;
+    const flags: usize = @intCast(rc);
+    return flags & (@as(usize, 1) << @bitOffsetOf(posix.O, "NONBLOCK")) != 0;
+}
+
+/// Whether `fd` is already closed (`fcntl` reports `EBADF`).
+fn isClosed(fd: posix.fd_t) bool {
+    return posix.errno(posix.system.fcntl(fd, posix.F.GETFD, @as(usize, 0))) == .BADF;
+}
 
 /// ioctl request constants above c_int's range (e.g. IOCSPTLCK, IOCGPTN) break
 /// when libc is linked (request becomes c_int); pass the bits via the ABI-safe
@@ -50,7 +109,11 @@ pub fn restoreTerminal() void {
                 std.mem.doNotOptimizeAway(@intFromError(err));
             };
         }
-        const cleanup = "\x1b[?25h\x1b[<u\x1b[?2026l";
+        // DECAWM first: a kill or a panic lands mid-frame, so wrapping
+        // may still be off. It is re-enabled before the cursor is shown
+        // and before sync output closes, exactly as the frame epilogue
+        // orders them.
+        const cleanup = "\x1b[?7h\x1b[?25h\x1b[<u\x1b[?2026l";
         switch (builtin.os.tag) {
             .linux => _ = std.os.linux.write(g.fd.handle, cleanup.ptr, cleanup.len),
             else => {}, // best-effort: no portable raw write in 0.16
@@ -63,6 +126,14 @@ pub const Tty = struct {
     io: std.Io,
     /// The /dev/tty file descriptor (input, termios, ioctl).
     fd: std.Io.File,
+
+    /// The frame transport: a SECOND, write-only `/dev/tty` opened
+    /// `O_NONBLOCK`, so a full terminal buffer reports EAGAIN instead
+    /// of stalling the loop. `null` for a caller-built `Tty` (the
+    /// `Tty{ .io, .fd }` fixtures that have no terminal to write to)
+    /// and on platforms whose open flags cannot carry `O_NONBLOCK`.
+    /// Never the same descriptor as `fd`: input stays blocking.
+    out: ?std.Io.File = null,
 
     /// Original termios captured by makeRaw; restored by restore/deinit.
     original_termios: ?posix.termios = null,
@@ -78,8 +149,13 @@ pub const Tty = struct {
     /// is NOT entered — call `makeRaw` explicitly (event-loop order:
     /// init → makeRaw → Caps.detect).
     pub fn init(io: std.Io) !Tty {
-        var f = try std.Io.Dir.openFileAbsolute(io, "/dev/tty", .{ .mode = .read_write });
+        var f = try std.Io.Dir.openFileAbsolute(io, tty_path, .{ .mode = .read_write });
         errdefer f.close(io);
+
+        // Opened second and independently: `fd` keeps the blocking
+        // behaviour input and the probe/teardown writer depend on.
+        const o = try openNonblockingWrite(tty_path);
+        errdefer if (o) |file| file.close(io);
 
         if (!handler_installed) {
             const handler: posix.Sigaction = .{
@@ -105,12 +181,14 @@ pub const Tty = struct {
         const self: Tty = .{
             .io = io,
             .fd = f,
+            .out = o,
         };
         global_tty = self;
         return self;
     }
 
-    /// Restore the terminal, uninstall the signal handler, close /dev/tty.
+    /// Restore the terminal, uninstall the signal handler, close both
+    /// /dev/tty descriptors.
     pub fn deinit(self: *Tty) void {
         if (global_tty) |*g| {
             if (g.fd.handle == self.fd.handle) global_tty = null;
@@ -118,6 +196,7 @@ pub const Tty = struct {
         self.restore();
         resetSignalHandler();
         self.fd.close(self.io);
+        if (self.out) |file| file.close(self.io);
         self.* = undefined;
     }
 
@@ -181,6 +260,22 @@ pub const Tty = struct {
     pub fn checkResize(self: *Tty) bool {
         _ = self;
         return resize_signaled.swap(false, .acquire);
+    }
+
+    /// One nonblocking frame write: the bytes the terminal accepted,
+    /// `0` when it would block. The caller (`OutputQueue.drain`) keeps
+    /// the remainder pending, in order, and retries — a short write and
+    /// a would-block are the same contract. Writes go to `out`, the
+    /// `O_NONBLOCK` write-only descriptor.
+    ///
+    /// `error.WriteFailed` when there is no transport: a caller-built
+    /// `Tty` with `out == null`, or a platform whose open flags cannot
+    /// carry `O_NONBLOCK`. It never falls back to `fd` — that
+    /// descriptor is blocking, and quietly blocking here is exactly the
+    /// stall this method exists to remove.
+    pub fn tryWrite(self: *Tty, bytes: []const u8) output.OutputQueue.WriteError!usize {
+        const file = self.out orelse return error.WriteFailed;
+        return output.tryWriteFd(self.io, file, bytes);
     }
 
     /// The buffered output writer. Created once against the instance's
@@ -275,6 +370,100 @@ test {
     std.testing.refAllDecls(@This());
 }
 
+/// A pipe pair used as the transport plus the reader that decides when
+/// to drain it. `NONBLOCK` is the flag the real transport is opened
+/// with, so the EAGAIN these tests observe comes from the kernel and
+/// not from a counter standing in for it.
+const PipePair = struct {
+    read: std.Io.File,
+    write: std.Io.File,
+
+    fn init(flags: posix.O) !PipePair {
+        const fds = try std.Io.Threaded.pipe2(flags);
+        const nonblocking = flags.NONBLOCK;
+        return .{
+            .read = .{ .handle = fds[0], .flags = .{ .nonblocking = nonblocking } },
+            .write = .{ .handle = fds[1], .flags = .{ .nonblocking = nonblocking } },
+        };
+    }
+
+    fn deinit(self: *PipePair) void {
+        self.read.close(std.testing.io);
+        self.write.close(std.testing.io);
+        self.* = undefined;
+    }
+};
+
+/// A PTY pair opened headlessly. The master stays open for the whole
+/// test — a slave whose master vanished reports EIO instead of
+/// EAGAIN — and the slave path is kept in the struct so a test can
+/// open the transport on it with the production open flags.
+const PtyPair = struct {
+    master: std.Io.File,
+    slave: std.Io.File,
+    path_buf: [32]u8 = undefined,
+    path_len: usize = 0,
+
+    /// `null` where a PTY cannot be allocated — headless hosts skip
+    /// rather than fail.
+    fn init(io: std.Io) ?PtyPair {
+        const master = std.Io.Dir.openFileAbsolute(io, "/dev/ptmx", .{ .mode = .read_write }) catch
+            return null;
+        errdefer master.close(io);
+
+        var unlock: c_int = 0;
+        if (posix.errno(posix.system.ioctl(
+            master.handle,
+            ioctlReq(posix.T.IOCSPTLCK),
+            @intFromPtr(&unlock),
+        )) != .SUCCESS) return null;
+
+        var ptn: c_uint = 0;
+        if (posix.errno(posix.system.ioctl(
+            master.handle,
+            ioctlReq(posix.T.IOCGPTN),
+            @intFromPtr(&ptn),
+        )) != .SUCCESS) return null;
+
+        // `slave` is assigned only on success: an errdefer here would
+        // close an undefined handle on the two bail-outs below.
+        var self: PtyPair = .{ .master = master, .slave = undefined };
+        const slave_path = std.fmt.bufPrint(self.path_buf[0..], "/dev/pts/{d}", .{ptn}) catch
+            return null;
+        self.path_len = slave_path.len;
+        self.slave = std.Io.Dir.openFileAbsolute(io, slave_path, .{ .mode = .read_write }) catch
+            return null;
+        return self;
+    }
+
+    fn path(self: *const PtyPair) []const u8 {
+        return self.path_buf[0..self.path_len];
+    }
+
+    fn deinit(self: *PtyPair) void {
+        self.slave.close(std.testing.io);
+        self.master.close(std.testing.io);
+        self.* = undefined;
+    }
+};
+
+/// A stand-in for the read/write `/dev/tty` in tests that only care
+/// about the transport. Opened blocking, exactly as `init` opens it.
+fn blockingFile(io: std.Io) !std.Io.File {
+    return std.Io.Dir.openFileAbsolute(io, "/dev/null", .{ .mode = .read_write });
+}
+
+/// Write `chunk` through `tty` until the transport refuses. `false`
+/// means the transport took every byte it was offered, which for a
+/// real descriptor nobody drained means the descriptor is blocking.
+fn fillUntilBlocked(tty: *Tty, chunk: []const u8) !bool {
+    var guard: usize = 0;
+    while (guard < 512) : (guard += 1) {
+        if (try tty.tryWrite(chunk) == 0) return true;
+    }
+    return false;
+}
+
 test "tty: rawTermios clears input processing, sets MIN/TIME" {
     var orig = std.mem.zeroes(posix.termios);
     // a cooked-state termios
@@ -352,34 +541,14 @@ test "tty: checkResize drains the SIGWINCH flag" {
 test "tty: makeRaw/restore round-trip on a real PTY pair" {
     // Skip (not fail) when a PTY cannot be opened — headless-safe.
     const io = std.testing.io;
+    var pty = PtyPair.init(io) orelse return;
+    defer pty.deinit();
 
-    const master = std.Io.Dir.openFileAbsolute(io, "/dev/ptmx", .{ .mode = .read_write }) catch return;
-    defer master.close(io);
-
-    var unlock: c_int = 0;
-    if (posix.errno(posix.system.ioctl(
-        master.handle,
-        ioctlReq(posix.T.IOCSPTLCK),
-        @intFromPtr(&unlock),
-    )) != .SUCCESS) return;
-
-    var ptn: c_uint = 0;
-    if (posix.errno(posix.system.ioctl(
-        master.handle,
-        ioctlReq(posix.T.IOCGPTN),
-        @intFromPtr(&ptn),
-    )) != .SUCCESS) return;
-
-    var pts_path_buf: [32]u8 = undefined;
-    const pts_path = std.fmt.bufPrint(&pts_path_buf, "/dev/pts/{d}", .{ptn}) catch return;
-    const slave = std.Io.Dir.openFileAbsolute(io, pts_path, .{ .mode = .read_write }) catch return;
-    defer slave.close(io);
-
-    var tty: Tty = .{ .io = io, .fd = slave };
-    const before = posix.tcgetattr(slave.handle) catch return;
+    var tty: Tty = .{ .io = io, .fd = pty.slave };
+    const before = posix.tcgetattr(pty.slave.handle) catch return;
 
     try tty.makeRaw();
-    const during = posix.tcgetattr(slave.handle) catch return;
+    const during = posix.tcgetattr(pty.slave.handle) catch return;
     try std.testing.expect(!during.lflag.ECHO);
     try std.testing.expect(!during.lflag.ICANON);
     try std.testing.expect(!during.lflag.ISIG);
@@ -389,10 +558,175 @@ test "tty: makeRaw/restore round-trip on a real PTY pair" {
     try std.testing.expectEqual(@as(u8, 1), during.cc[@intFromEnum(posix.V.TIME)]);
 
     tty.restore();
-    const after = posix.tcgetattr(slave.handle) catch return;
+    const after = posix.tcgetattr(pty.slave.handle) catch return;
     try std.testing.expectEqual(before.iflag, after.iflag);
     try std.testing.expectEqual(before.oflag, after.oflag);
     try std.testing.expectEqual(before.cflag, after.cflag);
     try std.testing.expectEqual(before.lflag, after.lflag);
     try std.testing.expectEqual(before.cc, after.cc);
+}
+
+test "tty: tryWrite without a transport fails instead of falling back to fd" {
+    const io = std.testing.io;
+    var tty: Tty = .{ .io = io, .fd = try blockingFile(io) };
+    defer tty.fd.close(io);
+
+    // `fd` is open for writing and would swallow these bytes, but it is
+    // blocking: taking them there is the stall the transport seam
+    // exists to prevent, so the refusal is the honest answer.
+    try std.testing.expectError(error.WriteFailed, tty.tryWrite("\x1b[?25h"));
+}
+
+test "tty: the transport is nonblocking while the input descriptor stays blocking" {
+    const io = std.testing.io;
+    var input = try PipePair.init(.{}); // blocking, as /dev/tty is
+    defer input.deinit();
+    var transport = try PipePair.init(.{ .NONBLOCK = true });
+    defer transport.deinit();
+
+    var tty: Tty = .{ .io = io, .fd = input.read, .out = transport.write };
+
+    // Two descriptors, and only the transport carries O_NONBLOCK: the
+    // read/write descriptor input depends on was never touched.
+    try std.testing.expect(tty.fd.handle != tty.out.?.handle);
+    try std.testing.expect(!isNonblocking(tty.fd.handle));
+    try std.testing.expect(isNonblocking(tty.out.?.handle));
+
+    // Proof the input side is not in nonblocking mode: it reads the
+    // byte it was handed instead of failing with EAGAIN.
+    try input.write.writeStreamingAll(io, "z");
+    var buf: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try tty.read(&buf));
+    try std.testing.expectEqual(@as(u8, 'z'), buf[0]);
+}
+
+test "tty: a full pipe transport reports would-block instead of blocking" {
+    const io = std.testing.io;
+    var transport = try PipePair.init(.{ .NONBLOCK = true });
+    defer transport.deinit();
+    var tty: Tty = .{ .io = io, .fd = try blockingFile(io), .out = transport.write };
+    defer tty.fd.close(io);
+
+    // Nobody drains the read end, so the kernel buffer fills. A
+    // blocking descriptor would have parked the loop right here.
+    try std.testing.expect(try fillUntilBlocked(&tty, "x" ** 4096));
+    // The refusal is repeatable and consumes nothing: the frame is
+    // still the caller's to retry.
+    try std.testing.expectEqual(@as(usize, 0), try tty.tryWrite("x" ** 4096));
+    try std.testing.expectEqual(@as(usize, 0), try tty.tryWrite("x"));
+}
+
+test "tty: a full terminal transport reports would-block instead of blocking" {
+    const io = std.testing.io;
+    var pty = PtyPair.init(io) orelse return; // headless-safe
+    defer pty.deinit();
+
+    // Opened through the production helper, so this exercises the real
+    // flags against a real terminal instead of a pipe.
+    const transport = (try openNonblockingWrite(pty.path())) orelse return;
+    defer transport.close(io);
+    var tty: Tty = .{ .io = io, .fd = pty.slave, .out = transport };
+
+    // The master end is open but unread, so the tty's output buffer
+    // fills and the descriptor reports EAGAIN.
+    try std.testing.expect(try fillUntilBlocked(&tty, "x" ** 4096));
+    try std.testing.expectEqual(@as(usize, 0), try tty.tryWrite("x" ** 4096));
+}
+
+test "tty: a short transport write keeps the frame's bytes in order" {
+    const io = std.testing.io;
+    var transport = try PipePair.init(.{ .NONBLOCK = true });
+    defer transport.deinit();
+    var tty: Tty = .{ .io = io, .fd = try blockingFile(io), .out = transport.write };
+    defer tty.fd.close(io);
+
+    // 256 KiB: several times a default 64 KiB pipe, so the transport
+    // is guaranteed to run dry mid-frame and defer the remainder.
+    const frame = "0123456789abcdef" ** 16384;
+    var q = try output.OutputQueue.init(std.testing.allocator, .{
+        .capacity = frame.len,
+        .watermark = 1024,
+    });
+    defer q.deinit();
+
+    q.beginFrame();
+    try q.writer().writeAll(frame);
+    try std.testing.expect(!q.frameOverflowed());
+    q.commitFrame();
+    try std.testing.expectEqual(frame.len, q.pending());
+
+    // Draining without a reader fills the pipe and stops; the rest
+    // stays pending rather than being dropped.
+    var guard: usize = 0;
+    while (try q.drain(&tty) > 0) {
+        guard += 1;
+        try std.testing.expect(guard < 64);
+    }
+    try std.testing.expect(q.pending() > 0);
+
+    // The reader drains: every deferred byte arrives exactly once, in
+    // order, and the queue empties without anything being rewritten.
+    var delivered: usize = 0;
+    var buf: [4096]u8 = undefined;
+    while (delivered < frame.len) {
+        const got = transport.read.readStreaming(io, &.{&buf}) catch |err| switch (err) {
+            error.WouldBlock => 0,
+            else => return err,
+        };
+        if (got == 0) {
+            _ = try q.drain(&tty); // first: refill what the reader freed
+            continue;
+        }
+        try std.testing.expectEqualSlices(u8, frame[delivered..][0..got], buf[0..got]);
+        delivered += got;
+    }
+    try std.testing.expectEqual(@as(usize, 0), q.pending());
+    try std.testing.expectEqual(frame.len, q.total_written);
+}
+
+test "tty: deinit closes the read/write descriptor and the transport" {
+    const io = std.testing.io;
+    const fds = try std.Io.Threaded.pipe2(.{ .NONBLOCK = true });
+    var tty: Tty = .{
+        .io = io,
+        .fd = .{ .handle = fds[0], .flags = .{ .nonblocking = true } },
+        .out = .{ .handle = fds[1], .flags = .{ .nonblocking = true } },
+    };
+    const read_handle = tty.fd.handle;
+    const write_handle = tty.out.?.handle;
+
+    // Ownership is the Tty's: it closes both, the second descriptor
+    // included. Nothing else holds them.
+    tty.deinit();
+    try std.testing.expect(isClosed(read_handle));
+    try std.testing.expect(isClosed(write_handle));
+}
+
+test "tty: the transport open reports its failure instead of degrading" {
+    // ENOTDIR: /dev/null is not a directory. `init` relies on this
+    // propagating so it can close the read/write descriptor and leave
+    // no half-built Tty behind.
+    try std.testing.expectError(error.NotDir, openNonblockingWrite("/dev/null/nope"));
+}
+
+test "tty: restoreTerminal re-enables autowrap before the cursor and sync close" {
+    if (builtin.os.tag != .linux) return; // the raw cleanup write is Linux-only
+    const io = std.testing.io;
+    const fds = try std.Io.Threaded.pipe2(.{});
+    const reader: std.Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = false } };
+    defer reader.close(io);
+
+    const tty: Tty = .{ .io = io, .fd = .{ .handle = fds[1], .flags = .{ .nonblocking = false } } };
+    defer tty.fd.close(io);
+    global_tty = tty;
+    defer global_tty = null;
+
+    // A kill or a panic lands mid-frame, where DECAWM may still be
+    // off. The restore re-enables it first, then shows the cursor,
+    // pops the kitty keyboard and closes sync output.
+    restoreTerminal();
+
+    var buf: [32]u8 = undefined;
+    const n = try reader.readStreaming(io, &.{&buf});
+    try std.testing.expectEqualStrings("\x1b[?7h\x1b[?25h\x1b[<u\x1b[?2026l", buf[0..n]);
 }

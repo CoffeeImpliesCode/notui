@@ -181,13 +181,6 @@ fn popCodepoint(buf: []u8) []u8 {
 }
 
 /// One plain frame (the empty prompt), no interactive sequences.
-///
-/// Written directly rather than through `Region.render` with
-/// `sync_output = false`: the region's non-TTY painter skips blank cells
-/// with CUF (`ESC[n C`), so any frame containing spaces leaks control
-/// sequences into piped output ([flagged] region bug — the plain path
-/// should write blank cells as spaces). The spinner's plain frame has no
-/// blanks and does use the region's degraded path.
 fn runPlain(io: std.Io) !void {
     const stdout = std.Io.File.stdout();
     try stdout.writeStreamingAll(io, prompt_text);

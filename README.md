@@ -2,11 +2,11 @@
 
 Inline-first terminal UI primitives for Zig 0.16.
 
-notui is a small library of TUI building blocks: a cell buffer with
-grapheme-aware drawing, an inline `Region` renderer that repaints a fixed
-band in the terminal's main buffer (never the alt screen, so scrollback
-survives), live terminal capability detection, and an input reader with
-split-sequence reassembly. The only dependency is
+notui provides a grapheme-aware cell buffer, an inline `Region` renderer,
+an Elm-style app loop, editing and selection components, and Markdown,
+diff and tool-card rendering. The renderer owns a band in the terminal's
+main buffer, never the alternate screen, so scrollback survives.
+The only library dependency is
 [zg](https://codeberg.org/atman/zg) (Unicode 16 width/graphemes), sealed
 behind the `width` module.
 
@@ -18,45 +18,9 @@ ctx) !Cmd(Msg)` / `view(model, ctx) View`, and the framework owns the
 event loop, terminal modes, and rendering (sources:
 [`src/app.zig`](src/app.zig), [`src/view.zig`](src/view.zig),
 [`src/command.zig`](src/command.zig), [`src/context.zig`](src/context.zig)).
-A minimal shape:
-
-```zig
-const notui = @import("notui");
-const Cmd = notui.command.Cmd;
-const View = notui.view.View;
-
-const Model = struct {
-    count: u32 = 0,
-
-    pub const Msg = union(enum) { inc, dec, quit };
-
-    pub fn init(allocator: std.mem.Allocator) !Model {
-        _ = allocator;
-        return .{};
-    }
-    pub fn update(self: *Model, msg: Msg, ctx: *notui.context.Context) !Cmd(Msg) {
-        _ = ctx;
-        switch (msg) {
-            .inc => self.count += 1,
-            .dec => self.count -= 1,
-            .quit => return .quit,
-        }
-        return .none;
-    }
-    pub fn view(self: *const Model, ctx: *notui.context.Context) View(Model) {
-        _ = self;
-        _ = ctx;
-        return .{ .draw = draw }; // paint the frame in `draw`
-    }
-};
-
-pub fn main(init: std.process.Init) !void {
-    const model = try Model.init(init.gpa);
-    var app = notui.app.App(Model).init(model);
-    app.setFilter(&filter); // event → Msg; q / ^C → .quit
-    try app.run(init.io, init.gpa);
-}
-```
+`Model.init(gpa)` returns `{ model, cmd }`. Construct the framework with
+`App(Model).init()` or `initWithOptions(options)`, install an event-to-message
+filter, and call `run(io, gpa)`. The framework invokes the model initializer.
 
 The full counter demo — `Text` + `Spinner` + `StatusBar` composed into
 the frame via `View.draw`, keys wired through a filter, `every`-Cmd
@@ -68,55 +32,23 @@ zig build run-example-framework_counter
 
 ## Quick start
 
-A minimal spinner (full recipes live in [`examples/`](examples/)):
+Run a complete recipe:
 
-```zig
-const std = @import("std");
-const notui = @import("notui");
-
-pub fn main(init: std.process.Init) !void {
-    var tty = try notui.tty.Tty.init(init.io);
-    defer tty.deinit();
-    try tty.makeRaw();
-
-    var parser: notui.parser = .{};
-    const caps = try notui.caps.Capabilities.detect(&tty, &parser, init.gpa);
-
-    var region = try notui.region.Region.init(init.gpa, .{
-        .height = 1,
-        .sync_output = caps.sync_output,
-    });
-    defer region.deinit();
-    try region.resize((try tty.getWinsize()).cols, 1);
-
-    var reader = notui.input.Reader.init(&tty);
-    const w = tty.writer();
-    const frames = [_][]const u8{ "|", "/", "-", "\\" };
-    var i: usize = 0;
-    while (true) {
-        region.cur.clear();
-        _ = try region.cur.draw(.{}, frames[i % frames.len], 0, 0);
-        try region.render(w);
-        try w.flush();
-        i += 1;
-
-        const ev = try reader.nextTimeout(100);
-        if (ev) |e| switch (e) {
-            .key_press => |k| {
-                if (k.codepoint == notui.key.ctrl_c or k.codepoint == 'q') break;
-            },
-            else => {},
-        };
-    }
-    try region.exit(w);
-}
+```bash
+zig build run-example-spinner
 ```
+
+[`examples/spinner.zig`](examples/spinner.zig) handles capability detection,
+input, frame painting and terminal restoration. The
+[`framework counter`](examples/framework_counter.zig) uses the app-owned
+output queue; [`prompt`](examples/prompt.zig) shows append-to-scrollback input.
 
 Draw into `region.cur`, render the diff, read events. `Region.render`
 repaints in place with relative cursor moves only; `Region.exit` parks
 the cursor below the band and leaves the final frame in the transcript.
-With piped stdin (`sync_output = false`) the region degrades to one
-plain frame — no interactive escape sequences.
+With piped stdin (`interactive = false`) the region emits one plain
+frame, with no interactive escape sequences. `sync_output = false`
+only disables DEC 2026; an interactive terminal still renders in place.
 
 ## Modules
 
@@ -126,21 +58,108 @@ plain frame — no interactive escape sequences.
 | `color`  | `Color` (ansi / ansi256 / rgb / default), `ColorProfile`, palette downsampling |
 | `style`  | `Style`, `Attrs` (bold, italic, underline, …), `merge` precedence |
 | `cell`   | `Cell`: borrowed grapheme slice + style + wide-glyph continuation |
-| `emit`   | ANSI writers: cursor, erasure, sync output, alt screen, profile-gated SGR |
+| `emit`   | Internal ANSI writers: cursor, band erasure, sync output, autowrap, profile-gated SGR |
 | `event`  | `Event` union, `Key`, `Mouse`, `Winsize`, `Pos`, `Capability` |
 | `key`    | key codes and modifiers, `matches` / `matchShortcut` |
 | `mouse`  | mouse events (SGR 1006 + pixels 1016) |
 | `parser` | terminal input decoder (kitty keyboard, OSC, paste, CPR) |
-| `tty`    | raw mode, winsize, SIGWINCH flag, `isTty`, panic-restore |
+| `tty`    | Blocking input, independent nonblocking output, raw mode, winsize, panic restore |
 | `caps`   | live capability detection (best-effort queries, no terminfo) |
 | `buffer` | cell grid: `draw`, `renderDiff` / `renderAll` (style-tracking, wide-safe) |
-| `region` | the inline renderer: 3 strategies, append queue, anchoring, non-TTY path |
+| `region` | Inline renderer: five strategies, acknowledged history batches, resize modes, anchoring |
 | `input`  | `Reader`: blocking read with split-sequence reassembly |
 | `image`  | kitty graphics: transmit / place / delete (APC-G, a=t / a=p / a=d) |
 | `coverage` | SIMD row-intersection rasterizer for the formula example |
-| `component` | base-ui: `Text`, `Spinner`, `AnimatedText`, `Progress`, `Gauge`, `StatusBar`, `Suggestions` |
+| `component` | Display components plus `Editor`, fuzzy `Suggestions`, `Select`, `Modal`, `Popover`, `Card`, `Diff` |
 | `context` / `command` / `view` | framework: runtime context, the `Cmd(Msg)` effect type, the frame closure |
-| `app`    | `App(Model)`: event loop, terminal modes, inline rendering |
+| `app`    | `App(Model)`: input/effect loop, bounded output queue, adaptive pacing, inline rendering |
+| `output` | Fixed-capacity output staging, short-write retry and composition watermark |
+| `transcript` | Product-driven active → settled → committed retirement |
+| `keybindings` | Keymap declarations, chord matching and hints from the same bindings |
+| `markdown` | Styled rows and a shared untrusted-input escape/control sanitizer |
+| `theme` | Semantic tokens resolved through `caps.ColorProfile` |
+| `frame_testing` | Scripted input/output capture and deliberate golden recording |
+| `watchdog` / `debug_server` | Headless loop liveness and read-only TCP frame inspection |
+
+## Frame and scrollback contract
+
+Every interactive paint has a cursor-hide prologue, optional DEC 2026,
+and DECAWM off/on around the band writes. Idle frames emit zero bytes.
+`App` stages the frame into one contiguous pending byte stream before
+attempting transport output. A short write or `WouldBlock` retains the
+remaining bytes in order; it does not discard or recompose the frame.
+Above the output watermark, composition waits for a drain.
+
+History is a separate channel:
+`Region.HistoryBatch { id, rows, kind = append | replay }`.
+Ids are monotonic. Rows are hard-wrapped logical lines; a replay is the
+complete logical ledger, not a slice inferred from terminal position.
+Transport completion produces receipts; product acknowledgement releases
+retained batch storage. Finality is a product decision, not a row leaving
+the viewport. Resize modes `append`, `rebuild` and `preserve` change the
+live band without rewriting committed history.
+
+### Erase discipline and multiplexers
+
+No strategy emits screen-wide ED2 (`ESC[2J`) or ED3 (`ESC[3J`).
+All display erasure begins at the band anchor or is scoped to one row:
+
+| Strategy | Erasure and movement |
+|---|---|
+| First frame | Reserve the band with CNL when configured; append rows without erasure |
+| Height-only change | Reserve added rows or EL removed rows, then diff; collapse to zero erases nothing |
+| History/append flush | ED0 from the band anchor, emit history, repaint the live band |
+| Width change / forced redraw | `append`: anchored ED0; `rebuild`: row-local EL full repaint; `preserve`: row-local EL diff |
+| Normal diff | EL on changed rows; erase stale high-water rows within the old band |
+
+tmux and conhost can archive display erasure into scrollback. A caller that
+owns a separate full-screen policy must order ED2 before ED3; notui emits
+neither and never clears above its anchor. DEC 2026 support changes only
+the paint wrapper, not the renderer's interactive mode.
+
+## Measurement and verification
+
+```bash
+zig build test
+zig build bench -Doptimize=ReleaseFast
+gate                              # house zig-gate, then the same benchmark
+```
+
+The benchmark reports p50/p99 frame time, emitted bytes per frame and
+allocations per frame at 80×24 and 200×60 for static and streaming content.
+Static steady-state frames must write zero bytes. Rendering allocations
+are counted rather than assumed.
+
+Measured on this host (`zig build bench`, ReleaseFast, Zig 0.16; timing
+floor clock p50 73 ns / p99 80 ns):
+
+| case | p50 ns | p99 ns | bytes/frame | allocs/frame |
+|---|---|---|---|---|
+| static 80×24 | 92 872 | 122 841 | 0 | 0.000 |
+| static 200×60 | 477 838 | 694 499 | 0 | 0.000 |
+| stream 80×24 | 82 459 | 251 120 | 230 | 0.000 |
+| stream 200×60 | 402 786 | 498 005 | 427 | 0.000 |
+| damage 80×24 | 26 861 | 37 720 | 104 | 0.000 |
+| damage 200×60 | 152 584 | 248 611 | 227 | 0.000 |
+| styles 80×24 | 31 493 | 39 471 | 170 | 0.000 |
+| region h1 | 3 927 | 10 363 | 81 | 0.667 |
+| region h4 | 14 546 | 21 143 | 184 | 0.667 |
+| region h24 | 88 427 | 149 200 | 851 | 0.667 |
+
+The SGR memo's byte saving is measured against the pre-B4 stream: 170 vs
+206 bytes/frame on the style case (17.5%), 227 vs 231 on the 200×60 damage
+case (1.7%), and no change on 80×24 damage, where a transition is rare
+enough that the memo never repays its bookkeeping.
+
+The same step drives a real loop with no pty: two frames through
+`App.frameHeadless`, published over TCP by the debug server and read back.
+The App's own `written_bytes` and the transport's independent byte count
+agree per frame, and the idle strategy emits zero bytes at every band
+height.
+
+[`PORTING.md`](PORTING.md) defines the stable port surface, internal
+modules, immutable source pin and the shared four-rule frame contract.
+
 
 ## Examples
 

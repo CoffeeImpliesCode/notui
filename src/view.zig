@@ -29,15 +29,6 @@ pub fn View(comptime Model: type) type {
         /// repaints (the spinner pattern). `model` is `*Model` (mutable)
         /// precisely so components can advance to `now` in draw.
         draw: *const fn (model: *Model, ctx: *Context, buf: *Buffer) anyerror!void,
-        /// Enter the alternate screen (smcup) for this frame.
-        ///
-        /// PARSED-BUT-NOOP in v1 (orchestrator Q1): the shipped Region is
-        /// inline-only, and emitting smcup without a full-buffer renderer
-        /// would blank the screen. The value is folded into the View
-        /// signature (a change repaints) and tracked by the mode diff,
-        /// but no smcup/rmcup is ever emitted — the full-screen renderer
-        /// is the deferred architecture §7 item.
-        alt_screen: bool = false,
         /// Request SGR 1006 mouse reporting for this frame (diffed;
         /// enabled on change, disabled on exit via caps.restore,
         /// caps.zig:58).
@@ -53,8 +44,7 @@ pub fn View(comptime Model: type) type {
         /// Desired region band height; 0 = keep the current height. A
         /// nonzero value applies `Region.setHeight` (dynamic bands: the
         /// REPL popup grows the band via setHeight,
-        /// skript_repl.zig:257/366). Alt-screen mode ignores this (uses
-        /// full terminal height).
+        /// skript_repl.zig:257/366).
         height: u16 = 0,
         /// Terminal title to set when non-null (also settable via
         /// Cmd.set_title).
@@ -65,8 +55,6 @@ pub fn View(comptime Model: type) type {
 /// The terminal modes currently active. `App` owns one instance and feeds
 /// it to `applyModeDiff` on every rendered frame.
 pub const Modes = struct {
-    /// The declared alt-screen target. Tracked only in v1 (no-op, Q1).
-    alt_screen: bool = false,
     /// Whether SGR 1006 mouse reporting is on.
     mouse: bool = false,
     /// Whether the cursor is hidden.
@@ -78,15 +66,10 @@ pub const Modes = struct {
 ///
 /// - `mouse`: `CSI ?1006h + ?1000h` on, `CSI ?1006l + ?1000l` off.
 /// - `hide_cursor`: `emit.hideCursor`/`emit.showCursor`.
-/// - `alt_screen`: PARSED-BUT-NOOP in v1 (Q1) — the declared target is
-///   tracked so the signature/mode-pending gating stays stable, but no
-///   smcup/rmcup is emitted (no full-screen renderer exists yet).
 ///
 /// Returns whether any sequence was emitted (a mode actually changed).
 pub fn applyModeDiff(view: anytype, w: anytype, current: *Modes) !bool {
     var changed = false;
-
-    if (view.alt_screen != current.alt_screen) current.alt_screen = view.alt_screen;
 
     if (view.mouse != current.mouse) {
         if (view.mouse) {
@@ -118,7 +101,6 @@ pub fn signature(view: anytype) u64 {
     var h = std.hash.Wyhash.init(0);
     const draw_ptr = @intFromPtr(view.draw);
     h.update(std.mem.asBytes(&draw_ptr));
-    h.update(std.mem.asBytes(&view.alt_screen));
     h.update(std.mem.asBytes(&view.mouse));
     h.update(std.mem.asBytes(&view.hide_cursor));
     h.update(std.mem.asBytes(&view.print_above));
@@ -162,42 +144,10 @@ const TestWriter = struct {
     }
 };
 
-test "view: signature is stable when the declaration is unchanged" {
-    const v: View(TestModel) = .{ .draw = &TestModel.drawA };
-    const v2: View(TestModel) = .{ .draw = &TestModel.drawA };
-    try testing.expectEqual(signature(v), signature(v));
-    try testing.expectEqual(signature(v), signature(v2));
-}
-
-test "view: signature changes when any declarative field changes" {
-    const base: View(TestModel) = .{ .draw = &TestModel.drawA };
-    try testing.expect(signature(base) != signature(View(TestModel){ .draw = &TestModel.drawB }));
-    try testing.expect(signature(base) != signature(View(TestModel){ .draw = &TestModel.drawA, .alt_screen = true }));
-    try testing.expect(signature(base) != signature(View(TestModel){ .draw = &TestModel.drawA, .mouse = true }));
-    try testing.expect(signature(base) != signature(View(TestModel){ .draw = &TestModel.drawA, .hide_cursor = false }));
-    try testing.expect(signature(base) != signature(View(TestModel){ .draw = &TestModel.drawA, .print_above = true }));
-    try testing.expect(signature(base) != signature(View(TestModel){ .draw = &TestModel.drawA, .height = 5 }));
-    try testing.expect(signature(base) != signature(View(TestModel){ .draw = &TestModel.drawA, .title = "t" }));
-}
-
-test "view: mode diff emits only on change; alt_screen is tracked, never emitted" {
+test "view: mode changes emit once and stable modes emit nothing" {
     var tw: TestWriter = .{};
     tw.init();
     var modes: Modes = .{};
-
-    // inline→alt: tracked, no bytes (v1 no-op, Q1).
-    try testing.expect(!try applyModeDiff(
-        View(TestModel){ .draw = &TestModel.drawA, .alt_screen = true },
-        &tw.w,
-        &modes,
-    ));
-    try testing.expectEqualStrings("", tw.w.buffered());
-    try testing.expect(modes.alt_screen);
-
-    // alt→inline: tracked back, still no bytes.
-    try testing.expect(!try applyModeDiff(View(TestModel){ .draw = &TestModel.drawA }, &tw.w, &modes));
-    try testing.expectEqualStrings("", tw.w.buffered());
-    try testing.expect(!modes.alt_screen);
 
     // mouse on: emitted once.
     try testing.expect(try applyModeDiff(View(TestModel){ .draw = &TestModel.drawA, .mouse = true }, &tw.w, &modes));

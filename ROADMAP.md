@@ -13,11 +13,11 @@ zomp's Phase-6 gate, D/E because they are app content.
 
 ## What the reference does that notui does not
 
-| Reference behaviour | notui today |
+| Reference behaviour | Planning baseline (`0791fe1`) |
 |---|---|
 | Two output channels: `HistoryBatch{id, rows, kind}` + viewport, acknowledged once (`tui.ts:159-187`, `tui.ts:3259-3263`) | `Region` has an append queue with no batch id, no ack, no replay |
 | Paint envelope: hide cursor + DEC 2026 + DECAWM off, one write per frame (`tui.ts:85-93`, `tui.ts:3224`) | sync-output option and emit helpers exist; no per-frame envelope |
-| Row-level damage over prepared lines, memoized by content (`tui.ts:599-609`, `tui.ts:3436-3502`) | cell-level `Buffer.renderDiff`; no row early-out, no escape memo |
+| Row-level damage over prepared lines, memoized by content (`tui.ts:599-609`, `tui.ts:3436-3502`) | `Buffer.renderDiff` already skipped equal rows, but scanned rows twice and had no emitted-SGR memo |
 | Adaptive scheduling: cadence + ~50% duty cycle + output backpressure (`tui.ts:866-889`, `tui.ts:2457-2506`) | fixed `fps` in `App.Options`, render-on-demand, no backpressure |
 | Streaming retirement `active → settled → committed` with an 8 ms budget (`transcript-container.ts:68-116`) | none; apps re-render live content themselves |
 | Never a screen-wide erase; ED2 before ED3, for tmux/conhost history (`tui.ts:2989-3110`) | `Region` has five frame strategies; erase discipline unaudited against multiplexers |
@@ -33,7 +33,7 @@ arena reset, ultraviolet "a steady stream of frames allocates nothing").
 
 ## Phase F — measurement first
 
-Everything below is gated by a harness that does not exist yet.
+Measurement is the acceptance prerequisite for the pipeline and content phases.
 
 | id | deliverable | closes on |
 |---|---|---|
@@ -97,11 +97,34 @@ remote is `https://github.com/CoffeeImpliesCode/notui` (private).
 | A1 | `PORTING.md`: remote URL, the commit Phase 6 was ported from, and the four-rule frame contract quoted once for both sides | zomp's blocker §1 updated with a verifiable commit id |
 | A2 | Mark which public types are stable port surface (`Buffer`, `Region`, `App`, `View`, `Cmd`, `Context`, `event`) and which are internal | a doc section the port can cite; no API change |
 
+## Status
+
+Every item above is implemented and verified on this host. The evidence:
+
+- `zig build test` — 620/620 pass (`zig ast-check src/root.zig` clean,
+  `zig fmt --check .` clean, `zlint` 0 errors).
+- A standalone path-dependency consumer at
+  `../.notui-roadmap-consumer` builds against `src/root.zig` alone and
+  asserts the shipped behaviour end to end: dependency module graph,
+  `Parser`→`Editor`→`Region`→pipe, undo/kill/yank, an unchanged frame
+  writing zero bytes, golden record and no-clobber, parsed approval
+  selecting an exact index, fuzzy optimal run, key hints derived from the
+  declaration, sanitized Markdown, diff and card bands, two theme
+  profiles, and a piped plain frame with no escape byte.
+- `zig build bench` — the ten-case table and the pty-free loop numbers in
+  `README.md`.
+- A source port of the editor into `../zomp` (`src/tui/text_editor.zig`)
+  passes that tree's 198-test shard, and a ReleaseSafe executable over the
+  live file exercised capture/kill/yank/yank-pop/undo/redo and the
+  grapheme cursor boundary.
+
+Open: the non-ASCII key text synthesis decision, tracked in `NEXT.md`.
+
 ## Non-goals
 
 - **Alt-screen / full-screen.** zomp's D7 rejects it (no termios layer to
-  restore with) and notui is inline-first by design; `View.alt_screen` is a
-  no-op field and should be removed rather than filled in.
+  restore with) and notui is inline-first by design; the old no-op
+  `View.alt_screen` and `Cmd.alt_screen` fields are removed, not implemented.
 - **FFI to a Rust or Go TUI.** zomp's D13 lists no new dependencies and names
   this as its own project if ever wanted.
 - **A layout solver** (Cassowary, Yoga, TCSS). A single inline band does not
@@ -113,6 +136,8 @@ remote is `https://github.com/CoffeeImpliesCode/notui` (private).
 
 ## Known cleanup, not roadmap
 
-`emit.zig` ships `enterAltScreen`, `exitAltScreen`, and `scrollRegionUp` that
-no library code calls. Per `AGENTS.md` ("remove dead code"), delete them or
-adopt them in B2/B3 — leaving them invites use of a path that is not tested.
+Resolved: `emit.zig`'s unused `enterAltScreen`, `exitAltScreen` and
+`scrollRegionUp` are deleted. The port surface has no alt-screen path
+(`src/view.zig` has no `alt_screen` field, `src/command.zig` no
+`alt_screen` effect), so keeping the writers invited a path nothing
+tested.

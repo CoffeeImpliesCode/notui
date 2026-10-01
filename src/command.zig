@@ -50,13 +50,6 @@ pub fn Cmd(comptime Msg: type) type {
         mouse: bool,
         /// Show/hide the cursor immediately (`emit.hideCursor/showCursor`).
         cursor: bool,
-        /// Enter/leave the alternate screen immediately. PARSED-BUT-NOOP
-        /// in v1 (orchestrator Q1): the inline Region owns the primary
-        /// screen, and emitting smcup without a full-buffer renderer
-        /// would blank it. Tracked and overridden by the next frame's
-        /// `View.alt_screen`; the full-screen renderer is the deferred
-        /// architecture §7 item.
-        alt_screen: bool,
     };
 }
 

@@ -26,6 +26,10 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "bench",
+        "examples",
+        "README.md",
+        "PORTING.md",
         "vendor",
     },
 }

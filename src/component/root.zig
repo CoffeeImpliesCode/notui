@@ -15,6 +15,14 @@ pub const Progress = @import("progress.zig").Progress;
 pub const StatusBar = @import("status_bar.zig").StatusBar;
 pub const Gauge = @import("gauge.zig").Gauge;
 pub const Suggestions = @import("suggestions.zig").Suggestions;
+pub const Editor = @import("editor.zig").Editor;
+pub const fuzzy = @import("fuzzy.zig");
+pub const Select = @import("overlay.zig").Select;
+pub const Modal = @import("overlay.zig").Modal;
+pub const Popover = @import("overlay.zig").Popover;
+pub const cards = @import("cards.zig");
+pub const Card = cards.Card;
+pub const Diff = cards.Diff;
 
 test {
     std.testing.refAllDecls(@This());

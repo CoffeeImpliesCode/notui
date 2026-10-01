@@ -13,7 +13,7 @@
 //!   palette colors on weaker profiles (the emit layer downsamples rgb
 //!   via `writeStyleProfile` for direct users — see `Palette`);
 //! - the non-TTY path: with piped stdin, skip `makeRaw` + capability
-//!   detection, render one plain frame with `sync_output = false`, and
+//!   detection, render one plain frame with `interactive = false`, and
 //!   exit without parking. The same frame renders styled on a tty and
 //!   plain in a pipe (no SGR, no interactive sequences).
 //!
@@ -66,7 +66,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 /// Non-TTY path: no Tty is opened, no makeRaw, no Caps.detect — the
-/// region degrades to one plain frame (`sync_output = false`, §4.8).
+/// region degrades to one plain frame (`interactive = false`, §4.8).
 /// The default 80-column buffer is the frame width (no winsize to ask).
 fn runPiped(gpa: std.mem.Allocator, io: std.Io) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -74,7 +74,7 @@ fn runPiped(gpa: std.mem.Allocator, io: std.Io) !void {
 
     var region = try Region.init(gpa, .{
         .height = region_height,
-        .sync_output = false, // non-TTY degradation (§4.8)
+        .interactive = false,
     });
     defer region.deinit();
 
