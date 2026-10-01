@@ -373,6 +373,26 @@ inline fn parseOsc(input: []const u8, paste_allocator: ?std.mem.Allocator) !Resu
     }
 }
 
+/// Whether `cp` is a codepoint a key press can be text for, so the
+/// parser may synthesize a `text` slice for it when the terminal
+/// reported none.
+///
+/// Excluded: C0, DEL and C1 (a control byte is never typed text), the
+/// surrogate range and the noncharacters (not scalars at all), the
+/// private use areas (kitty encodes NAMED keys there — `Key.f1`,
+/// `Key.home` — and they are not text), and `Key.multicodepoint`, the
+/// sentinel for a key that produced a cluster rather than one codepoint.
+fn isTextCodepoint(cp: u21) bool {
+    if (cp < 0x20) return false; // C0
+    if (cp >= 0x7F and cp <= 0x9F) return false; // DEL and C1
+    if (cp >= 0xD800 and cp <= 0xDFFF) return false; // surrogates
+    if (cp >= 0xE000 and cp <= 0xF8FF) return false; // BMP private use
+    if (cp >= 0xF0000 and cp <= 0xFFFFD) return false; // supplementary private use
+    if (cp >= 0x100000 and cp <= 0x10FFFD) return false;
+    if ((cp & 0xFFFE) == 0xFFFE) return false; // noncharacters
+    return cp < Key.multicodepoint;
+}
+
 inline fn parseCsi(input: []const u8, text_buf: []u8) Result {
     if (input.len < 3) {
         return .{
@@ -662,9 +682,25 @@ inline fn parseCsi(input: []const u8, text_buf: []u8) Result {
             }
 
             {
-                // We check if we have *only* shift, no text, and a printable character. This can
-                // happen when we have disambiguate on and a key is pressed and encoded as CSI u,
-                // for example shift + space can produce CSI 32 ; 2 u
+                // The kitty protocol can report a key with no text: with
+                // disambiguate on, `CSI 97 ; 2 u` is shift+a, and a
+                // terminal that sends no text field leaves the app to
+                // reconstruct what was typed.
+                //
+                // `text` is reconstructed for any printable scalar, not
+                // just ASCII, so a non-ASCII layout's shift+letter
+                // reaches `Key.matchText` — which case-folds through the
+                // same zg seam — instead of never matching. The upper
+                // form is a multi-codepoint-safe `width.toUpper`, so an
+                // expansion (ß -> SS) degrades to the codepoint itself
+                // rather than a truncated byte.
+                //
+                // `shifted_codepoint` stays ASCII-only. It names the
+                // codepoint shift produces on THIS layout, which is the
+                // terminal's business: a layout that does not report it
+                // gets none invented, and a caller that needs it reads
+                // the field. Synthesizing it from a case mapping would
+                // claim a shifted key the layout may not have.
                 const mod_test: Key.Modifiers = .{
                     .shift = true,
                     .caps_lock = key.mods.caps_lock,
@@ -672,14 +708,14 @@ inline fn parseCsi(input: []const u8, text_buf: []u8) Result {
                 };
                 if (key.text == null and
                     key.mods.eql(mod_test) and
-                    key.codepoint <= std.math.maxInt(u8) and
-                    std.ascii.isPrint(@intCast(key.codepoint)))
+                    isTextCodepoint(key.codepoint))
                 {
-                    // Encode the codepoint as upper
-                    const upper = std.ascii.toUpper(@intCast(key.codepoint));
+                    const upper = width.toUpper(key.codepoint);
                     const n = std.unicode.utf8Encode(upper, text_buf) catch unreachable;
                     key.text = text_buf[0..n];
-                    key.shifted_codepoint = upper;
+                    if (key.codepoint < 0x80) {
+                        key.shifted_codepoint = upper;
+                    }
                 }
             }
 
@@ -1045,6 +1081,55 @@ test "parse: kitty: shift+a without text reporting" {
 
     try testing.expectEqual(10, result.n);
     try testing.expectEqualDeep(expected_event, result.event);
+}
+
+test "parse: kitty: shift+non-ascii without text reporting synthesizes text" {
+    // A non-ASCII layout reports the base codepoint and, unless the
+    // terminal sends a text field, nothing else. `text` is
+    // reconstructed from the zg seam so `Key.matchText` — which folds
+    // case through the same seam — can match a declared binding.
+    const alloc = testing.allocator_instance.allocator();
+    // CSI 228 ; 2 u: U+00E4 (a with diaeresis) with shift, no text.
+    const input = "\x1b[228;2u";
+    var parser: Parser = .{};
+    const result = try parser.parse(input, alloc);
+    const key = result.event.?.key_press;
+
+    try testing.expectEqual(@as(u21, 0x00E4), key.codepoint);
+    try testing.expectEqualStrings("\u{00C4}", key.text.?);
+    // The shifted codepoint is the layout's business, not a case
+    // mapping's: a non-ASCII key gets none invented.
+    try testing.expect(key.shifted_codepoint == null);
+    try testing.expect(key.matchText(0x00E4, .{ .shift = true }));
+}
+
+test "parse: kitty: a named key is never given synthesized text" {
+    // `Key.home` lives in the kitty private use area. Synthesizing text
+    // for it would make a function key look like a printable character.
+    const alloc = testing.allocator_instance.allocator();
+    const input = "\x1b[57356;2u";
+    var parser: Parser = .{};
+    const result = try parser.parse(input, alloc);
+    const key = result.event.?.key_press;
+
+    try testing.expectEqual(Key.home, key.codepoint);
+    try testing.expect(key.text == null);
+    try testing.expect(key.shifted_codepoint == null);
+}
+
+test "parse: kitty: a control codepoint is never given synthesized text" {
+    // ctrl+a with no text field: C0 is never typed text, so the
+    // synthesis must decline rather than fill in a letter for a
+    // shortcut the app matches on modifiers alone.
+    const alloc = testing.allocator_instance.allocator();
+    const input = "\x1b[97;5u";
+    var parser: Parser = .{};
+    const result = try parser.parse(input, alloc);
+    const key = result.event.?.key_press;
+
+    try testing.expectEqual(@as(u21, 'a'), key.codepoint);
+    try testing.expect(key.text == null);
+    try testing.expect(key.matches('a', .{ .ctrl = true }));
 }
 
 test "parse: kitty: alt+shift+a without text reporting" {

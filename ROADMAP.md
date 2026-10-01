@@ -101,7 +101,7 @@ remote is `https://github.com/CoffeeImpliesCode/notui` (private).
 
 Every item above is implemented and verified on this host. The evidence:
 
-- `zig build test` — 620/620 pass (`zig ast-check src/root.zig` clean,
+- `zig build test` — 623/623 pass (`zig ast-check src/root.zig` clean,
   `zig fmt --check .` clean, `zlint` 0 errors).
 - A standalone path-dependency consumer at
   `../.notui-roadmap-consumer` builds against `src/root.zig` alone and
@@ -118,7 +118,9 @@ Every item above is implemented and verified on this host. The evidence:
   live file exercised capture/kill/yank/yank-pop/undo/redo and the
   grapheme cursor boundary.
 
-Open: the non-ASCII key text synthesis decision, tracked in `NEXT.md`.
+Nothing on the roadmap is open. `NEXT.md` holds the two remaining notes:
+how to read a `zbc` report, and the non-ASCII key text synthesis decision
+this change closed.
 
 ## Non-goals
 

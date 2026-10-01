@@ -8,17 +8,27 @@ on the roadmap.
 
 ## Non-ASCII key text synthesis in the parser
 
-`src/Parser.zig` fills `text` and `shifted_codepoint` for shift+printable
-events that arrive with no text, and its "printable" predicate is
-`std.ascii.isPrint`, so a non-ASCII layout gets no synthesized text.
-`Key.matchText` case-folds through the Unicode mapping (`width.toUpper` in
-the zg seam); this is the other half.
+**Decided and implemented.** The parser's "no text reported" fallback now
+synthesizes `text` for any printable scalar, not just ASCII, and
+`shifted_codepoint` is set only for ASCII.
 
-Widening "printable" past ASCII changes what `shifted_codepoint` means —
-zg categories, `DisplayWidth > 0`, or leaving it to the terminal to report
-the text — so it wants a decision, not a patch. Close it with a test that
-feeds the decoder a shift+non-ASCII key with no text and asserts the
-synthesized `text`.
+The split follows what each field means. `text` is "what the key typed", and
+`Key.matchText` already case-folds through the zg seam, so a non-ASCII
+layout's shift+letter had to reach it or no declared binding could ever
+match. `isTextCodepoint` admits every scalar that is not a control, a
+surrogate, a noncharacter, a private-use codepoint (kitty encodes `f1`,
+`home` and the rest there) or `Key.multicodepoint`. The upper form comes
+from `width.toUpper`, so an expansion like ß → SS degrades to the codepoint
+itself instead of a truncated byte.
+
+`shifted_codepoint` names the codepoint shift produces *on this layout*,
+which is the terminal's to report. Inventing it from a case mapping would
+claim a shifted key the layout may not have, so a non-ASCII key gets none.
+
+Three decoder regressions cover it: shift+U+00E4 synthesizes `Ä` and
+matches through `matchText` with no shifted codepoint; `Key.home` in the
+private use area gets no text; ctrl+U+0061, a C0 modifier shortcut, gets
+none either.
 
 ## Reading `zbc` reports
 
