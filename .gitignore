@@ -15,3 +15,8 @@ codedb.snapshot
 .opencode/
 graphify-out/
 /agent-notes
+
+# NFS leaves a `.nfsXXXX` copy of a file it has unlinked while another
+# process still has it open (here: the code indexer). It cannot be
+# removed, so never snapshot it.
+.nfs*
