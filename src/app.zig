@@ -153,6 +153,9 @@ pub fn App(comptime Model: type) type {
             output: output.OutputQueue.Options = .{},
             /// Width-change behaviour for the inline band (C2).
             resize_mode: ResizeMode = .append,
+            /// Declared native profile: exact capacity, transcript tail and oldest-source eviction.
+            /// Tail blanks must be unused terminal padding; nonconforming terminals use .none.
+            terminal_reflow: Region.TerminalReflow = .none,
         };
 
         const Self = @This();
@@ -189,7 +192,7 @@ pub fn App(comptime Model: type) type {
         /// Set by update/view/cmds; forces a repaint this tick.
         render_requested: bool = false,
         last_tick: ?std.Io.Timestamp = null,
-        msg_queue: std.ArrayListUnmanaged(Msg) = .empty,
+        msg_queue: std.ArrayList(Msg) = .empty,
         filter: ?*const fn (*Context, Event) ?Msg = null,
         title: ?[]const u8 = null,
         /// Absolute deadline armed by `Cmd.tick` (one-shot Msg.tick).
@@ -334,14 +337,17 @@ pub fn App(comptime Model: type) type {
             var dispatched = ev != null;
             if (ev) |e| switch (e) {
                 .cpr => |pos| {
-                    // The reply to the region's own queryCursor: correct
-                    // the drift (region.zig applyCpr). Bookkeeping only —
-                    // no forced repaint; the next frame renders at the
-                    // corrected anchor.
+                    // `dispatched` forces a frame even at fps zero.
+                    // A discarded old-geometry reply can therefore
+                    // trigger the fresh query without a model message.
                     if (self.region) |*r| try r.applyCpr(pos.row, pos.col);
                 },
                 .winsize => |wsz| {
-                    if (self.region) |*r| try r.resize(wsz.cols, r.height);
+                    // `wsz.rows` is the terminal's screen, not the band:
+                    // the band's own height stays logical, so a later
+                    // winsize that grows the screen restores the full
+                    // band instead of the remnant the short screen left.
+                    if (self.region) |*r| try r.resize(wsz.cols, wsz.rows, r.height);
                     self.render_requested = true;
                 },
                 else => {
@@ -556,7 +562,7 @@ pub fn App(comptime Model: type) type {
         /// lost and never written twice.
         fn retireTranscript(self: *Self) !void {
             const t = if (self.transcript) |*t| t else return;
-            var delta: transcript.Transcript.Delta = .{};
+            var delta: transcript.Delta = .{};
             const io = self.io.?;
             try t.retire(transcript.Clock.fromIo(&io), &delta);
             if (delta.isEmpty()) return;
@@ -827,6 +833,7 @@ pub fn App(comptime Model: type) type {
                 .interactive = true,
                 .sync_output = self.caps.?.sync_output,
                 .resize_mode = self.opts.resize_mode,
+                .terminal_reflow = self.opts.terminal_reflow,
                 .width_policy = self.caps.?.widthPolicy(),
             });
             errdefer {
@@ -839,7 +846,7 @@ pub fn App(comptime Model: type) type {
                 self.out = null;
             }
             const ws = try self.tty.?.getWinsize();
-            try self.region.?.resize(ws.cols, self.region.?.height);
+            try self.region.?.resize(ws.cols, ws.rows, self.opts.region_height);
             self.arena = std.heap.ArenaAllocator.init(gpa);
             self.scratch = std.heap.ArenaAllocator.init(gpa);
             self.reader = Reader.init(&self.tty.?);
@@ -859,6 +866,7 @@ pub fn App(comptime Model: type) type {
                 .interactive = false,
                 .sync_output = false,
                 .resize_mode = self.opts.resize_mode,
+                .terminal_reflow = self.opts.terminal_reflow,
                 .width_policy = caps.Capabilities.WidthPolicy.zg_unicode,
             });
             errdefer {
@@ -1133,7 +1141,7 @@ const FakeTty = struct {
 
     /// Drain the pipe completely, so a "terminal that is reading" can be
     /// simulated after a blocked stretch.
-    fn drainAll(self: *FakeTty, sink: *std.ArrayListUnmanaged(u8)) !void {
+    fn drainAll(self: *FakeTty, sink: *std.ArrayList(u8)) !void {
         var buf: [4096]u8 = undefined;
         while (true) {
             const n = self.drainOutput(&buf);
@@ -1180,9 +1188,12 @@ fn setupInteractive(comptime M: type, opts: App(M).Options) !struct { app: App(M
         .interactive = true,
         .sync_output = true,
         .resize_mode = opts.resize_mode,
+        .terminal_reflow = opts.terminal_reflow,
     });
     errdefer app.region.?.deinit();
-    try app.region.?.resize(80, opts.region_height);
+    // The fake tty has no screen: the band's own rows are the whole
+    // visible viewport, so no row is ever physically clipped here.
+    try app.region.?.resize(80, opts.region_height, opts.region_height);
     app.out = try output.OutputQueue.init(testing.allocator, opts.output);
     errdefer {
         app.out.?.deinit();
@@ -1339,6 +1350,37 @@ test "app: without a filter Ctrl+C is dropped and the loop keeps running" {
     try setup.tty.writeInput("\x03");
     try setup.app.tick();
     try testing.expect(setup.app.isRunning());
+}
+
+test "app: fps-zero replaces a stale geometry query without a model message" {
+    var setup = try setupInteractive(TestModel, .{ .fps = 0 });
+    defer setup.app.deinit();
+    defer setup.tty.deinit();
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+
+    try setup.tty.writeInput("x");
+    try setup.app.tick();
+    try setup.tty.drainAll(&captured);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "\x1b[6n") != null);
+    captured.clearRetainingCapacity();
+
+    try setup.tty.writeInput("\x1b[48;6;80t");
+    try setup.app.tick();
+    try setup.tty.drainAll(&captured);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "\x1b[6n") == null);
+    captured.clearRetainingCapacity();
+
+    try setup.tty.writeInput("\x1b[3;1R");
+    try setup.app.tick();
+    try setup.tty.drainAll(&captured);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, captured.items, "\x1b[6n"));
+    try testing.expectEqual(@as(u16, 0), setup.app.region.?.anchorRow());
+
+    try setup.tty.writeInput("\x1b[3;1R");
+    try setup.app.tick();
+    try testing.expectEqual(@as(u16, 1), setup.app.region.?.anchorRow());
+    try testing.expectEqual(@as(i32, 0), setup.app.model.count);
 }
 
 test "app: send drains next tick; quit breaks the loop; isRunning reflects state" {
@@ -1680,7 +1722,8 @@ fn setupHeadless(comptime M: type) !App(M) {
         .sync_output = true,
     });
     errdefer app.region.?.deinit();
-    try app.region.?.resize(80, 2);
+    // Headless: band-only viewport, as in `setupInteractive`.
+    try app.region.?.resize(80, 2, 2);
     app.out = try output.OutputQueue.init(testing.allocator, .{});
     errdefer {
         app.out.?.deinit();
@@ -1719,7 +1762,7 @@ const ChurnModel = struct {
 test "app: headless frames stage and submit in one write each" {
     var app = try setupHeadless(ChurnModel);
     defer app.deinit();
-    var sink = CountingSink{};
+    var sink: CountingSink = .{};
     const transport = output.Transport.from(&sink);
 
     for (0..5) |i| {
@@ -1746,7 +1789,7 @@ test "app: headless frames stage and submit in one write each" {
 test "app: headless frames follow a blocked transport without losing bytes" {
     var app = try setupHeadless(ChurnModel);
     defer app.deinit();
-    var sink = CountingSink{ .block = true };
+    var sink: CountingSink = .{ .block = true };
     const transport = output.Transport.from(&sink);
 
     // The transport is not draining: nothing is accepted, the frame stays
@@ -1779,7 +1822,7 @@ test "app: a short-written frame drains on the next idle tick, receipts commit o
     var app = try setupHeadless(ChurnModel);
     defer app.deinit();
     // The terminal takes part of the first write and everything after.
-    var sink = CountingSink{ .short = 5 };
+    var sink: CountingSink = .{ .short = 5 };
     const transport = output.Transport.from(&sink);
     try app.initTranscript(testing.allocator, .{ .budget_ns = 0 });
 
@@ -1867,7 +1910,7 @@ test "app: a terminal that stopped reading defers frames and stays bounded" {
     // The reader drains: every staged byte arrives, byte for byte, so
     // backpressure cost latency, never content. The filler the stopped
     // terminal left behind is not the App's and is not counted.
-    var delivered: std.ArrayListUnmanaged(u8) = .empty;
+    var delivered: std.ArrayList(u8) = .empty;
     defer delivered.deinit(testing.allocator);
     for (0..20) |i| {
         try setup.tty.drainAll(&delivered);
@@ -1973,7 +2016,7 @@ fn ctrlCQuitFilter(_: *Context, ev: Event) ?ChurnQuitModel.Msg {
 test "app: settled transcript blocks reach the ledger exactly once" {
     var app = try setupHeadless(GoodModel);
     defer app.deinit();
-    var sink = CountingSink{};
+    var sink: CountingSink = .{};
     const transport = output.Transport.from(&sink);
     // A zero retirement budget retires exactly one block per frame, so
     // the ledger is seen arriving as a strict prefix (transcript.zig:
@@ -2025,7 +2068,7 @@ test "app: settled transcript blocks reach the ledger exactly once" {
 test "app: a blocked transport defers the transcript delta, then commits once" {
     var app = try setupHeadless(GoodModel);
     defer app.deinit();
-    var sink = CountingSink{ .block = true };
+    var sink: CountingSink = .{ .block = true };
     const transport = output.Transport.from(&sink);
     try app.initTranscript(testing.allocator, .{ .budget_ns = 0 });
 
@@ -2050,7 +2093,7 @@ test "app: a blocked transport defers the transcript delta, then commits once" {
 test "app: a refused ledger enqueue retries the same delta, losing nothing" {
     var app = try setupHeadless(GoodModel);
     defer app.deinit();
-    var sink = CountingSink{};
+    var sink: CountingSink = .{};
     const transport = output.Transport.from(&sink);
     try app.initTranscript(testing.allocator, .{ .budget_ns = 0 });
 
@@ -2079,7 +2122,7 @@ test "app: a refused ledger enqueue retries the same delta, losing nothing" {
 test "app: an overflowing frame leaves the region retryable, nothing doubled" {
     var app = try setupHeadless(ChurnModel);
     defer app.deinit();
-    var sink = CountingSink{};
+    var sink: CountingSink = .{};
     const transport = output.Transport.from(&sink);
 
     // A queue far too small for the frame: the staging writer fails
@@ -2133,7 +2176,7 @@ const HeaderModel = struct {
 test "app: a failed mode or title stage re-emits on retry, nothing published" {
     var app = try setupHeadless(HeaderModel);
     defer app.deinit();
-    var sink = CountingSink{};
+    var sink: CountingSink = .{};
     const transport = output.Transport.from(&sink);
 
     // A queue with room for the mode sequence but not for the title

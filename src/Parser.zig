@@ -27,20 +27,6 @@ const mouse_bits = struct {
     const leave: u16 = 0b100000000;
 };
 
-// the state of the parser
-const State = enum {
-    ground,
-    escape,
-    csi,
-    osc,
-    dcs,
-    sos,
-    pm,
-    apc,
-    ss2,
-    ss3,
-};
-
 // a buffer to temporarily store text in. We need this to encode
 // text-as-codepoints
 buf: [128]u8 = undefined,
@@ -50,6 +36,9 @@ buf: [128]u8 = undefined,
 ///
 /// If an unknown event is found, Result.event will be null and Result.n will be
 /// greater than 0
+///
+/// A null paste_allocator disables OSC 52 clipboard paste events. Complete
+/// sequences are consumed without an event; other event parsing is unchanged.
 pub fn parse(self: *Parser, input: []const u8, paste_allocator: ?std.mem.Allocator) !Result {
     std.debug.assert(input.len > 0);
 
@@ -355,13 +344,14 @@ inline fn parseOsc(input: []const u8, paste_allocator: ?std.mem.Allocator) !Resu
         },
         52 => {
             if (input[semicolon_idx + 1] != 'c') return null_event;
+            const gpa = paste_allocator orelse return null_event;
             const payload = if (bel_terminated)
                 input[semicolon_idx + 3 .. sequence.len - 1]
             else
                 input[semicolon_idx + 3 .. sequence.len - 2];
             const decoder = std.base64.standard.Decoder;
-            const text = try paste_allocator.?.alloc(u8, try decoder.calcSizeForSlice(payload));
-            errdefer paste_allocator.?.free(text);
+            const text = try gpa.alloc(u8, try decoder.calcSizeForSlice(payload));
+            errdefer gpa.free(text);
             try decoder.decode(text, payload);
             log.debug("decoded paste: {s}", .{text});
             return .{
@@ -690,7 +680,10 @@ inline fn parseCsi(input: []const u8, text_buf: []u8) Result {
                 {
                     const text_cp = key.shifted_codepoint orelse width.toUpper(key.codepoint);
                     if (isTextCodepoint(text_cp)) {
-                        const n = std.unicode.utf8Encode(text_cp, text_buf) catch unreachable;
+                        // isTextCodepoint excludes invalid Unicode scalars.
+                        const n = std.unicode.utf8Encode(text_cp, text_buf) catch |err| {
+                            std.debug.panic("invalid text scalar after validation: {t}", .{err});
+                        };
                         key.text = text_buf[0..n];
                         if (key.shifted_codepoint == null and key.codepoint < 0x80) {
                             key.shifted_codepoint = text_cp;
@@ -1022,6 +1015,75 @@ test "parse: osc52 paste" {
         },
         else => try testing.expect(false),
     }
+}
+
+test "parse: osc52 paste with bel terminator" {
+    const alloc = testing.allocator_instance.allocator();
+    const input = "\x1b]52;c;b3NjNTIgcGFzdGU=\x07";
+    const expected_text = "osc52 paste";
+    var parser: Parser = .{};
+    const result = try parser.parse(input, alloc);
+
+    try testing.expectEqual(24, result.n);
+    switch (result.event.?) {
+        .paste => |text| {
+            defer alloc.free(text);
+            try testing.expectEqualStrings(expected_text, text);
+        },
+        else => try testing.expect(false),
+    }
+}
+
+test "parse: osc52 paste is dropped when paste_allocator is null" {
+    // A null paste_allocator is how a caller opts out of clipboard
+    // decoding. The paste bytes must then vanish without an event, and
+    // without eating whatever key the terminal sent next.
+    const cases = [_]struct {
+        sequence: []const u8,
+        len: usize,
+    }{
+        .{ .sequence = "\x1b]52;c;b3NjNTIgcGFzdGU=\x1b\\", .len = 25 },
+        .{ .sequence = "\x1b]52;c;b3NjNTIgcGFzdGU=\x07", .len = 24 },
+        .{ .sequence = "\x1b]52;c;\x07", .len = 8 },
+    };
+    for (cases) |case| {
+        var input_buf: [32]u8 = undefined;
+        const input = try std.fmt.bufPrint(&input_buf, "{s}A", .{case.sequence});
+        var parser: Parser = .{};
+        const result = try parser.parse(input, null);
+
+        try testing.expect(result.event == null);
+        try testing.expectEqual(case.len, result.n);
+
+        const rest = try parser.parse(input[result.n..], null);
+        try testing.expectEqual(1, rest.n);
+        const expected_key: u21 = 'A';
+        try testing.expectEqual(expected_key, rest.event.?.key_press.codepoint);
+    }
+}
+
+test "parse: incomplete osc52 paste consumes nothing until terminated" {
+    // Without a terminator there is nothing to decode yet, so the parser
+    // must take no bytes and let the caller feed the same prefix again.
+    const partials = [_][]const u8{
+        "\x1b]52;c;b3NjNTIgcGFzdGU=",
+        "\x1b]52;c;b3NjNTIgcGFzdGU=\x1b",
+    };
+    for (partials) |partial| {
+        var parser: Parser = .{};
+        const result = try parser.parse(partial, null);
+
+        try testing.expect(result.event == null);
+        try testing.expectEqual(@as(usize, 0), result.n);
+    }
+
+    // Once the terminator arrives the same bytes are a complete sequence.
+    const complete = "\x1b]52;c;b3NjNTIgcGFzdGU=\x1b\\";
+    var parser: Parser = .{};
+    const result = try parser.parse(complete, null);
+
+    try testing.expect(result.event == null);
+    try testing.expectEqual(25, result.n);
 }
 
 test "parse: focus_in" {

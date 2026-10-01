@@ -128,7 +128,6 @@ const TestModel = struct {
         return .{ .draw = &drawA };
     }
     fn drawA(_: *TestModel, _: *Context, _: *Buffer) anyerror!void {}
-    fn drawB(_: *TestModel, _: *Context, _: *Buffer) anyerror!void {}
 };
 
 /// Fixed-buffer writer for golden tests (emit.zig TestWriter pattern).

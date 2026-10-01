@@ -35,6 +35,7 @@
 //! import zg (plan §0 grep-gate).
 
 const std = @import("std");
+const Color = @import("color.zig").Color;
 const Style = @import("style.zig").Style;
 const Width = @import("width.zig");
 
@@ -80,10 +81,10 @@ pub const Block = struct {
 /// or replace any `lines[i].spans`; `arena` backs new text. An
 /// unterminated (malformed) fence still calls it when it produced lines.
 pub const Highlighter = *const fn (
+    arena: std.mem.Allocator,
     ctx: ?*anyopaque,
     lang: []const u8,
     lines: []Line,
-    arena: std.mem.Allocator,
 ) Error!void;
 
 /// Rendering knobs. Defaults render unwrapped, tab-expanded text with
@@ -161,7 +162,7 @@ pub const Sanitizer = struct {
                 continue;
             };
             if (len > src.len - i) break; // truncated tail: nothing valid left
-            const cp = std.unicode.utf8Decode(src[i..][0..len]) catch {
+            const cp = decodeSeq(src, i, len) orelse {
                 i += 1;
                 continue;
             };
@@ -231,7 +232,7 @@ pub const Sanitizer = struct {
                 keep = false;
                 break;
             }
-            const cp = std.unicode.utf8Decode(gc[i..][0..len]) catch {
+            const cp = decodeSeq(gc, i, len) orelse {
                 keep = false;
                 break;
             };
@@ -299,9 +300,29 @@ pub const Sanitizer = struct {
     }
 };
 
+/// The codepoint encoded in the `len` bytes at `bytes[i..]`, or null when
+/// those bytes are not a well-formed sequence of that width.
+///
+/// `len` is the `utf8ByteSequenceLength` of the lead byte and the caller
+/// has already checked that many bytes are there, so the width-specific
+/// decoders are exact: they reject a malformed body and nothing else.
+/// `std.unicode.utf8Decode` is deprecated and would re-derive the width
+/// from a slice every caller has already measured.
+fn decodeSeq(bytes: []const u8, i: usize, len: usize) ?u21 {
+    const seq = bytes[i..][0..len];
+    const cp: u21 = switch (len) {
+        1 => @as(u21, seq[0]),
+        2 => std.unicode.utf8Decode2(seq[0..2].*),
+        3 => std.unicode.utf8Decode3(seq[0..3].*),
+        4 => std.unicode.utf8Decode4(seq[0..4].*),
+        else => unreachable,
+    } catch return null;
+    return cp;
+}
+
 /// Encode `cp` into `buf` and return the length, or 0 for a scalar no
 /// UTF-8 form exists for. `copy` only reaches this with scalars
-/// `utf8Decode` accepted, so 0 is a defensive no-op, not a leak.
+/// `decodeSeq` accepted, so 0 is a defensive no-op, not a leak.
 fn encodeInto(buf: *[4]u8, cp: u21) usize {
     return std.unicode.utf8Encode(cp, buf) catch 0;
 }
@@ -530,7 +551,7 @@ fn runHighlighter(
 ) Error!void {
     const hook = opts.highlighter orelse return;
     if (lines.len == 0) return;
-    try hook(opts.highlighter_ctx, lang, lines, arena);
+    try hook(arena, opts.highlighter_ctx, lang, lines);
 }
 
 /// Turn one block item into `Line`s, parsing inline markup and wrapping.
@@ -1071,7 +1092,7 @@ fn hasForbiddenCodepoint(s: []const u8) bool {
     while (i < s.len) {
         const len: usize = std.unicode.utf8ByteSequenceLength(s[i]) catch return true;
         if (len > s.len - i) return true;
-        const cp = std.unicode.utf8Decode(s[i..][0..len]) catch return true;
+        const cp = decodeSeq(s, i, len) orelse return true;
         i += len;
         if (isForbidden(cp)) return true;
     }
@@ -1304,7 +1325,6 @@ test "markdown: unterminated fence terminates at end of input" {
 }
 
 test "markdown: bold, italic, strikethrough and code carry styles" {
-    const Color = @import("color.zig").Color;
     var r = Renderer.init(test_alloc);
     defer r.deinit();
 
@@ -1446,19 +1466,20 @@ test "markdown: paragraphs join soft breaks, blanks collapse" {
 }
 
 test "markdown: highlighter hook receives the fence info string" {
-    const Color = @import("color.zig").Color;
     const Hook = struct {
+        const Self = @This();
+
         langs: usize = 0,
         lang: []const u8 = "",
 
         fn run(
+            arena: std.mem.Allocator,
             ctx: ?*anyopaque,
             lang: []const u8,
             lines: []Line,
-            arena: std.mem.Allocator,
         ) Error!void {
             _ = arena;
-            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            const self: *Self = @ptrCast(@alignCast(ctx.?));
             self.langs += 1;
             self.lang = lang;
             for (lines) |*line| {
@@ -1484,18 +1505,20 @@ test "markdown: highlighter hook receives the fence info string" {
 
 test "markdown: adjacent fences stay two blocks" {
     const Hook = struct {
+        const Self = @This();
+
         calls: usize = 0,
         rows: usize = 0,
         langs: [4][]const u8 = .{ "", "", "", "" },
 
         fn run(
+            arena: std.mem.Allocator,
             ctx: ?*anyopaque,
             lang: []const u8,
             lines: []Line,
-            arena: std.mem.Allocator,
         ) Error!void {
             _ = arena;
-            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            const self: *Self = @ptrCast(@alignCast(ctx.?));
             self.calls += 1;
             self.rows += lines.len;
             if (self.calls <= self.langs.len) self.langs[self.calls - 1] = lang;

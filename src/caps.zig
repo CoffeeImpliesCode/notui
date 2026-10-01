@@ -552,10 +552,6 @@ const FakeTty = struct {
         var fds: [2]i32 = undefined;
         const rc = std.os.linux.pipe(&fds);
         if (std.posix.errno(rc) != .SUCCESS) return error.PipeFailed;
-        errdefer {
-            std.posix.close(fds[0]);
-            std.posix.close(fds[1]);
-        }
         self.* = .{
             .io = io,
             .fd = .{ .handle = fds[0], .flags = .{ .nonblocking = false } },

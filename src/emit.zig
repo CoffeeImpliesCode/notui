@@ -60,10 +60,18 @@ pub fn eraseLine(w: anytype) !void {
     try w.writeAll(line_clear_right);
 }
 
-/// Reserve `n` lines below the cursor (CSI n E, CNL) — space reservation.
+/// Reserve `n` new rows below the cursor by writing `n` CRLFs.
 /// Emits nothing for `n == 0`.
+///
+/// CRLF, not CNL (`CSI n E`): a cursor move stops at the last visible
+/// row, so a band that sits on the screen's bottom reserves NOTHING when
+/// it grows and the rows the app asked for land on rows it does not own.
+/// LF on that row scrolls instead, the one motion a terminal answers
+/// with rows: the screen gives up its top rows into scrollback and the
+/// committed transcript above the band goes there with them.
 pub fn appendLines(w: anytype, n: u16) !void {
-    if (n > 0) try w.print(csi ++ "{d}E", .{n});
+    var left = n;
+    while (left > 0) : (left -= 1) try w.writeAll("\r\n");
 }
 
 /// Turn autowrap off (DECAWM, CSI ?7l) — the paint envelope's first
@@ -233,24 +241,6 @@ test "emit: erasure" {
     t2.init();
     try eraseLine(&t2.w);
     try std.testing.expectEqualStrings("\x1b[K", t2.w.buffered());
-}
-
-test "emit: line reservation" {
-    var t: TestWriter = .{};
-    t.init();
-    try appendLines(&t.w, 3);
-    try std.testing.expectEqualStrings("\x1b[3E", t.w.buffered());
-
-    var t2: TestWriter = .{};
-    t2.init();
-    try appendLines(&t2.w, 1);
-    try std.testing.expectEqualStrings("\x1b[1E", t2.w.buffered());
-
-    // n == 0 emits nothing (zigzag guard convention).
-    var t3: TestWriter = .{};
-    t3.init();
-    try appendLines(&t3.w, 0);
-    try std.testing.expectEqualStrings("", t3.w.buffered());
 }
 
 test "emit: autowrap toggles" {

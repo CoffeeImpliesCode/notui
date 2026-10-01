@@ -16,7 +16,6 @@
 
 const std = @import("std");
 const Buffer = @import("../buffer.zig").Buffer;
-const Style = @import("../style.zig").Style;
 
 /// The monotonic clock a component reads.
 pub const Clock = std.Io.Timestamp;

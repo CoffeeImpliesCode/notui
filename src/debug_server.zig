@@ -60,7 +60,10 @@ pub fn writeSnapshotLine(w: *Io.Writer, snap: Snapshot) Io.Writer.Error!void {
 
 /// JSON string quoting: escapes `"`, `\`, and every C0 byte as `\u00xx`.
 /// Bytes >= 0x20 pass through, so multi-byte UTF-8 survives verbatim.
-const JsonString = struct {
+/// `format` is reached from `std.Io.Writer`'s `{f}` path, so it stays
+/// `pub` and the type is part of this module's API: a caller writing
+/// JSON gets the same escaping as the snapshot line.
+pub const JsonString = struct {
     text: []const u8,
 
     pub fn format(self: JsonString, w: *Io.Writer) Io.Writer.Error!void {

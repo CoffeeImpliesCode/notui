@@ -192,7 +192,7 @@ pub fn score(haystack: []const u8, needle: []const u8, options: Options) Error!?
 
     var positions: [max_needle]usize = @splat(0);
     @memcpy(positions[0..needle_graphemes], best.positions[0..needle_graphemes]);
-    return Score{
+    return .{
         .positions = positions,
         .len = @intCast(needle_graphemes),
         .rank = .{

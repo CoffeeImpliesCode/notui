@@ -386,7 +386,7 @@ test "suggestions: truncation allocates only through the caller allocator" {
     try std.testing.expectError(error.OutOfMemory, s.draw(alloc, &buf, 0, 0, .fromNanoseconds(0)));
 }
 
-// ── fuzzy binding ──────────────────────────────────────
+// Fuzzy binding.
 
 test "suggestions: fuzzy reorders candidates by rank" {
     // The pool is in anti-rank order, so only the matcher can produce

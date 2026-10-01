@@ -1236,7 +1236,9 @@ test "diff: a Region band carries the styled cells and keeps source escapes out 
         .sync_output = false,
     });
     defer region.deinit();
-    try region.resize(24, 5);
+    // Band-only viewport: the test sink is no screen, so the band's own
+    // rows are the visible geometry.
+    try region.resize(24, 5, 5);
     _ = try d.draw(&region.cur, 0, 0, .fromNanoseconds(0));
 
     // The cells the band will emit: the header in the meta style, the
@@ -1285,7 +1287,7 @@ test "diff: a Region band carries the styled cells and keeps source escapes out 
     try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[?1049h") == null);
     var esc: usize = 0;
     var start: usize = 0;
-    while (std.mem.indexOfScalarPos(u8, out, start, 0x1b)) |at| {
+    while (std.mem.findScalarPos(u8, out, start, 0x1b)) |at| {
         esc += 1;
         try std.testing.expect(at + 1 < out.len);
         try std.testing.expect(out[at + 1] == '[');
@@ -1301,7 +1303,7 @@ test "diff: a Region band carries the styled cells and keeps source escapes out 
 
     // Bring every source row into the band. The sanitizer must remove
     // the escape bodies, not merely hide them below the clipping edge.
-    try region.resize(24, 8);
+    try region.resize(24, 8, 8);
     _ = try d.draw(&region.cur, 0, 0, .fromNanoseconds(0));
     var expanded: TestWriter = .{};
     expanded.init();
@@ -1331,7 +1333,7 @@ test "diff: a Region writes its ledger above the band and never erases above it"
         .sync_output = false,
     });
     defer region.deinit();
-    try region.resize(24, 2);
+    try region.resize(24, 2, 2);
 
     // First frame: the band paints, no ledger row yet.
     _ = try d.draw(&region.cur, 0, 0, .fromNanoseconds(0));

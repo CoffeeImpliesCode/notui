@@ -719,7 +719,7 @@ fn expectNoControlCells(buf: *const Buffer) !void {
 
 const ten = [_][]const u8{ "0", "1", "2", "3", "4", "5", "6", "7", "8", "9" };
 
-// ── Select: motion ─────────────────────────────────────────────
+// Select: motion.
 
 test "select: move clamps to the item range at both ends" {
     const items = [_][]const u8{ "a", "b", "c" };
@@ -800,7 +800,7 @@ test "select: an empty list has no selection, moves nothing and draws nothing" {
     try std.testing.expect(s.selected() == null);
 }
 
-// ── Select: keys ───────────────────────────────────────────────
+// Select: keys.
 
 test "select: key navigates, wraps and jumps" {
     var s: Select = .{ .items = &ten };
@@ -892,7 +892,7 @@ test "select: resolve turns enter into the index and escape into null" {
     try std.testing.expectEqual(@as(usize, 2), cancelled.selected().?);
 }
 
-// ── Select: draw ───────────────────────────────────────────────
+// Select: draw.
 
 test "select: a 3-row box scrolls so the highlight is always the drawn item" {
     var s: Select = .{ .items = &ten, .width = 4 };
@@ -1127,7 +1127,7 @@ test "select: index, confirm and cancel survive the options shrinking" {
     try std.testing.expect(buf.get(1, 1).style.eql(c.selected_style));
 }
 
-// ── Modal ──────────────────────────────────────────────────────
+// Modal.
 
 test "modal: centres the box in the space it is given" {
     var m: Modal = .{
@@ -1290,7 +1290,7 @@ test "modal: a sequence split across body rows is consumed whole" {
     try expectNoControlCells(&thin);
 }
 
-// ── Popover ────────────────────────────────────────────────────
+// Popover.
 
 test "popover: draws its box and content at the anchor" {
     const lines = [_][]const u8{ "line one", "line two" };
@@ -1384,7 +1384,7 @@ test "popover: one line's sequence does not swallow the next line" {
     try expectNoControlCells(&buf);
 }
 
-// ── the rendered band ───────────────────────────────────────────
+// The rendered band.
 
 test "overlay: no source control sequence reaches a rendered Region" {
     // The real band, not a source-text check: every field carries the
@@ -1438,7 +1438,7 @@ test "overlay: no source control sequence reaches a rendered Region" {
     try std.testing.expect(std.mem.indexOf(u8, out, "tip") != null);
 }
 
-// ── draw allocates nothing ─────────────────────────────────────
+// Draw allocation checks.
 
 test "overlay: draw allocates nothing" {
     // Unarmed until the buffer exists: the guard goes live on the next

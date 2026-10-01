@@ -144,7 +144,6 @@ const TestWriter = struct {
 };
 
 const test_alloc = std.testing.allocator;
-const ns = std.time.ns_per_ms;
 
 /// Concatenate one row's graphemes into `out` for test assertions
 /// (wide continuations emit nothing, matching the renderer).

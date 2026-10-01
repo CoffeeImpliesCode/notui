@@ -29,7 +29,6 @@
 //! half the live bytes). Drains never copy.
 
 const std = @import("std");
-const posix = std.posix;
 
 pub const OutputQueue = struct {
     pub const Options = struct {
@@ -107,7 +106,7 @@ pub const OutputQueue = struct {
         // is paid once per frame instead of once per write.
         if (self.start > 0 and self.buf.len - self.end < (self.buf.len - self.start) / 2) {
             const live = self.pending();
-            std.mem.copyForwards(u8, self.buf[0..live], self.buf[self.start..self.end]);
+            @memmove(self.buf[0..live], self.buf[self.start..self.end]);
             self.start = 0;
             self.end = live;
         }
@@ -353,6 +352,7 @@ const PipeSink = struct {
     fn deinit(self: *PipeSink) void {
         self.write.close(testing.io);
         self.read.close(testing.io);
+        self.* = undefined;
     }
 
     fn tryWrite(self: *PipeSink, bytes: []const u8) OutputQueue.WriteError!usize {
@@ -374,7 +374,7 @@ fn stage(q: *OutputQueue, bytes: []const u8) !void {
 test "output: a frame is submitted to the transport in one write" {
     var q = try OutputQueue.init(testing.allocator, .{ .capacity = 4096, .watermark = 2048 });
     defer q.deinit();
-    var sink = FakeSink{};
+    var sink: FakeSink = .{};
 
     const frame = "\x1b[?2026h\rhello\r\x1b[?2026l";
     try stage(&q, frame);
@@ -392,7 +392,7 @@ test "output: a frame is submitted to the transport in one write" {
 test "output: a short write keeps the remainder pending, in order" {
     var q = try OutputQueue.init(testing.allocator, .{ .capacity = 4096, .watermark = 2048 });
     defer q.deinit();
-    var sink = FakeSink{ .chunk = 3 };
+    var sink: FakeSink = .{ .chunk = 3 };
 
     try stage(&q, "abcdefgh");
     try testing.expectEqual(@as(usize, 3), try q.drain(&sink));
@@ -411,7 +411,7 @@ test "output: a short write keeps the remainder pending, in order" {
 test "output: a blocked transport consumes nothing and keeps the frame" {
     var q = try OutputQueue.init(testing.allocator, .{ .capacity = 4096, .watermark = 2048 });
     defer q.deinit();
-    var sink = FakeSink{};
+    var sink: FakeSink = .{};
 
     try stage(&q, "frame-bytes");
     sink.block = true;
@@ -427,7 +427,7 @@ test "output: a blocked transport consumes nothing and keeps the frame" {
 test "output: composition refuses above the watermark and resumes after a drain" {
     var q = try OutputQueue.init(testing.allocator, .{ .capacity = 64, .watermark = 16 });
     defer q.deinit();
-    var sink = FakeSink{ .block = true };
+    var sink: FakeSink = .{ .block = true };
 
     try stage(&q, "0123456789abcdef"); // 16 bytes pending == watermark
     try testing.expect(!q.canCompose());
@@ -450,7 +450,7 @@ test "output: composition refuses above the watermark and resumes after a drain"
 test "output: an oversized frame fails atomically, nothing staged" {
     var q = try OutputQueue.init(testing.allocator, .{ .capacity = 32, .watermark = 16 });
     defer q.deinit();
-    var sink = FakeSink{};
+    var sink: FakeSink = .{};
 
     try stage(&q, "kept");
     q.beginFrame();
@@ -471,7 +471,7 @@ test "output: an oversized frame fails atomically, nothing staged" {
 test "output: a full queue fails the write instead of reporting no progress" {
     var q = try OutputQueue.init(testing.allocator, .{ .capacity = 8, .watermark = 4 });
     defer q.deinit();
-    var sink = FakeSink{};
+    var sink: FakeSink = .{};
 
     // A frame that exactly fills the buffer stages; the next byte
     // cannot.
@@ -488,7 +488,7 @@ test "output: a full queue fails the write instead of reporting no progress" {
 test "output: the staging writer honours the splat contract" {
     var q = try OutputQueue.init(testing.allocator, .{ .capacity = 4096, .watermark = 2048 });
     defer q.deinit();
-    var sink = FakeSink{};
+    var sink: FakeSink = .{};
 
     q.beginFrame();
     // Larger than the internal room? No: a plain splat write must land
@@ -505,7 +505,7 @@ test "output: the staging writer honours the splat contract" {
 test "output: a splat that outruns the queue fails instead of truncating" {
     var q = try OutputQueue.init(testing.allocator, .{ .capacity = 16, .watermark = 8 });
     defer q.deinit();
-    var sink = FakeSink{};
+    var sink: FakeSink = .{};
 
     try testing.expectError(error.WriteFailed, q.writer().writeSplat(&.{"x"}, 32));
     try testing.expect(q.frameOverflowed());
@@ -521,7 +521,7 @@ test "output: the frame is compacted once, at beginFrame, then composing works a
     // the wrong reason.
     var q = try OutputQueue.init(testing.allocator, .{ .capacity = 64, .watermark = 56 });
     defer q.deinit();
-    var sink = FakeSink{ .chunk = 1 };
+    var sink: FakeSink = .{ .chunk = 1 };
 
     const chunk = "y" ** 20;
     try stage(&q, chunk);
@@ -547,7 +547,7 @@ test "output: the frame is compacted once, at beginFrame, then composing works a
 test "output: peak pending and total written track the session" {
     var q = try OutputQueue.init(testing.allocator, .{ .capacity = 64, .watermark = 32 });
     defer q.deinit();
-    var sink = FakeSink{ .chunk = 2 };
+    var sink: FakeSink = .{ .chunk = 2 };
 
     try stage(&q, "abcdef");
     _ = try q.drain(&sink);
@@ -562,7 +562,7 @@ test "output: peak pending and total written track the session" {
 test "output: drainAll blocks out the remainder through a plain writer" {
     var q = try OutputQueue.init(testing.allocator, .{ .capacity = 64, .watermark = 32 });
     defer q.deinit();
-    var sink = FakeSink{ .chunk = 2 };
+    var sink: FakeSink = .{ .chunk = 2 };
     try stage(&q, "abcdef");
     _ = try q.drain(&sink);
 

@@ -63,6 +63,29 @@ pub const Clock = struct {
 /// Where a block is in the retirement machine.
 pub const State = enum { active, settled, committed };
 
+/// One frame's retirement delta: the rows to write and the block ids
+/// they came from, in order. Borrowed from the transcript: the caller
+/// must copy them into whatever ledger sink it uses before the
+/// `retire` that assembles the next one. A `retire` that re-emits
+/// this delta leaves the slices exactly as they are.
+pub const Delta = struct {
+    rows: []const []const u8 = &.{},
+    ids: []const u64 = &.{},
+    /// Blocks in `ids` — the count a seal records.
+    blocks: usize = 0,
+
+    pub fn isEmpty(self: Delta) bool {
+        return self.rows.len == 0;
+    }
+
+    /// Total row bytes in the delta (frame-cost accounting).
+    pub fn byteLen(self: Delta) usize {
+        var n: usize = 0;
+        for (self.rows) |row| n += row.len;
+        return n;
+    }
+};
+
 pub const Transcript = struct {
     pub const Options = struct {
         /// Retirement time budget per frame (8 ms — the reference
@@ -73,29 +96,6 @@ pub const Transcript = struct {
         /// Hard bound on retained blocks (live + retired but not
         /// acknowledged). Exceeding it is an error, never a guess.
         max_live_blocks: usize = 256,
-    };
-
-    /// One frame's retirement delta: the rows to write and the block
-    /// ids they came from, in order. Borrowed from the transcript: the
-    /// caller must copy them into whatever ledger sink it uses before
-    /// the `retire` that assembs the next one. A `retire` that re-emits
-    /// this delta leaves the slices exactly as they are.
-    pub const Delta = struct {
-        rows: []const []const u8 = &.{},
-        ids: []const u64 = &.{},
-        /// Blocks in `ids` — the count a seal records.
-        blocks: usize = 0,
-
-        pub fn isEmpty(self: Delta) bool {
-            return self.rows.len == 0;
-        }
-
-        /// Total row bytes in the delta (frame-cost accounting).
-        pub fn byteLen(self: Delta) usize {
-            var n: usize = 0;
-            for (self.rows) |row| n += row.len;
-            return n;
-        }
     };
 
     const Block = struct {
@@ -405,8 +405,8 @@ test "transcript: a block walks active -> settled -> committed" {
     try t.settle(id);
     try testing.expectEqual(@as(?State, .settled), t.stateOf(id));
 
-    var delta: Transcript.Delta = .{};
-    var clock = FakeClock{ .step_ns = 1_000_000 };
+    var delta: Delta = .{};
+    var clock: FakeClock = .{ .step_ns = 1_000_000 };
     try t.retire(clock.clock(), &delta);
     try testing.expectEqual(@as(usize, 1), delta.blocks);
     try testing.expectEqualStrings("one", delta.rows[0]);
@@ -432,8 +432,8 @@ test "transcript: retirement never crosses an unsettled block" {
     // The product settled b and c but not a: order means nothing leaves.
     try t.settle(b);
     try t.settle(c);
-    var delta: Transcript.Delta = .{};
-    var clock = FakeClock{ .step_ns = 1_000_000 };
+    var delta: Delta = .{};
+    var clock: FakeClock = .{ .step_ns = 1_000_000 };
     try t.retire(clock.clock(), &delta);
     try testing.expect(delta.isEmpty());
     try testing.expectEqual(@as(usize, 3), t.mutableBlocks());
@@ -461,8 +461,8 @@ test "transcript: the budget defers the remainder, order intact" {
         try t.settle(id);
     }
 
-    var clock = FakeClock{ .step_ns = 4 * std.time.ns_per_ms };
-    var delta: Transcript.Delta = .{};
+    var clock: FakeClock = .{ .step_ns = 4 * std.time.ns_per_ms };
+    var delta: Delta = .{};
     var frame: u64 = 0;
     try t.retire(clock.clock(), &delta);
     try testing.expectEqual(@as(usize, 2), delta.blocks);
@@ -497,8 +497,8 @@ test "transcript: a zero budget still retires one block per frame" {
         const id = try t.push(&.{"r"});
         try t.settle(id);
     }
-    var clock = FakeClock{ .step_ns = 0 };
-    var delta: Transcript.Delta = .{};
+    var clock: FakeClock = .{ .step_ns = 0 };
+    var delta: Delta = .{};
     for (0..3) |i| {
         try t.retire(clock.clock(), &delta);
         try testing.expectEqual(@as(usize, 1), delta.blocks);
@@ -512,8 +512,8 @@ test "transcript: a zero budget still retires one block per frame" {
 test "transcript: a block settled after retirement reaches the NEXT frame" {
     var t = try makeTranscript(.{ .budget_ns = 0 });
     defer t.deinit();
-    var clock = FakeClock{ .step_ns = 0 };
-    var delta: Transcript.Delta = .{};
+    var clock: FakeClock = .{ .step_ns = 0 };
+    var delta: Delta = .{};
 
     const a = try t.push(&.{"a"});
     try t.settle(a);
@@ -534,8 +534,8 @@ test "transcript: a block settled after retirement reaches the NEXT frame" {
 test "transcript: a delta nobody sealed is re-emitted, not replaced" {
     var t = try makeTranscript(.{ .budget_ns = 0 });
     defer t.deinit();
-    var clock = FakeClock{ .step_ns = 0 };
-    var delta: Transcript.Delta = .{};
+    var clock: FakeClock = .{ .step_ns = 0 };
+    var delta: Delta = .{};
 
     const a = try t.push(&.{"a"});
     try t.settle(a);
@@ -548,7 +548,7 @@ test "transcript: a delta nobody sealed is re-emitted, not replaced" {
     // the staged cursor does not move.
     const b = try t.push(&.{"b"});
     try t.settle(b);
-    var retry: Transcript.Delta = .{};
+    var retry: Delta = .{};
     try t.retire(clock.clock(), &retry);
     try testing.expectEqual(@as(usize, 1), retry.blocks);
     try testing.expectEqual(a, retry.ids[0]);
@@ -583,8 +583,8 @@ test "transcript: a live block that is never settled trips the bound" {
     // Settling only the newer block does not help: order holds the
     // prefix back, so the bound stays.
     try t.settle(b);
-    var clock = FakeClock{ .step_ns = 0 };
-    var delta: Transcript.Delta = .{};
+    var clock: FakeClock = .{ .step_ns = 0 };
+    var delta: Delta = .{};
     try t.retire(clock.clock(), &delta);
     try testing.expect(delta.isEmpty());
     try testing.expectError(error.LiveCapacityExceeded, t.push(&.{"c"}));
@@ -607,8 +607,8 @@ test "transcript: a live block that is never settled trips the bound" {
 test "transcript: each receipt owns exactly the blocks it sealed" {
     var t = try makeTranscript(.{ .budget_ns = 0 });
     defer t.deinit();
-    var clock = FakeClock{ .step_ns = 0 };
-    var delta: Transcript.Delta = .{};
+    var clock: FakeClock = .{ .step_ns = 0 };
+    var delta: Delta = .{};
     const rows = [_][]const u8{ "r1", "r2", "r3", "r4" };
     for (rows) |row| {
         const id = try t.push(&.{row});
@@ -654,8 +654,8 @@ test "transcript: an unknown or already-settled id is refused" {
 test "transcript: sealing an empty delta is not a receipt" {
     var t = try makeTranscript(.{ .budget_ns = 0 });
     defer t.deinit();
-    var clock = FakeClock{ .step_ns = 0 };
-    var delta: Transcript.Delta = .{};
+    var clock: FakeClock = .{ .step_ns = 0 };
+    var delta: Delta = .{};
     try t.retire(clock.clock(), &delta);
     try testing.expect(delta.isEmpty());
     try testing.expectError(error.DeltaNotPending, t.sealDelta(1));
@@ -675,8 +675,8 @@ test "transcript: options carry the contract defaults" {
 test "transcript: the delta accounts for its own byte cost" {
     var t = try makeTranscript(.{ .budget_ns = 0 });
     defer t.deinit();
-    var clock = FakeClock{ .step_ns = 0 };
-    var delta: Transcript.Delta = .{};
+    var clock: FakeClock = .{ .step_ns = 0 };
+    var delta: Delta = .{};
     const id = try t.push(&.{ "abcd", "ef" });
     try t.settle(id);
     try t.retire(clock.clock(), &delta);

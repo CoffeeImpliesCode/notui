@@ -130,6 +130,18 @@ const Span = struct {
     len: usize,
 };
 
+/// One frame's draw window: where the window starts and where the cursor
+/// sits. `off` and `col` name the same cluster boundary, so the byte
+/// offset and the reported column cannot describe different windows.
+const Window = struct {
+    /// Byte offset of the window's first cluster in the line.
+    off: usize,
+    /// Display column of that cluster; this is what `scroll_col` holds.
+    col: usize,
+    /// Display column of the cursor; never left of `col`.
+    cursor_col: usize,
+};
+
 /// What the previous operation was; kills accumulate while this reads
 /// `.kill`, and yank-pop is only valid while it reads `.yank`.
 const Action = enum { none, kill, yank };
@@ -157,7 +169,9 @@ pub const Editor = struct {
     /// boundary (readers clamp it, so a stray write cannot panic).
     cursor: usize = 0,
     /// Display column of the window's left edge, for the caller's status
-    /// line. `draw` (and `scrollTo`) keep the cursor inside the window.
+    /// line. `draw` (and `scrollTo`) keep the cursor inside the window and
+    /// the edge on a cluster boundary, so it names the column the first
+    /// drawn glyph occupies.
     scroll_col: usize = 0,
 
     /// Undo snapshots, oldest first.
@@ -202,7 +216,7 @@ pub const Editor = struct {
         self.* = undefined;
     }
 
-    // ── inspection ──────────────────────────────────────────
+    // Inspection.
 
     /// The line's bytes, borrowed (valid until the next mutation).
     pub fn text(self: *const Editor) []const u8 {
@@ -219,7 +233,7 @@ pub const Editor = struct {
         return widthUpTo(self.line.items, self.cursorAt());
     }
 
-    // ── editing ─────────────────────────────────────────────
+    // Editing.
 
     /// Insert `bytes` at the cursor through the sanitizer: bytes that do
     /// not decode to a storable codepoint (invalid UTF-8, C0, DEL, C1) are
@@ -302,7 +316,7 @@ pub const Editor = struct {
         self.commitUndo();
     }
 
-    // ── motion ──────────────────────────────────────────────
+    // Motion.
 
     /// Move one cluster left.
     pub fn moveLeft(self: *Editor) void {
@@ -346,7 +360,7 @@ pub const Editor = struct {
         self.cursor = self.line.items.len;
     }
 
-    // ── kills and the kill ring ─────────────────────────────
+    // Kills and the kill ring.
 
     /// Kill from the cursor to the end of the line (ctrl-k).
     pub fn killToEnd(self: *Editor) Error!void {
@@ -410,7 +424,7 @@ pub const Editor = struct {
         return true;
     }
 
-    // ── undo ────────────────────────────────────────────────
+    // Undo.
 
     /// Restore the line and cursor from the most recent snapshot. Returns
     /// false when no snapshot is left. Restoring never allocates: the
@@ -426,7 +440,7 @@ pub const Editor = struct {
         return true;
     }
 
-    // ── input mapping ───────────────────────────────────────
+    // Input mapping.
 
     /// Map an input event to an editor operation; true when the editor
     /// consumed it. Unmapped events (`enter`, `tab`, `escape`, arrows the
@@ -564,21 +578,18 @@ pub const Editor = struct {
         return true;
     }
 
-    // ── presentation ────────────────────────────────────────
+    // Presentation.
 
     /// Keep the cursor inside a window of `viewport` columns: scroll when
     /// it reaches the right edge, and never past the end of the line (the
     /// window may end one column past the line so the end-of-line cursor
-    /// stays visible). Callers can call this with the real terminal width
-    /// before reading `scroll_col` for a status line.
+    /// stays visible). The edge lands on a cluster boundary, so the column
+    /// reported here is the one the first drawn glyph occupies. Callers
+    /// can call this with the real terminal width before reading
+    /// `scroll_col` for a status line.
     pub fn scrollTo(self: *Editor, viewport: usize) void {
         if (viewport == 0) return;
-        const ccol = self.cursorCol();
-        if (ccol < self.scroll_col) self.scroll_col = ccol;
-        if (ccol >= self.scroll_col + viewport) self.scroll_col = ccol + 1 - viewport;
-        const total = self.textWidth();
-        const max_scroll = if (total + 1 > viewport) total + 1 - viewport else 0;
-        if (self.scroll_col > max_scroll) self.scroll_col = max_scroll;
+        _ = self.selectWindow(viewport);
     }
 
     /// Advance the blink to `now` WITHOUT drawing; true when the phase
@@ -600,8 +611,9 @@ pub const Editor = struct {
     /// Draw the visible window of the line with the top-left at (x, y):
     /// the text clipped at `buf.width`, plus a cursor marker cell (the
     /// cluster under the cursor, or a space at the end of the line) in
-    /// `cursor_style` while the blink phase is on. Columns left of
-    /// `scroll_col` are skipped; a window never starts mid-cluster. Returns
+    /// `cursor_style` while the blink phase is on. Columns left of the
+    /// window's left edge are skipped; the edge never starts mid-cluster
+    /// (a wide cluster straddling it is drawn whole, to its left). Returns
     /// the columns consumed, never more than `buf.width - x`.
     ///
     /// The cells this frame leaves in the buffer borrow `line`, and that is
@@ -614,13 +626,15 @@ pub const Editor = struct {
         if (y >= buf.height) return 0;
         const avail: usize = buf.width -| x;
         if (avail == 0) return 0;
-        self.scrollTo(avail);
 
-        const start = offsetAtCol(self.line.items, self.scroll_col);
+        // Use the snapped window edge for both text and cursor placement;
+        // an unsnapped column inside a wide cluster would overwrite text.
+        const win = self.selectWindow(avail);
+        const start = win.off;
         const window = self.line.items[start..];
         var consumed = try buf.draw(self.style, window, x, y);
 
-        const rel = self.cursorCol() -| self.scroll_col;
+        const rel = win.cursor_col - win.col;
         if (rel < avail) {
             const tail = window[self.cursorAt() - start ..];
             const glen = Width.firstGraphemeLen(tail);
@@ -644,12 +658,59 @@ pub const Editor = struct {
         return consumed;
     }
 
-    // ── internals ───────────────────────────────────────────
+    // Internals.
 
     /// The cursor clamped into the line (the field is public, so readers
     /// clamp instead of trusting it).
     fn cursorAt(self: *const Editor) usize {
         return @min(self.cursor, self.line.items.len);
+    }
+
+    /// Measure cursor and total width together, then snap the window edge
+    /// forward to a whole cluster. Record that edge in `scroll_col` and
+    /// return its byte offset and column together. Allocates nothing.
+    fn selectWindow(self: *Editor, viewport: usize) Window {
+        const line = self.line.items;
+        const cursor = self.cursorAt();
+        var scan: usize = 0;
+        var ccol: usize = 0;
+        var total: usize = 0;
+        while (scan < line.len) {
+            const glen = Width.firstGraphemeLen(line[scan..]);
+            if (glen == 0) break;
+            const w = Width.graphemeWidth(line[scan..][0..glen]);
+            const columns: usize = if (w > 0) @intCast(w) else 0;
+            total += columns;
+            if (scan + glen <= cursor) ccol += columns;
+            scan += glen;
+        }
+        var col = self.scroll_col;
+        if (ccol < col) col = ccol;
+        if (ccol >= col + viewport) col = ccol + 1 - viewport;
+        const max_scroll = if (total + 1 > viewport) total + 1 - viewport else 0;
+        if (col > max_scroll) col = max_scroll;
+
+        // Step cluster by cluster until the window has covered `col`, and
+        // take the column from the offset: the edge is where a whole
+        // cluster begins, never inside one, so the reported column is the
+        // one the first drawn glyph occupies. A wide cluster straddling
+        // `col` is stepped over and drawn whole to the LEFT of the window
+        // rather than hanging half out of it, and the cursor — always at
+        // or after `col` — keeps its cell inside the window. A zero-width
+        // cluster covers no column, so it travels with the window instead
+        // of being stepped over.
+        var off: usize = 0;
+        var walked: usize = 0;
+        while (off < line.len and walked < col) {
+            const glen = Width.firstGraphemeLen(line[off..]);
+            if (glen == 0) break;
+            const w = Width.graphemeWidth(line[off..][0..glen]);
+            const wu: usize = if (w > 0) @intCast(w) else 0;
+            walked += wu;
+            off += glen;
+        }
+        self.scroll_col = walked;
+        return .{ .off = off, .col = walked, .cursor_col = ccol };
     }
 
     /// End the kill/yank sequence (`pi-tui` `#resetKillSequence`).
@@ -778,7 +839,7 @@ pub const Editor = struct {
     }
 };
 
-// ── cluster helpers ─────────────────────────────────────
+// Cluster helpers.
 
 /// Byte offset of the last cluster boundary strictly before `at`
 /// (`at` itself must be a boundary).
@@ -820,24 +881,6 @@ fn widthUpTo(line: []const u8, at: usize) usize {
     return width;
 }
 
-/// Byte offset of the first cluster that starts at or after display column
-/// `target`: the window never starts in the middle of a wide cluster (it
-/// snaps back to the cluster's left edge) and never splits bytes.
-fn offsetAtCol(line: []const u8, target: usize) usize {
-    var off: usize = 0;
-    var col: usize = 0;
-    while (off < line.len and col < target) {
-        const glen = Width.firstGraphemeLen(line[off..]);
-        if (glen == 0) break;
-        const w = Width.graphemeWidth(line[off..][0..glen]);
-        const wu: usize = if (w > 0) @intCast(w) else 0;
-        if (col + wu > target) break; // over-wide for the target column
-        col += wu;
-        off += glen;
-    }
-    return off;
-}
-
 /// Whitespace as a cluster: the base codepoint decides (a trailing
 /// combining mark cannot turn a space into a word).
 fn isSpaceCluster(line: []const u8, start: usize, end: usize) bool {
@@ -854,7 +897,13 @@ fn isSpaceAt(line: []const u8, at: usize) bool {
     const n = std.unicode.utf8ByteSequenceLength(gc[0]) catch return false;
     const seq_len: usize = n;
     if (seq_len > gc.len) return false;
-    const cp = std.unicode.utf8Decode(gc[0..seq_len]) catch return false;
+    const cp = (switch (seq_len) {
+        1 => @as(u21, gc[0]),
+        2 => std.unicode.utf8Decode2(gc[0..2].*),
+        3 => std.unicode.utf8Decode3(gc[0..3].*),
+        4 => std.unicode.utf8Decode4(gc[0..4].*),
+        else => unreachable,
+    }) catch return false;
     return isSpaceCp(cp);
 }
 
@@ -879,7 +928,13 @@ fn classify(bytes: []const u8) Storable {
     const n = std.unicode.utf8ByteSequenceLength(bytes[0]) catch return .{ .len = 0, .step = 1 };
     const seq_len: usize = n;
     if (seq_len > bytes.len) return .{ .len = 0, .step = 1 };
-    const cp = std.unicode.utf8Decode(bytes[0..seq_len]) catch return .{ .len = 0, .step = 1 };
+    const cp = (switch (seq_len) {
+        1 => @as(u21, bytes[0]),
+        2 => std.unicode.utf8Decode2(bytes[0..2].*),
+        3 => std.unicode.utf8Decode3(bytes[0..3].*),
+        4 => std.unicode.utf8Decode4(bytes[0..4].*),
+        else => unreachable,
+    }) catch return .{ .len = 0, .step = 1 };
     return .{ .len = if (isControlCp(cp)) 0 else seq_len, .step = seq_len };
 }
 
@@ -923,7 +978,7 @@ test {
     std.testing.refAllDecls(@This());
 }
 
-// ── tests ───────────────────────────────────────────────
+// Tests.
 
 const test_alloc = std.testing.allocator;
 
@@ -1886,3 +1941,198 @@ const TestWriter = struct {
         self.w = .fixed(&self.buf);
     }
 };
+
+test "editor: a scrolled wide cluster does not hide the character before the cursor" {
+    var ed = try Editor.init(test_alloc, .{ .blink_ns = 0 });
+    defer ed.deinit();
+    try ed.insert("a界b");
+
+    var buf = try Buffer.init(test_alloc, 3, 1);
+    defer buf.deinit();
+    _ = try ed.draw(&buf, 0, 0, .fromNanoseconds(0));
+
+    var row: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("b  ", rowStr(&buf, 0, &row));
+    try std.testing.expect(buf.get(1, 0).style.eql(ed.cursor_style));
+    try std.testing.expectEqual(@as(usize, 3), ed.scroll_col);
+
+    ed.moveLeft();
+    buf.clear();
+    _ = try ed.draw(&buf, 0, 0, .fromNanoseconds(0));
+    try std.testing.expectEqualStrings("b  ", rowStr(&buf, 0, &row));
+    try std.testing.expect(buf.get(0, 0).style.eql(ed.cursor_style));
+
+    ed.moveHome();
+    buf.clear();
+    _ = try ed.draw(&buf, 0, 0, .fromNanoseconds(0));
+    try std.testing.expectEqualStrings("a界", rowStr(&buf, 0, &row));
+    try std.testing.expect(buf.get(0, 0).style.eql(ed.cursor_style));
+}
+
+/// The cluster the cursor sits on: the one starting at the cursor, or the
+/// empty slice at the end of the line.
+fn cursorCluster(ed: *const Editor) []const u8 {
+    const tail = ed.text()[ed.cursorAt()..];
+    return tail[0..Width.firstGraphemeLen(tail)];
+}
+
+/// Every cell the window owns is intact: a wide lead keeps its
+/// continuation column, a continuation keeps its lead, and no column left
+/// of the cursor is blank. A blank there is text the frame lost or painted
+/// over — what a window that starts mid-cluster does to the wide cluster
+/// it cut in half.
+fn expectIntactRow(buf: *const Buffer, rel: usize) !void {
+    const width: usize = buf.width;
+    var x: usize = 0;
+    while (x < width) : (x += 1) {
+        const cell = buf.get(@intCast(x), 0);
+        if (cell.wide) {
+            try std.testing.expect(x > 0);
+            const lead = buf.get(@intCast(x - 1), 0);
+            try std.testing.expect(lead.grapheme.len > 0 and
+                Width.graphemeWidth(lead.grapheme) >= 2);
+        } else if (cell.grapheme.len > 0 and Width.graphemeWidth(cell.grapheme) >= 2) {
+            try std.testing.expect(x + 1 < width);
+            try std.testing.expect(buf.get(@intCast(x + 1), 0).wide);
+        }
+        if (x < rel) try std.testing.expect(cell.wide or cell.grapheme.len > 0);
+    }
+}
+
+test "editor: every window width keeps the cursor cell and the text before it" {
+    // Columns: "a" 0, 界 1-2, "e"+acute 3, the ZWJ family 4-5, "b" 6.
+    var ed = try Editor.init(test_alloc, .{ .blink_ns = 0 });
+    defer ed.deinit();
+    try ed.insert("a界" ++ e_acute ++ zwj_family ++ "b");
+
+    var viewport: usize = 1;
+    while (viewport <= 6) : (viewport += 1) {
+        var buf = try Buffer.init(test_alloc, @intCast(viewport), 1);
+        defer buf.deinit();
+
+        // Five clusters, so six cursor stops: on every boundary and past
+        // the last one. The window carries over between frames, so each
+        // width also follows the one before it.
+        var stop: usize = 0;
+        while (stop <= 5) : (stop += 1) {
+            ed.moveHome();
+            for (0..stop) |_| ed.moveRight();
+
+            buf.clear();
+            _ = try ed.draw(&buf, 0, 0, .fromNanoseconds(0));
+
+            const rel = ed.cursorCol() - ed.scroll_col;
+            try std.testing.expect(rel < viewport);
+            try expectIntactRow(&buf, rel);
+
+            // The marker sits on the cursor's own cluster, or the row stops
+            // short of a glyph the window's last column cannot hold.
+            const under = cursorCluster(&ed);
+            const uw: usize =
+                if (under.len == 0) 1 else @as(usize, @intCast(Width.graphemeWidth(under)));
+            if (rel + uw <= viewport) {
+                try std.testing.expectEqualStrings(
+                    if (under.len > 0) under else " ",
+                    buf.get(@intCast(rel), 0).grapheme,
+                );
+                try std.testing.expect(buf.get(@intCast(rel), 0).style.eql(ed.cursor_style));
+            } else {
+                var x = rel;
+                while (x < viewport) : (x += 1) {
+                    try std.testing.expect(buf.get(@intCast(x), 0).eql(.{}));
+                }
+            }
+        }
+    }
+}
+
+test "editor: the window and the marker are anchored at the draw x" {
+    // Columns: "a" 0, 界 1-2, "b" 3, 界 4-5, "c" 6.
+    var ed = try Editor.init(test_alloc, .{ .blink_ns = 0 });
+    defer ed.deinit();
+    try ed.insert("a界b界c");
+
+    var buf = try Buffer.init(test_alloc, 9, 1);
+    defer buf.deinit();
+    const x: u16 = 3; // six columns left to the right of x
+
+    // The window is sized off what is left of the row, not off the whole
+    // row: six columns put the edge on 3 (past the wide cluster that
+    // straddles 2) and the end-of-line marker lands inside the buffer. A
+    // window sized off `buf.width` would start at "a" and push the marker
+    // off the row.
+    const consumed = try ed.draw(&buf, x, 0, .fromNanoseconds(0));
+    try std.testing.expectEqual(@as(u16, 5), consumed);
+    try std.testing.expectEqual(@as(usize, 3), ed.scroll_col);
+    try std.testing.expectEqualStrings("b", buf.get(x, 0).grapheme);
+    try std.testing.expectEqualStrings("界", buf.get(x + 1, 0).grapheme);
+    try std.testing.expect(buf.get(x + 2, 0).wide);
+    try std.testing.expectEqualStrings("c", buf.get(x + 3, 0).grapheme);
+    try std.testing.expect(buf.get(x + 4, 0).style.eql(ed.cursor_style));
+    try std.testing.expect(buf.get(x + 5, 0).eql(.{}));
+    // Nothing left of x was touched.
+    try std.testing.expect(buf.get(0, 0).eql(.{}));
+    try std.testing.expect(buf.get(2, 0).eql(.{}));
+}
+
+test "editor: a hidden blink phase repaints a wide cursor cluster whole" {
+    var ed = try Editor.init(test_alloc, .{ .blink_ns = 100 });
+    defer ed.deinit();
+    try ed.insert("a界b");
+    ed.moveHome();
+    ed.moveRight(); // the cursor sits on the wide cluster at columns 1-2
+
+    var buf = try Buffer.init(test_alloc, 4, 1);
+    defer buf.deinit();
+
+    _ = try ed.draw(&buf, 0, 0, .fromNanoseconds(0)); // visible
+    try std.testing.expectEqualStrings("界", buf.get(1, 0).grapheme);
+    try std.testing.expect(buf.get(1, 0).style.eql(ed.cursor_style));
+    try std.testing.expect(buf.get(2, 0).style.eql(ed.cursor_style));
+
+    // Hidden: both columns go back to the line style over the previous
+    // frame, so a diffed buffer keeps neither half of the highlight and
+    // the lead is not left without its continuation.
+    _ = try ed.draw(&buf, 0, 0, .fromNanoseconds(100));
+    try std.testing.expectEqualStrings("界", buf.get(1, 0).grapheme);
+    try std.testing.expect(buf.get(2, 0).wide);
+    try std.testing.expect(buf.get(1, 0).style.eql(ed.style));
+    try std.testing.expect(buf.get(2, 0).style.eql(ed.style));
+
+    // Visible again: the marker takes both columns back.
+    _ = try ed.draw(&buf, 0, 0, .fromNanoseconds(200));
+    try std.testing.expect(buf.get(1, 0).style.eql(ed.cursor_style));
+    try std.testing.expect(buf.get(2, 0).style.eql(ed.cursor_style));
+    try expectIntactRow(&buf, 1);
+}
+
+test "editor: the window follows a shrinking and re-expanding viewport" {
+    var ed = try Editor.init(test_alloc, .{ .blink_ns = 0 });
+    defer ed.deinit();
+    try ed.insert("a界b界c"); // 7 columns, the cursor at the end
+
+    var row: [32]u8 = undefined;
+    var buf = try Buffer.init(test_alloc, 8, 1);
+    defer buf.deinit();
+    _ = try ed.draw(&buf, 0, 0, .fromNanoseconds(0));
+    try std.testing.expectEqualStrings("a界b界c ", rowStr(&buf, 0, &row));
+    try std.testing.expect(buf.get(7, 0).style.eql(ed.cursor_style));
+
+    // Three columns: the edge would land inside the wide cluster at 4-5,
+    // which is drawn whole to the left of the window rather than half in
+    // it, and the cursor keeps its cell.
+    try buf.resize(3, 1);
+    _ = try ed.draw(&buf, 0, 0, .fromNanoseconds(0));
+    try std.testing.expectEqual(@as(usize, 6), ed.scroll_col);
+    try std.testing.expectEqualStrings("c", buf.get(0, 0).grapheme);
+    try std.testing.expect(buf.get(1, 0).style.eql(ed.cursor_style));
+    try std.testing.expect(buf.get(2, 0).eql(.{}));
+
+    // Wide again: the line head is not lost — the window returns to the
+    // start and the marker moves back with it.
+    try buf.resize(8, 1);
+    _ = try ed.draw(&buf, 0, 0, .fromNanoseconds(0));
+    try std.testing.expectEqual(@as(usize, 0), ed.scroll_col);
+    try std.testing.expectEqualStrings("a界b界c ", rowStr(&buf, 0, &row));
+    try std.testing.expect(buf.get(7, 0).style.eql(ed.cursor_style));
+}

@@ -34,7 +34,7 @@ const size_x: f32 = 1.0;
 const size_y: f32 = 1.0;
 
 // ── scalar/vector shared arithmetic ────────────────────────
-// Both cores call the same generic helpers (T = f32 or @Vector(L, f32))
+// Both cores call the same generic helpers (T = f32 or a vector of f32),
 // so every expression is bit-identical across paths.
 
 inline fn zeroOf(comptime T: type) T {
@@ -318,14 +318,14 @@ fn scanlineSweepScalar(offset_x: f32, offset_y: f32, c: QuadCurve) f32 {
 /// conditionals compute both sides and `@select`. Bit-identical to
 /// `scanlineSweepScalar` per lane.
 fn scanlineSweepVec(
-    comptime L: usize,
-    offset_xs: @Vector(L, f32),
+    comptime lane_count: usize,
+    offset_xs: @Vector(lane_count, f32),
     offset_y: f32,
     c: QuadCurve,
-) @Vector(L, f32) {
-    const vec = @Vector(L, f32);
-    const zero: vec = zeroOf(vec);
-    const one: vec = oneOf(vec);
+) @Vector(lane_count, f32) {
+    const Vec = @Vector(lane_count, f32);
+    const zero: Vec = zeroOf(Vec);
+    const one: Vec = oneOf(Vec);
     const p0 = c.p0;
     const p1 = c.p1;
     const p2 = c.p2;
@@ -336,9 +336,9 @@ fn scanlineSweepVec(
     const y_disjoint = @max(p0[1], p2[1]) <= offset_y or @min(p0[1], p2[1]) >= offset_y + size_y;
 
     // Shifted control points: x per-lane, y per-curve.
-    const x0: vec = fromF32(vec, p0[0]) - offset_xs;
-    const x1: vec = fromF32(vec, p1[0]) - offset_xs;
-    const x2: vec = fromF32(vec, p2[0]) - offset_xs;
+    const x0: Vec = fromF32(Vec, p0[0]) - offset_xs;
+    const x1: Vec = fromF32(Vec, p1[0]) - offset_xs;
+    const x2: Vec = fromF32(Vec, p2[0]) - offset_xs;
     const y0 = p0[1] - offset_y;
     const y1 = p1[1] - offset_y;
     const y2 = p2[1] - offset_y;
@@ -350,8 +350,8 @@ fn scanlineSweepVec(
     const vert_valid = x0 < one;
     // The strip between the edge and the window's right edge is clipped to
     // the window (mirrors the scalar fast path — see scanlineSweepScalar).
-    const vert_formula: vec = (fromF32(vec, sign(f32, dy)) * (one - @max(x0, zero))) * fromF32(vec, vert_h);
-    const vert_result = sel(vec, vert_valid, vert_formula, zero);
+    const vert_formula: Vec = (fromF32(Vec, sign(f32, dy)) * (one - @max(x0, zero))) * fromF32(Vec, vert_h);
+    const vert_result = sel(Vec, vert_valid, vert_formula, zero);
 
     // Y-intersections.
     const qa_y = y0 + y2 - 2.0 * y1;
@@ -361,76 +361,76 @@ fn scanlineSweepVec(
     const v_max_t = if (dy > 0) tt else bt;
     const v_min_t_c = clamp01(f32, v_min_t);
     const v_max_t_c = clamp01(f32, v_max_t);
-    const v_min_x: vec = evalBez(vec, x0, x1, x2, fromF32(vec, v_min_t_c));
-    const v_max_x: vec = evalBez(vec, x0, x1, x2, fromF32(vec, v_max_t_c));
+    const v_min_x: Vec = evalBez(Vec, x0, x1, x2, fromF32(Vec, v_min_t_c));
+    const v_max_x: Vec = evalBez(Vec, x0, x1, x2, fromF32(Vec, v_max_t_c));
     const v_min_y = evalBez(f32, y0, y1, y2, v_min_t_c);
     const v_max_y = evalBez(f32, y0, y1, y2, v_max_t_c);
 
     // Curve entirely left of the window, or entirely right of it.
     const left_out = @max(v_min_x, v_max_x) <= zero;
-    const right_out = @min(v_min_x, v_max_x) >= fromF32(vec, size_x);
-    const left_val: vec = fromF32(vec, (v_max_y - v_min_y) * size_x);
+    const right_out = @min(v_min_x, v_max_x) >= fromF32(Vec, size_x);
+    const left_val: Vec = fromF32(Vec, (v_max_y - v_min_y) * size_x);
 
     // X-intersections.
-    const qa_x: vec = x0 + x2 - fromF32(vec, 2.0) * x1;
+    const qa_x: Vec = x0 + x2 - fromF32(Vec, 2.0) * x1;
     const h_min_t = if (dx > 0)
-        hCheck(vec, qa_x, x0, x1, x2, x0, x2, 0, 0)
+        hCheck(Vec, qa_x, x0, x1, x2, x0, x2, 0, 0)
     else
-        hCheck(vec, qa_x, x0, x1, x2, x2, x0, size_x, 1);
+        hCheck(Vec, qa_x, x0, x1, x2, x2, x0, size_x, 1);
     const h_max_t = if (dx > 0)
-        hCheck(vec, qa_x, x0, x1, x2, x0, x2, size_x, 0)
+        hCheck(Vec, qa_x, x0, x1, x2, x0, x2, size_x, 0)
     else
-        hCheck(vec, qa_x, x0, x1, x2, x2, x0, 0, 1);
+        hCheck(Vec, qa_x, x0, x1, x2, x2, x0, 0, 1);
 
-    const v_min_t_s: vec = fromF32(vec, v_min_t);
-    const v_max_t_s: vec = fromF32(vec, v_max_t);
-    const min_t = clamp01(vec, @max(v_min_t_s, h_min_t));
-    const max_t = clamp01(vec, @min(v_max_t_s, h_max_t));
+    const v_min_t_s: Vec = fromF32(Vec, v_min_t);
+    const v_max_t_s: Vec = fromF32(Vec, v_max_t);
+    const min_t = clamp01(Vec, @max(v_min_t_s, h_min_t));
+    const max_t = clamp01(Vec, @min(v_max_t_s, h_max_t));
     const overlap = min_t < max_t;
 
     const q0y = sel(
-        vec,
+        Vec,
         v_min_t_s >= h_min_t,
-        fromF32(vec, v_min_y),
-        evalBez(vec, fromF32(vec, y0), fromF32(vec, y1), fromF32(vec, y2), min_t),
+        fromF32(Vec, v_min_y),
+        evalBez(Vec, fromF32(Vec, y0), fromF32(Vec, y1), fromF32(Vec, y2), min_t),
     );
     const q1y = sel(
-        vec,
+        Vec,
         v_max_t_s <= h_max_t,
-        fromF32(vec, v_max_y),
-        evalBez(vec, fromF32(vec, y0), fromF32(vec, y1), fromF32(vec, y2), max_t),
+        fromF32(Vec, v_max_y),
+        evalBez(Vec, fromF32(Vec, y0), fromF32(Vec, y1), fromF32(Vec, y2), max_t),
     );
 
     // Side-rectangle terms. The dx/dy sign choices are per-curve
     // constants, so they are uniform scalar branches; the per-lane
     // t-clamps select branchlessly.
     const h1 = if (dy > 0)
-        q0y - @max(zero, fromF32(vec, y0))
+        q0y - @max(zero, fromF32(Vec, y0))
     else
-        @min(one, fromF32(vec, y0)) - q0y;
-    const add1 = fromF32(vec, sign(f32, dy)) * h1 * one;
-    var area: vec = zero;
-    if (dx > 0) area = sel(vec, min_t > zero, zero + add1, zero);
+        @min(one, fromF32(Vec, y0)) - q0y;
+    const add1 = fromF32(Vec, sign(f32, dy)) * h1 * one;
+    var area: Vec = zero;
+    if (dx > 0) area = sel(Vec, min_t > zero, zero + add1, zero);
     const h2 = if (dy > 0)
-        @min(one, fromF32(vec, y2)) - q1y
+        @min(one, fromF32(Vec, y2)) - q1y
     else
-        q1y - @max(zero, fromF32(vec, y2));
-    const add2 = fromF32(vec, sign(f32, dy)) * h2 * one;
-    if (dx < 0) area = sel(vec, max_t < one, area + add2, area);
+        q1y - @max(zero, fromF32(Vec, y2));
+    const add2 = fromF32(Vec, sign(f32, dy)) * h2 * one;
+    if (dx < 0) area = sel(Vec, max_t < one, area + add2, area);
     const h_trap = q1y - q0y;
-    const f_max = bezIntX(vec, x0, x1, x2, fromF32(vec, y0), fromF32(vec, y1), fromF32(vec, y2), max_t);
-    const f_min = bezIntX(vec, x0, x1, x2, fromF32(vec, y0), fromF32(vec, y1), fromF32(vec, y2), min_t);
+    const f_max = bezIntX(Vec, x0, x1, x2, fromF32(Vec, y0), fromF32(Vec, y1), fromF32(Vec, y2), max_t);
+    const f_min = bezIntX(Vec, x0, x1, x2, fromF32(Vec, y0), fromF32(Vec, y1), fromF32(Vec, y2), min_t);
     // Exact ∫_{min_t}^{max_t} (size_x - x(t)) y'(t) dt, mirroring the
     // scalar core: the secant trapezoid under-counts curved edges.
-    area += fromF32(vec, size_x) * h_trap - (f_max - f_min);
+    area += fromF32(Vec, size_x) * h_trap - (f_max - f_min);
 
     const general = sel(
-        vec,
+        Vec,
         left_out,
         left_val,
-        sel(vec, right_out, zero, sel(vec, overlap, area, zero)),
+        sel(Vec, right_out, zero, sel(Vec, overlap, area, zero)),
     );
-    const vertical_or_general = sel(vec, vertical, vert_result, general);
+    const vertical_or_general = sel(Vec, vertical, vert_result, general);
     // The y-window early-out is a per-curve constant: a uniform return.
     if (y_disjoint) return zero;
     return vertical_or_general;
@@ -561,7 +561,7 @@ inline fn addPiece(diff: []f32, out: []f32, piece: QuadCurve, y: f32, x_start: f
     const i_step = @ceil(extent_max - x_start);
     // coverageRowFast falls back above diff_cap, so out.len is small
     // enough for the f32 conversion to be exact.
-    const out_len_f = @as(f32, @floatFromInt(@min(out.len, diff_cap)));
+    const out_len_f: f32 = @floatFromInt(@min(out.len, diff_cap));
     if (i_step <= 0) {
         diff[0] += step_val; // extent left of the whole window
     } else if (i_step <= out_len_f) {
@@ -1344,7 +1344,7 @@ test "coverageRowFast == coverageRow on the lambda glyph" {
     const x0: i64 = @intFromFloat(@floor(min_x));
     const x1: i64 = @intFromFloat(@ceil(max_x));
     const n: usize = @intCast(x1 - x0);
-    const x_start = @as(f32, @floatFromInt(x0));
+    const x_start: f32 = @floatFromInt(x0);
     try testing.expect(n > 0);
     var fast: [64]f32 = undefined;
     var sweep: [64]f32 = undefined;
@@ -1353,7 +1353,7 @@ test "coverageRowFast == coverageRow on the lambda glyph" {
     var wy: i64 = @as(i64, @intFromFloat(@floor(min_y))) - 1;
     const wy_end: i64 = @as(i64, @intFromFloat(@floor(max_y))) + 1;
     while (wy <= wy_end) : (wy += 1) {
-        const y = @as(f32, @floatFromInt(wy));
+        const y: f32 = @floatFromInt(wy);
         coverageRowFast(&curves, y, x_start, fast[0..n]);
         coverageRow(&curves, y, x_start, sweep[0..n]);
         for (fast[0..n], sweep[0..n]) |a, e| {
