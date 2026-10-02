@@ -10,13 +10,15 @@
 //! real `Parser` (via `Reader`, so split sequences reassemble), decoded
 //! events reach the model, the model draws into the region band, and the
 //! region renders through the output pipe. Every render's bytes are
-//! captured as a frame, so a test asserts an EXACT byte stream.
+//! captured as a frame: the capture is exact, and what a test pins in it
+//! is the script contract — what went out, where in the frame, and how
+//! often — rather than a frozen copy of a frame's bytes.
 //!
 //! ```
-//! var session = try Session.init(testing.io, testing.allocator, .{ .region = .{ .height = 1 } });
+//! var session = try Session.init(testing.allocator, testing.io, .{ .region = .{ .height = 1 } });
 //! defer session.deinit();
 //! const bytes = try session.run(&model, &[_]Step{.{ .input = "hi", .frames = 1 }});
-//! try testing.expectEqualStrings("\x1b..", bytes);
+//! try testing.expect(std.mem.indexOf(u8, bytes, "hi") != null);
 //! ```
 //!
 //! `App(Model)` is deliberately NOT driven here. `App` renders through its
@@ -101,7 +103,7 @@ const Sink = struct {
     /// Read end (non-blocking), drained into `captured`.
     in: std.Io.File,
     gpa: std.mem.Allocator,
-    captured: *std.ArrayListUnmanaged(u8),
+    captured: *std.ArrayList(u8),
     /// The real failure behind a `WriteFailed` reported to the renderer (an
     /// allocation failure while capturing, or a pipe error); null while
     /// healthy.
@@ -110,11 +112,11 @@ const Sink = struct {
     interface: std.Io.Writer = undefined,
 
     fn start(
+        gpa: std.mem.Allocator,
         io: std.Io,
         out: std.Io.File,
         in: std.Io.File,
-        gpa: std.mem.Allocator,
-        captured: *std.ArrayListUnmanaged(u8),
+        captured: *std.ArrayList(u8),
     ) Sink {
         return .{
             .io = io,
@@ -193,6 +195,11 @@ const Sink = struct {
     /// Consume the writer's buffer, then each slice of `data`, then the last
     /// slice repeated `splat` times (zero when `splat` is zero). Everything
     /// is always written, so the writer's buffer is empty on return.
+    ///
+    /// `data` is non-empty by the vtable contract (`std.Io.Writer`:
+    /// "`data.len` must be nonzero"), so indexing its last slice — the
+    /// splat pattern — is in bounds, and the loop below needs no guard of
+    /// its own.
     fn drain(
         io_w: *std.Io.Writer,
         data: []const []const u8,
@@ -241,7 +248,7 @@ pub const Harness = struct {
     out_w: std.Io.File,
 
     /// Every byte drained from the output pipe so far.
-    captured: std.ArrayListUnmanaged(u8) = .empty,
+    captured: std.ArrayList(u8) = .empty,
 
     /// Built on the first `writer()` call. It self-references its buffer,
     /// so the harness must not move afterwards (the `Tty.writer` rule).
@@ -255,7 +262,7 @@ pub const Harness = struct {
 
     /// Create both pipes, non-blocking (`O_NONBLOCK`) and close-on-exec.
     /// Neither side may block, so nothing here can deadlock on a full pipe.
-    pub fn init(io: std.Io, gpa: std.mem.Allocator) Error!Harness {
+    pub fn init(gpa: std.mem.Allocator, io: std.Io) Error!Harness {
         const flags: posix.O = .{ .NONBLOCK = true, .CLOEXEC = true };
         const in_fds = try std.Io.Threaded.pipe2(flags);
         errdefer closeBoth(io, in_fds);
@@ -310,7 +317,7 @@ pub const Harness = struct {
     /// move the harness afterwards.
     pub fn writer(self: *Harness) *std.Io.Writer {
         if (self.sink == null) {
-            self.sink = Sink.start(self.io, self.out_w, self.out_r, self.gpa, &self.captured);
+            self.sink = Sink.start(self.gpa, self.io, self.out_w, self.out_r, &self.captured);
         }
         return self.sink.?.attach();
     }
@@ -409,8 +416,8 @@ pub const Harness = struct {
     /// against it. Caller owns the result.
     pub fn readGolden(
         self: *Harness,
-        name: []const u8,
         gpa: std.mem.Allocator,
+        name: []const u8,
     ) Error![]u8 {
         const dir = self.record_dir orelse return error.NotRecording;
         return dir.readFileAlloc(self.io, name, gpa, .limited(1 << 20));
@@ -431,6 +438,17 @@ pub const Step = struct {
     frames: u32 = 1,
 };
 
+/// The CPR query, as it goes on the wire: the Region emits it AFTER the
+/// frame has painted and parked, and never while a reply is outstanding,
+/// because the reply is untagged and two questions could not be told
+/// apart. The harness both recognises it in a frame's bytes (the only
+/// evidence a query went out — `Region` publishes no query state to poll)
+/// and, in its tests, pins WHERE in a frame it landed and how many times
+/// it was asked. The exact bytes of a frame belong to the Region; a
+/// harness that froze them would turn every change to the paint into a
+/// change to the script contract.
+const cpr_query = "\x1b[6n";
+
 /// A `Region` driven end to end through a `Harness`.
 ///
 /// Self-referential (the lazily built sink and `Reader` point into the
@@ -449,10 +467,19 @@ pub const Session = struct {
         /// Carrying the type instead of mirroring its fields keeps this
         /// harness out of lockstep with `Region.Options` changes.
         region: Region.Options = .{ .height = 3 },
-        /// Answer the region's CPR query with this position. Null leaves
-        /// the query unanswered. A real terminal always answers, so the
-        /// bytes a session captures are the terminal's view only with a
-        /// reply configured.
+        /// Answer the region's own CPR query with this position. Null
+        /// leaves every query unanswered. A real terminal always answers,
+        /// so the bytes a session captures are the terminal's view only
+        /// with a reply configured. Both fields are `u16`, so a reply is
+        /// at most 14 bytes and never exhausts the formatter's buffer.
+        ///
+        /// The reply is fed back the way a terminal sends one — after the
+        /// frame that asked, into the input pipe — so it reaches
+        /// `applyCpr` on a LATER pump, over the same `Event.cpr` path
+        /// `App` uses. That delay is the protocol, not a harness
+        /// artifact: the query goes out after the paint and the park, and
+        /// only one is ever outstanding, so the answer describes what the
+        /// frame that asked left on the screen.
         cpr: ?Pos = null,
     };
 
@@ -473,19 +500,21 @@ pub const Session = struct {
     reader: ?Reader = null,
 
     /// Byte span of every rendered frame, into the harness capture.
-    frames: std.ArrayListUnmanaged(Frame) = .empty,
+    frames: std.ArrayList(Frame) = .empty,
 
     /// Create the harness, the region (sized to `opts`), and the frame
     /// index. The capture and the index are pre-reserved, so a session
     /// allocates nothing per frame until it outgrows 64 frames or 4 KiB.
-    pub fn init(io: std.Io, gpa: std.mem.Allocator, opts: Options) Error!Session {
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, opts: Options) Error!Session {
         std.debug.assert(opts.region.height >= 1);
-        var harness = try Harness.init(io, gpa);
+        var harness = try Harness.init(gpa, io);
         errdefer harness.deinit();
         var region = try Region.init(gpa, opts.region);
         errdefer region.deinit();
-        try region.resize(opts.width, opts.region.height);
-        var frames: std.ArrayListUnmanaged(Frame) = .empty;
+        // The session owns the band, not a screen: the declared width
+        // and the band's own rows are the whole visible geometry.
+        try region.resize(opts.width, opts.region.height, opts.region.height);
+        var frames: std.ArrayList(Frame) = .empty;
         errdefer frames.deinit(gpa);
         try frames.ensureTotalCapacity(gpa, 64);
         try harness.captured.ensureTotalCapacity(gpa, 4096);
@@ -613,27 +642,33 @@ pub const Session = struct {
     /// everything else reaches the model.
     fn dispatch(self: *Session, ev: Event, model: anytype) !void {
         switch (ev) {
-            .cpr => |pos| {
-                if (self.region.anchor_row == 0) {
-                    self.region.applyFirstCpr(pos.row);
-                } else {
-                    try self.region.applyCpr(pos.row, pos.col);
-                }
-            },
-            .winsize => |ws| try self.region.resize(ws.cols, self.region.height),
+            .cpr => |pos| try self.region.applyCpr(pos.row, pos.col),
+            // The report carries the terminal's rows; the band keeps its
+            // own logical height across the physical change.
+            .winsize => |ws| try self.region.resize(ws.cols, ws.rows, self.region.height),
             else => try model.onEvent(ev),
         }
     }
 
     /// Answer the region's CPR query by feeding the reply back into the
     /// input pipe, so the session closes the loop the way a terminal does.
+    ///
+    /// The frame's own bytes are the only evidence that a query went out:
+    /// `Region` publishes no query state to poll, and while the single
+    /// slot is free that is all a frame can owe. The query is emitted
+    /// after the paint and the park, so the reply this feeds reaches
+    /// `applyCpr` on a LATER pump — the frame that asked never sees its
+    /// own answer, exactly as on a terminal that is slow to reply.
     fn answerCpr(self: *Session, frame_bytes: []const u8) !void {
         const pos = self.opts.cpr orelse return;
-        if (std.mem.indexOf(u8, frame_bytes, "\x1b[6n") == null) return;
+        if (std.mem.indexOf(u8, frame_bytes, cpr_query) == null) return;
         var buf: [32]u8 = undefined;
-        // Two u16 fields: at most 14 bytes, so the buffer cannot overflow.
-        const fmt = "\x1b[{d};{d}R";
-        const reply = std.fmt.bufPrint(&buf, fmt, .{ pos.row, pos.col }) catch unreachable;
+        // 32 bytes against a 14-byte worst case (`\x1b[65535;65535R`):
+        // the format cannot overflow, so the failure below is a
+        // propagation channel, not a tolerated case. A caller that sees
+        // `error.NoSpaceLeft` learns the reply changed shape, rather than
+        // getting a silently truncated CPR and a corrupted band.
+        const reply = try std.fmt.bufPrint(&buf, "\x1b[{d};{d}R", .{ pos.row, pos.col });
         try self.harness.feed(reply);
     }
 
@@ -647,9 +682,20 @@ test {
     std.testing.refAllDecls(@This());
 }
 
-// ── tests ─────────────────────────────────────────
+// ── tests ──────────────────────────────────
 
 const testing = std.testing;
+
+/// How many times `needle` occurs in `haystack`, without overlaps.
+fn occurrences(haystack: []const u8, needle: []const u8) usize {
+    var found: usize = 0;
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, haystack, at, needle)) |hit| {
+        found += 1;
+        at = hit + needle.len;
+    }
+    return found;
+}
 
 /// A model that accumulates printable key presses and draws the text.
 const EchoModel = struct {
@@ -692,8 +738,8 @@ const ProbeModel = struct {
     }
 };
 
-test "frame: a scripted session emits an exact byte stream" {
-    var session = try Session.init(testing.io, testing.allocator, .{
+test "frame: a scripted session paints once and its frames tile the stream" {
+    var session = try Session.init(testing.allocator, testing.io, .{
         .width = 8,
         .region = .{ .height = 1, .append_lines = false, .interactive = true, .sync_output = true },
     });
@@ -703,54 +749,75 @@ test "frame: a scripted session emits an exact byte stream" {
     // "hi" travels the pipe → Parser → model → Buffer → Region → pipe.
     const first = try session.run(&model, &[_]Step{.{ .input = "hi", .frames = 1 }});
     try testing.expectEqual(@as(usize, 2), model.len);
-    try testing.expectEqualStrings(
-        "\x1b[?2026h\x1b[?25l\x1b[?7l\x1b[6n\rhi\r\x1b[?7h\x1b[?2026l",
-        first,
-    );
+    // The script reached the screen exactly once: one delivery to the
+    // model and one painted copy — not one per frame, not one per row.
+    try testing.expectEqual(@as(usize, 1), occurrences(first, "hi"));
+    // Exactly one query went out, and it went out AFTER the paint, so it
+    // asks about the row the frame parked on. A query ahead of the paint
+    // would measure a cursor the frame has yet to move.
+    try testing.expectEqual(@as(usize, 1), occurrences(first, cpr_query));
+    const painted = std.mem.indexOf(u8, first, "hi").?;
+    const asked = std.mem.indexOf(u8, first, cpr_query).?;
+    try testing.expect(painted < asked);
+
+    // That query still holds the single slot, so the idle frame after it
+    // writes nothing at all — envelope included, and no second query for a
+    // terminal that is slow to answer.
+    _ = try session.frame(&model);
 
     const closed = try session.exit();
-    try testing.expectEqualStrings("\x1b[?25h\x1b[?7h\x1b[?2026l\r\n\r", closed);
-    try testing.expectEqual(@as(usize, 2), session.frames.items.len);
+    // Exit gives back what the frame envelope took — cursor, autowrap,
+    // sync — and parks below the band. It asks nothing.
+    try testing.expectEqual(@as(usize, 1), occurrences(closed, "\x1b[?25h"));
+    try testing.expectEqual(@as(usize, 1), occurrences(closed, "\x1b[?7h"));
+    try testing.expectEqual(@as(usize, 1), occurrences(closed, "\x1b[?2026l"));
+    try testing.expectEqual(@as(usize, 0), occurrences(closed, cpr_query));
+    try testing.expect(std.mem.endsWith(u8, closed, "\r\n\r"));
 
-    // The two captured frames tile the session stream exactly.
+    // Across the paint, the idle frame and the exit the session asked once.
     const all = try session.output();
-    try testing.expectEqualStrings(
-        "\x1b[?2026h\x1b[?25l\x1b[?7l\x1b[6n\rhi\r\x1b[?7h\x1b[?2026l" ++
-            "\x1b[?25h\x1b[?7h\x1b[?2026l\r\n\r",
-        all,
-    );
-    try testing.expectEqualStrings(all[0..session.frames.items[0].end], session.frameBytes(0).?);
-    try testing.expectEqualStrings(all[session.frames.items[1].start..], session.frameBytes(1).?);
-    try testing.expect(session.frameBytes(2) == null);
+    try testing.expectEqual(@as(usize, 1), occurrences(all, cpr_query));
+    try testing.expectEqual(@as(usize, 1), occurrences(all, "hi"));
+
+    // Three frames — the paint, the idle one, the exit — and they tile the
+    // captured stream: contiguous, from the first byte to the last, each
+    // index addressing exactly the bytes its own frame emitted.
+    try testing.expectEqual(@as(usize, 3), session.frames.items.len);
+    try testing.expectEqual(@as(usize, 0), session.frames.items[0].start);
+    try testing.expectEqual(session.frames.items[0].end, session.frames.items[1].start);
+    try testing.expectEqual(session.frames.items[1].end, session.frames.items[2].start);
+    try testing.expectEqual(all.len, session.frames.items[2].end);
+    for (session.frames.items, 0..) |span, i| {
+        try testing.expectEqualStrings(all[span.start..span.end], session.frameBytes(i).?);
+    }
+    // A frame that was never rendered has no bytes: the index is the
+    // address, not an offset into the capture.
+    try testing.expect(session.frameBytes(3) == null);
 }
 
 test "frame: a frame that changed nothing writes nothing" {
-    var session = try Session.init(testing.io, testing.allocator, .{
+    var session = try Session.init(testing.allocator, testing.io, .{
         .width = 8,
         .region = .{ .height = 2, .append_lines = false, .interactive = true, .sync_output = true },
     });
     defer session.deinit();
     var model: EchoModel = .{};
 
-    const first = try session.run(&model, &[_]Step{.{ .input = "hi", .frames = 1 }});
-    try testing.expectEqualStrings(
-        "\x1b[?2026h\x1b[?25l\x1b[?7l\x1b[6n\rhi\r\n\r\x1b[?7h\x1b[?2026l",
-        first,
-    );
+    _ = try session.run(&model, &[_]Step{.{ .input = "hi", .frames = 1 }});
+    try testing.expectEqual(@as(usize, 2), model.len);
 
-    // No input, no mutation: the second render must append zero bytes —
-    // envelope included, so a hidden-cursor frame stages nothing.
+    // No input, no mutation: the second render appends zero bytes —
+    // envelope included, so a hidden-cursor frame stages nothing — and the
+    // query the first frame asked still holds its slot, unanswered.
     _ = try session.frame(&model);
     try testing.expectEqual(@as(usize, 2), session.frames.items.len);
     try testing.expectEqualStrings("", session.frameBytes(1).?);
 
-    // The whole stream is still exactly the first frame.
+    // The idle frame appended nothing at all: the capture is still exactly
+    // the span the first frame claimed.
     const all = try session.output();
+    try testing.expectEqual(@as(usize, 0), session.frames.items[0].start);
     try testing.expectEqual(session.frames.items[0].end, all.len);
-    try testing.expectEqualStrings(
-        "\x1b[?2026h\x1b[?25l\x1b[?7l\x1b[6n\rhi\r\n\r\x1b[?7h\x1b[?2026l",
-        all,
-    );
 
     // A later frame re-wraps but does NOT re-hide the cursor: the hide is
     // a transition byte, emitted once, not per frame.
@@ -760,24 +827,68 @@ test "frame: a frame that changed nothing writes nothing" {
     try testing.expect(std.mem.endsWith(u8, third, "\x1b[?7h\x1b[?2026l"));
     try testing.expect(std.mem.indexOf(u8, third, "\x1b[?25l") == null);
     try testing.expect(std.mem.indexOf(u8, third, "hi!") != null);
+    // A frame that DID change something still does not ask again: one
+    // query is outstanding and its reply is untagged.
+    try testing.expect(std.mem.indexOf(u8, third, cpr_query) == null);
+
+    // One query for the whole session, and one painted copy of the input.
+    const total = try session.output();
+    try testing.expectEqual(@as(usize, 1), occurrences(total, cpr_query));
+    try testing.expectEqual(@as(usize, 1), occurrences(total, "hi!"));
 }
 
-test "frame: the harness answers a CPR query with the configured position" {
-    var session = try Session.init(testing.io, testing.allocator, .{
+test "frame: a postpaint reply anchors the band without reaching the model" {
+    var session = try Session.init(testing.allocator, testing.io, .{
         .width = 8,
         .region = .{ .height = 2, .append_lines = false },
         .cpr = .{ .row = 9, .col = 1 },
     });
     defer session.deinit();
+    try session.region.resize(8, 24, 2);
     var model: EchoModel = .{};
 
     _ = try session.run(&model, &[_]Step{.{ .input = "h", .frames = 1 }});
-    try testing.expectEqual(@as(u16, 0), session.region.anchor_row);
+    try testing.expectEqual(@as(u16, 0), session.region.anchorRow());
 
     // The reply waits in the input pipe; the next frame's pump applies it.
     _ = try session.frame(&model);
-    try testing.expectEqual(@as(u16, 9), session.region.anchor_row);
+    try testing.expectEqual(@as(u16, 8), session.region.anchorRow());
     // The CPR reply is the region's own protocol: the model never sees it.
+    try testing.expectEqual(@as(usize, 1), model.len);
+}
+
+test "frame: a reply that lands after the columns moved is discarded" {
+    var session = try Session.init(testing.allocator, testing.io, .{
+        .width = 8,
+        .region = .{ .height = 2, .append_lines = false },
+        .cpr = .{ .row = 9, .col = 1 },
+    });
+    defer session.deinit();
+    // A screen the band actually lives in: with only its own rows
+    // declared there is no row for a reply to name.
+    try session.region.resize(8, 24, 2);
+    var model: EchoModel = .{};
+
+    // The first frame paints, asks, and its reply waits in the input pipe
+    // — unusable until it is read, never cached from a first measurement.
+    _ = try session.run(&model, &[_]Step{.{ .input = "h", .frames = 1 }});
+    try testing.expectEqual(@as(u16, 0), session.region.anchorRow());
+
+    // The terminal reports fewer columns while that reply is in flight,
+    // so the rows it names are rows the band stopped tracking.
+    try session.region.resize(4, 24, 2);
+    const repainted = try session.frame(&model);
+    // The pump consumed the reply and DISCARDED it: the anchor is still
+    // unusable, and the frame that repainted at the new geometry asked
+    // exactly once for a measurement of the geometry that is live now.
+    try testing.expectEqual(@as(u16, 0), session.region.anchorRow());
+    try testing.expectEqual(@as(usize, 1), occurrences(repainted, cpr_query));
+
+    // That fresh reply measures: the terminal still reports row 9 and the
+    // band still occupies two rows below it, so the anchor lands on row 8.
+    _ = try session.frame(&model);
+    try testing.expectEqual(@as(u16, 8), session.region.anchorRow());
+    // Neither reply reached the model: both are the region's own protocol.
     try testing.expectEqual(@as(usize, 1), model.len);
 }
 
@@ -787,7 +898,7 @@ test "frame: a frame larger than the pipe capacity is captured whole" {
     // a frame would block here forever; this one drains as it writes.
     const width = 200;
     const height = 400;
-    var session = try Session.init(testing.io, testing.allocator, .{
+    var session = try Session.init(testing.allocator, testing.io, .{
         .width = width,
         .region = .{ .height = height, .append_lines = false, .interactive = false },
     });
@@ -807,7 +918,7 @@ test "frame: a frame larger than the pipe capacity is captured whole" {
 }
 
 test "frame: feed refuses to block when the input pipe fills" {
-    var harness = try Harness.init(testing.io, testing.allocator);
+    var harness = try Harness.init(testing.allocator, testing.io);
     defer harness.deinit();
 
     // Fill the input pipe without reading it. A blocking write would hang
@@ -833,7 +944,7 @@ test "frame: a scripted input larger than the pipe capacity still runs" {
     var input: [64 * 1024]u8 = undefined;
     for (input[0..], 0..) |*b, i| b.* = @intCast('a' + (i % 26));
 
-    var session = try Session.init(testing.io, testing.allocator, .{
+    var session = try Session.init(testing.allocator, testing.io, .{
         .width = 8,
         .region = .{ .height = 1, .append_lines = false, .interactive = false },
     });
@@ -853,7 +964,7 @@ test "frame: recordToDir writes each frame and never clobbers a golden" {
     var path_buf: [128]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path[0..]});
 
-    var session = try Session.init(testing.io, testing.allocator, .{
+    var session = try Session.init(testing.allocator, testing.io, .{
         .width = 8,
         .region = .{ .height = 1, .append_lines = false },
     });
@@ -864,7 +975,7 @@ test "frame: recordToDir writes each frame and never clobbers a golden" {
     _ = try session.run(&model, &[_]Step{.{ .input = "hi", .frames = 1 }});
 
     // The recorded golden is the frame, byte for byte.
-    const golden = try session.harness.readGolden("frame-0000.escape", testing.allocator);
+    const golden = try session.harness.readGolden(testing.allocator, "frame-0000.escape");
     defer testing.allocator.free(golden);
     try testing.expectEqualStrings(session.frameBytes(0).?, golden);
 
@@ -872,13 +983,13 @@ test "frame: recordToDir writes each frame and never clobbers a golden" {
     // silently — and only an explicit overwrite rewrites it.
     try session.recordToDir(path, .{});
     try testing.expectError(error.GoldenExists, session.frame(&model));
-    const kept = try session.harness.readGolden("frame-0000.escape", testing.allocator);
+    const kept = try session.harness.readGolden(testing.allocator, "frame-0000.escape");
     defer testing.allocator.free(kept);
     try testing.expectEqualStrings(golden, kept);
 
     try session.recordToDir(path, .{ .overwrite = true });
     try session.harness.recordNamed("frame-0000.escape", "regenerated");
-    const rewritten = try session.harness.readGolden("frame-0000.escape", testing.allocator);
+    const rewritten = try session.harness.readGolden(testing.allocator, "frame-0000.escape");
     defer testing.allocator.free(rewritten);
     try testing.expectEqualStrings("regenerated", rewritten);
 
@@ -889,7 +1000,7 @@ test "frame: recordToDir writes each frame and never clobbers a golden" {
 }
 
 test "frame: the raw harness drains, snapshots, clears, and feeds input" {
-    var harness = try Harness.init(testing.io, testing.allocator);
+    var harness = try Harness.init(testing.allocator, testing.io);
     defer harness.deinit();
     var region = try Region.init(testing.allocator, .{
         .height = 1,
@@ -898,7 +1009,7 @@ test "frame: the raw harness drains, snapshots, clears, and feeds input" {
         .sync_output = true,
     });
     defer region.deinit();
-    try region.resize(8, 1);
+    try region.resize(8, 1, 1);
     _ = try region.cur.draw(.{}, "hi", 0, 0);
 
     // The driven renderer writes through the pipe; the harness drains it.
@@ -925,7 +1036,7 @@ test "frame: the raw harness drains, snapshots, clears, and feeds input" {
 }
 
 test "frame: the plain (non-interactive) path emits one unwrapped frame" {
-    var session = try Session.init(testing.io, testing.allocator, .{
+    var session = try Session.init(testing.allocator, testing.io, .{
         .width = 4,
         // `sync_output` is deliberately true: `interactive` is the only
         // envelope gate, so a supported DEC 2026 must still produce zero

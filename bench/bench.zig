@@ -70,14 +70,14 @@ const Context = notui.app.Context;
 const Region = notui.region.Region;
 const Style = notui.style.Style;
 const View = notui.app.View;
-const Width = notui.width;
+const unicode_width = notui.width;
 const debug_server = notui.debug_server;
 const emit = notui.emit;
 const net = std.Io.net;
 const output = notui.output;
 const watchdog = notui.watchdog;
 
-// ── tuning ───────────────────────────────────────
+// Tuning.
 
 /// Wall-time budget per case, used to size the measured run.
 const target_ns: u64 = 500 * std.time.ns_per_ms;
@@ -126,7 +126,7 @@ const BenchError = std.mem.Allocator.Error || std.Io.Writer.Error || error{
     LoopTcpTimestamp,
 };
 
-// ── timing ───────────────────────────────────────
+// Timing.
 
 /// Monotonic clock in nanoseconds through `std.Io` (Linux CLOCK_MONOTONIC
 /// under the default Io implementation — the same source
@@ -228,7 +228,8 @@ const base_rows = [_][]const u8{
     "+--------------------------------------------------------------------+",
     "| notui bench: static frame content (deterministic, borrowed)        |",
     "| abcdefghijklmnopqrstuvwxyz 0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ    |",
-    "| wide: 日本語テスト ─────── box drawing: ┌─┬─┐ │ │ └─┴─┘            |",
+    "| wide: 日本語テスト " ++
+        "────── box drawing: ┌─┬─┐ │ │ └─┴─┘            |",
     "| combining: e\u{0301} o\u{0308} a\u{030A} n\u{0303} z\u{0301}     |",
     "| progress [####################----------------]  50%   3 of 6      |",
 };
@@ -356,7 +357,7 @@ fn writeRowPreB4(
             x += 1;
             continue;
         }
-        const wg = Width.graphemeWidth(cell.grapheme);
+        const wg = unicode_width.graphemeWidth(cell.grapheme);
         const wcell: usize = if (wg >= 2) 2 else 1;
         if (x + wcell > cur.width) {
             x += 1;
@@ -377,7 +378,7 @@ fn writeStylePreB4(w: *std.Io.Writer, tracked: *Style, style: Style) BenchError!
     tracked.* = style;
 }
 
-// ── cases ────────────────────────────────────────
+// Cases.
 
 /// Point `prev` at the frame just drawn — the sync every buffer-level case
 /// does after its encoder runs.
@@ -443,6 +444,7 @@ const StaticCase = struct {
     fn deinit(self: *StaticCase) void {
         self.cur.deinit();
         self.prev.deinit();
+        self.* = undefined;
     }
 
     fn firstFrameBytes(self: *const StaticCase) u64 {
@@ -537,6 +539,7 @@ const DamageCase = struct {
     fn deinit(self: *DamageCase) void {
         self.cur.deinit();
         self.prev.deinit();
+        self.* = undefined;
     }
 
     fn firstFrameBytes(self: *const DamageCase) u64 {
@@ -696,6 +699,7 @@ const StyleRunCase = struct {
     fn deinit(self: *StyleRunCase) void {
         self.cur.deinit();
         self.prev.deinit();
+        self.* = undefined;
     }
 
     fn firstFrameBytes(self: *const StyleRunCase) u64 {
@@ -796,6 +800,7 @@ const StreamCase = struct {
     fn deinit(self: *StreamCase) void {
         self.cur.deinit();
         self.prev.deinit();
+        self.* = undefined;
     }
 
     fn firstFrameBytes(self: *const StreamCase) u64 {
@@ -896,6 +901,7 @@ const RegionCase = struct {
 
     fn deinit(self: *RegionCase) void {
         self.region.deinit();
+        self.* = undefined;
     }
 
     fn firstFrameBytes(self: *const RegionCase) u64 {
@@ -1066,7 +1072,7 @@ const LoopCase = struct {
             .sync_output = true,
         });
         errdefer app.region.?.deinit();
-        try app.region.?.resize(loop_columns, loop_rows);
+        try app.region.?.resize(loop_columns, loop_rows, loop_rows);
         app.out = try output.OutputQueue.init(allocator, .{});
         errdefer app.out.?.deinit();
         app.arena = std.heap.ArenaAllocator.init(allocator);
@@ -1222,10 +1228,10 @@ const Scan = struct {
 /// Render two visual frames through the real App loop, publish them over
 /// TCP, read the state back, and print what every layer reported.
 fn runLoopCase(
-    w: *std.Io.Writer,
     allocator: std.mem.Allocator,
-    counter: *CountingAllocator,
     io: std.Io,
+    w: *std.Io.Writer,
+    counter: *CountingAllocator,
     sink: *Sink,
 ) !void {
     var loop_case = try LoopCase.init(allocator, io, sink);
@@ -1236,7 +1242,7 @@ fn runLoopCase(
     try server.start(io);
     defer server.stop(io);
 
-    var driver = debug_server.Driver{
+    var driver: debug_server.Driver = .{
         .server = &server,
         .interval_ns = 0,
         .frames = loop_frames,
@@ -1332,7 +1338,7 @@ fn runLoopCase(
     try w.print("bench: loop tcp line={s}\n", .{line});
 }
 
-// ── harness ──────────────────────────────────────
+// Harness.
 
 /// One case's numbers.
 const CaseResult = struct {
@@ -1370,9 +1376,9 @@ const Harness = struct {
 /// must hold at least `max_iters` entries. When `zero_alloc` is set, any
 /// allocation inside the measured loop fails the run.
 fn measure(
+    comptime T: type,
     io: std.Io,
     label: []const u8,
-    comptime T: type,
     case: *T,
     h: Harness,
     zero_alloc: bool,
@@ -1439,7 +1445,7 @@ fn clockOverhead(io: std.Io, samples: []u64) ClockOverhead {
     return .{ .p50_ns = percentile(sorted, 50), .p99_ns = percentile(sorted, 99) };
 }
 
-// ── reporting ────────────────────────────────────
+// Reporting.
 
 /// Print the human table, then one greppable `bench: ...` line per case:
 /// the metric line every case gets, the region phase breakdown with its
@@ -1526,8 +1532,9 @@ fn report(
 /// 0, so a missing baseline never reports a bogus reduction.
 fn reductionPct(part: u64, whole: u64) f64 {
     if (whole == 0) return 0;
-    const num = @as(f64, @floatFromInt(whole -| part));
-    return 100.0 * num / @as(f64, @floatFromInt(whole));
+    const num: f64 = @floatFromInt(whole -| part);
+    const denom: f64 = @floatFromInt(whole);
+    return 100.0 * num / denom;
 }
 
 /// Frames that broke a byte contract, summed over every measured case.
@@ -1540,7 +1547,7 @@ fn regionViolations(results: []const CaseResult) usize {
     return total;
 }
 
-// ── entry point ──────────────────────────────────
+// Entry point.
 
 /// Measure the render pipeline and print the results. One run, no
 /// arguments: every case is self-contained and checks its own invariants,
@@ -1554,7 +1561,7 @@ pub fn main(init: std.process.Init) !void {
     var file_writer = std.Io.File.stdout().writerStreaming(io, &out_buf);
     const out = &file_writer.interface;
 
-    var counter = CountingAllocator{ .child = gpa };
+    var counter: CountingAllocator = .{ .child = gpa };
     const alloc = counter.allocator();
 
     var sink: Sink = .{};
@@ -1563,7 +1570,7 @@ pub fn main(init: std.process.Init) !void {
     const samples = try gpa.alloc(u64, max_iters);
     defer gpa.free(samples);
 
-    const h = Harness{ .sink = &sink, .counter = &counter, .samples = samples };
+    const h: Harness = .{ .sink = &sink, .counter = &counter, .samples = samples };
     const clock = clockOverhead(io, samples);
 
     var results: [12]CaseResult = undefined;
@@ -1571,22 +1578,22 @@ pub fn main(init: std.process.Init) !void {
 
     var static80 = try StaticCase.init(alloc, &sink, 80, 24);
     defer static80.deinit();
-    results[n] = try measure(io, "static 80x24", StaticCase, &static80, h, true);
+    results[n] = try measure(StaticCase, io, "static 80x24", &static80, h, true);
     n += 1;
 
     var static200 = try StaticCase.init(alloc, &sink, 200, 60);
     defer static200.deinit();
-    results[n] = try measure(io, "static 200x60", StaticCase, &static200, h, true);
+    results[n] = try measure(StaticCase, io, "static 200x60", &static200, h, true);
     n += 1;
 
     var stream80 = try StreamCase.init(alloc, &sink, 80, 24);
     defer stream80.deinit();
-    results[n] = try measure(io, "stream 80x24", StreamCase, &stream80, h, true);
+    results[n] = try measure(StreamCase, io, "stream 80x24", &stream80, h, true);
     n += 1;
 
     var stream200 = try StreamCase.init(alloc, &sink, 200, 60);
     defer stream200.deinit();
-    results[n] = try measure(io, "stream 200x60", StreamCase, &stream200, h, true);
+    results[n] = try measure(StreamCase, io, "stream 200x60", &stream200, h, true);
     n += 1;
 
     // One fixed styled row changes on an otherwise identical band, and both
@@ -1596,39 +1603,39 @@ pub fn main(init: std.process.Init) !void {
 
     var damage80 = try DamageCase.init(alloc, &sink, &ref_sink, 80, 24);
     defer damage80.deinit();
-    results[n] = try measure(io, "damage 80x24", DamageCase, &damage80, h, true);
+    results[n] = try measure(DamageCase, io, "damage 80x24", &damage80, h, true);
     n += 1;
 
     var damage200 = try DamageCase.init(alloc, &sink, &ref_sink, 200, 60);
     defer damage200.deinit();
-    results[n] = try measure(io, "damage 200x60", DamageCase, &damage200, h, true);
+    results[n] = try measure(DamageCase, io, "damage 200x60", &damage200, h, true);
     n += 1;
 
     // The style-run frame: 80x24, only the last row damaged, 10 style runs
     // of 8 cells. The same pixels go through both encoders every frame.
     var style80 = try StyleRunCase.init(alloc, &sink, &ref_sink, 80, 24);
     defer style80.deinit();
-    results[n] = try measure(io, "styles 80x24", StyleRunCase, &style80, h, true);
+    results[n] = try measure(StyleRunCase, io, "styles 80x24", &style80, h, true);
     n += 1;
 
     var region1 = try RegionCase.init(alloc, &sink, 1);
     defer region1.deinit();
-    results[n] = try measure(io, "region h1", RegionCase, &region1, h, false);
+    results[n] = try measure(RegionCase, io, "region h1", &region1, h, false);
     n += 1;
 
     var region4 = try RegionCase.init(alloc, &sink, 4);
     defer region4.deinit();
-    results[n] = try measure(io, "region h4", RegionCase, &region4, h, false);
+    results[n] = try measure(RegionCase, io, "region h4", &region4, h, false);
     n += 1;
 
     var region24 = try RegionCase.init(alloc, &sink, 24);
     defer region24.deinit();
-    results[n] = try measure(io, "region h24", RegionCase, &region24, h, false);
+    results[n] = try measure(RegionCase, io, "region h24", &region24, h, false);
     n += 1;
 
     // The headless App loop: a real App band plus the debug server, with
     // its own greppable lines before the table.
-    try runLoopCase(out, alloc, &counter, io, &sink);
+    try runLoopCase(alloc, io, out, &counter, &sink);
     try out.writeByte('\n');
 
     try report(out, results[0..n], clock);

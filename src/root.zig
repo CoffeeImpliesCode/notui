@@ -40,5 +40,6 @@ pub const output = @import("output.zig");
 pub const transcript = @import("transcript.zig");
 
 test {
+    _ = @import("testing/native_resize.zig");
     std.testing.refAllDecls(@This());
 }
