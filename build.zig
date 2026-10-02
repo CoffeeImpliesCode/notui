@@ -28,7 +28,7 @@ pub fn build(b: *std.Build) void {
     });
 
     // ── vendored ztex (vendor/ztex) ──────────────────────
-    // A snapshot of ~/projects/ztex, wired exactly like its own
+    // A vendored snapshot of upstream ztex, wired exactly like its own
     // build.zig (modules ztex.atom / ztex.parse / ztex.layout /
     // ztex.svg / ztex facade). Changes live here locally — the upstream
     // checkout is owned by other work and must not be touched. The
@@ -123,6 +123,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "framework_counter", .file = "examples/framework_counter.zig" },
         .{ .name = "kitty_image", .file = "examples/kitty_image.zig" },
         .{ .name = "kitty_image_showcase", .file = "examples/kitty_image_showcase.zig" },
+        .{ .name = "bounded_smoke", .file = "examples/bounded_smoke.zig" },
     };
     inline for (examples) |ex| {
         const example_exe = b.addExecutable(.{
@@ -181,6 +182,17 @@ pub fn build(b: *std.Build) void {
                 "Run the kitty image showcase example",
             );
             run_kitty_image_showcase_step.dependOn(&run_example_cmd.step);
+        }
+
+        // The bounded-region smoke fixture is also reachable via the
+        // shorter `run-bounded-smoke` name; the tuple entry above already
+        // wires `run-example-bounded_smoke`.
+        if (std.mem.eql(u8, ex.name, "bounded_smoke")) {
+            const run_bounded_smoke_step = b.step(
+                "run-bounded-smoke",
+                "Run the bounded-region smoke fixture",
+            );
+            run_bounded_smoke_step.dependOn(&run_example_cmd.step);
         }
     }
 
@@ -272,6 +284,12 @@ pub fn build(b: *std.Build) void {
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
+
+    const repl_tests = b.addTest(.{ .root_module = skript_repl.root_module });
+    const run_repl_tests = b.addRunArtifact(repl_tests);
+    test_step.dependOn(&run_repl_tests.step);
+    const test_repl_step = b.step("test-repl", "Run REPL behavior regressions");
+    test_repl_step.dependOn(&run_repl_tests.step);
 
     // ── bench ──────────────────────────
     // The render-pipeline benchmark (ROADMAP F2): frame time p50/p99,
