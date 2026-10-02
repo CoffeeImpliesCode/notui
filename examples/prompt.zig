@@ -9,7 +9,9 @@
 //! scrollback; backspace edits the line; ctrl+c clears it (a normal key
 //! event — the app never hard-quits); the app quits only on an
 //! empty-line `q` or on ctrl+d. Resizes go through `Tty.checkResize` →
-//! `Region.resize` (strategy-2 clear + redraw).
+//! `Region.resize` with the terminal's real columns AND rows, so a
+//! physical shrink repaints the surviving band (strategy-2 clear +
+//! redraw) while the height stays the intended constant below.
 
 const std = @import("std");
 const notui = @import("notui");
@@ -28,6 +30,12 @@ const Tty = notui.tty.Tty;
 const Region = notui.region.Region;
 const Key = notui.key;
 const Reader = notui.input.Reader;
+
+/// Band height: the prompt row alone. The terminal's own row count is a
+/// SEPARATE fact, handed to `Region.resize` as its second argument; the
+/// intended height is this constant, so a band the physical shrink
+/// clipped comes back in full when the terminal grows again.
+const band_height: u16 = 1;
 
 /// The prompt prefix drawn in the region band.
 const prompt_text = "prompt > ";
@@ -55,11 +63,11 @@ pub fn main(init: std.process.Init) !void {
     var parser: notui.parser = .{};
     const caps = try notui.caps.Capabilities.detect(gpa, &tty, &parser);
 
-    var region = try Region.init(gpa, .{ .height = 1 });
+    var region = try Region.init(gpa, .{ .height = band_height });
     defer region.deinit();
 
     const ws = try tty.getWinsize();
-    try region.resize(ws.cols, region.height);
+    try region.resize(ws.cols, ws.rows, band_height);
 
     // App-owned arena: typed text lives here for the whole session.
     // Enter-queued `.line` slices also point into it and stay valid
@@ -96,13 +104,14 @@ pub fn main(init: std.process.Init) !void {
                     try appendKeyText(aa, &line, k);
                 }
             },
-            .winsize => |wsz| try region.resize(wsz.cols, region.height),
+            .winsize => |wsz| try region.resize(wsz.cols, wsz.rows, band_height),
+            .cpr => |pos| try region.applyCpr(pos.row, pos.col),
             else => {},
         };
 
         if (tty.checkResize()) {
             const wsz = try tty.getWinsize();
-            try region.resize(wsz.cols, region.height);
+            try region.resize(wsz.cols, wsz.rows, band_height);
         }
 
         try drawPrompt(&region, line.items);

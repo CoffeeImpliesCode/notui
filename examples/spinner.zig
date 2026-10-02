@@ -27,6 +27,12 @@ const Region = notui.region.Region;
 const Key = notui.key;
 const Reader = notui.input.Reader;
 
+/// Band height: the one rotating glyph row. The terminal's own row count
+/// is a SEPARATE fact, handed to `Region.resize` as its second argument;
+/// the intended height is this constant, so a band the physical shrink
+/// clipped comes back in full when the terminal grows again.
+const band_height: u16 = 1;
+
 /// Rotating braille glyphs, each exactly one column wide.
 const frames = [_][]const u8{
     "⠋",
@@ -63,14 +69,14 @@ pub fn main(init: std.process.Init) !void {
     var parser: notui.parser = .{};
     const caps = try notui.caps.Capabilities.detect(gpa, &tty, &parser);
 
-    var region = try Region.init(gpa, .{ .height = 1 });
+    var region = try Region.init(gpa, .{ .height = band_height });
     defer region.deinit();
 
     // Size the band to the terminal before the first frame. This sets
     // width_dirty, but the first render (strategy 1) takes priority over
     // it, so no stray clear is emitted before anything painted.
     const ws = try tty.getWinsize();
-    try region.resize(ws.cols, region.height);
+    try region.resize(ws.cols, ws.rows, band_height);
 
     var reader = Reader.init(&tty);
     const w = tty.writer();
@@ -89,7 +95,8 @@ pub fn main(init: std.process.Init) !void {
                 if (k.matches(Key.ctrl_c, .{}) or k.matches('c', .{ .ctrl = true })) break;
                 if (k.matches('q', .{})) break;
             },
-            .winsize => |wsz| try region.resize(wsz.cols, region.height),
+            .winsize => |wsz| try region.resize(wsz.cols, wsz.rows, band_height),
+            .cpr => |pos| try region.applyCpr(pos.row, pos.col),
             else => {},
         };
 
@@ -97,7 +104,7 @@ pub fn main(init: std.process.Init) !void {
         // the old-width rows before repainting — no resize dupes).
         if (tty.checkResize()) {
             const wsz = try tty.getWinsize();
-            try region.resize(wsz.cols, region.height);
+            try region.resize(wsz.cols, wsz.rows, band_height);
         }
 
         region.cur.clear();
@@ -117,7 +124,7 @@ pub fn main(init: std.process.Init) !void {
 /// One plain frame, no interactive sequences: `glyph\n` (piped run).
 fn runPlain(gpa: std.mem.Allocator, io: std.Io) !void {
     var region = try Region.init(gpa, .{
-        .height = 1,
+        .height = band_height,
         .append_lines = false,
         .interactive = false,
     });

@@ -153,7 +153,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Size the band to the terminal before the first frame.
     const ws = try tty.getWinsize();
-    try region.resize(ws.cols, region.height);
+    try region.resize(ws.cols, ws.rows, band_height);
 
     // App-owned arena: the typed line and the committed source live here
     // for the whole session — the draw list aliases the source, and
@@ -169,9 +169,6 @@ pub fn main(init: std.process.Init) !void {
     var formula_n: u32 = 1;
     var committed: []const u8 = default_formula;
     var size_pt: f32 = default_size_pt;
-    // The band's absolute top row is unknown until the FIRST CPR reply
-    // (the query fires before the first paint; see the `.cpr` arm).
-    var anchor_known: bool = false;
     // A bitmap is currently transmitted (the last good preview). False
     // while the current input fails to parse — the old image stays.
     var preview_ok: bool = false;
@@ -188,7 +185,7 @@ pub fn main(init: std.process.Init) !void {
     const w = tty.writer();
 
     // Default formula: render + transmit up front (position-independent);
-    // the placement waits for the first CPR reply to anchor the band.
+    // the placement waits for a measured band top (`anchorRow() > 0`).
     preview_ok = preview(gpa, &ctx, default_formula, size_pt, kitty, w, &hint, &hint_buf, &err_span, &stats);
     try w.flush();
 
@@ -420,28 +417,21 @@ pub fn main(init: std.process.Init) !void {
                 }
             },
             .cpr => |pos| {
-                if (!anchor_known) {
-                    // The FIRST reply answers the query emitted at the
-                    // first render start, BEFORE the first paint; the
-                    // region bookkeeping holds every shift applied since
-                    // (the CNL reservation), so applyFirstCpr re-anchors.
-                    region.applyFirstCpr(pos.row);
-                    anchor_known = true;
-                } else {
-                    // Steady-state: the cursor parks at the band bottom
-                    // after every frame, so the bottom-based correction
-                    // applies.
-                    try region.applyCpr(pos.row, pos.col);
-                }
+                // Every reply answers a post-paint query: the cursor
+                // parks at the band bottom, so `applyCpr` maps the
+                // reply back to the band top. First and later replies
+                // take this same path — each one re-measures the anchor
+                // from scratch.
+                try region.applyCpr(pos.row, pos.col);
             },
-            .winsize => |wsz| try region.resize(wsz.cols, region.height),
+            .winsize => |wsz| try region.resize(wsz.cols, wsz.rows, band_height),
             else => {},
         };
 
         // SIGWINCH: re-measure and rebuild the band.
         if (tty.checkResize()) {
             const wsz = try tty.getWinsize();
-            try region.resize(wsz.cols, region.height);
+            try region.resize(wsz.cols, wsz.rows, band_height);
         }
 
         // Frame: prompt + typed line + cursor marker (band row 0), the
@@ -478,7 +468,11 @@ pub fn main(init: std.process.Init) !void {
             );
         }
         try region.render(w);
-        if (kitty and anchor_known and preview_ok) {
+        if (kitty and preview_ok and region.anchorRow() > 0) {
+            // The placement skips while the anchor is unknown or
+            // invalidated (`anchorRow() == 0`) — a stale absolute row
+            // would land the preview off the band — and the next
+            // measured anchor re-places it.
             try region.placeAt(w, preview_row, 1, .{
                 .id = formula_id,
                 .placement = formula_id,

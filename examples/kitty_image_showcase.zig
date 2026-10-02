@@ -26,6 +26,9 @@
 //! the current anchor each tick so they stay glued to the band
 //! (placements are cell-anchored, and the band text moves by repaint,
 //! not by terminal scroll — a placement left alone would detach).
+//! Placements are emitted only while `region.anchorRow()` is non-zero:
+//! the anchor is 0 until a CPR reply measures it, and again after every
+//! geometry change until the next reply.
 //! Appends stop when the band bottom reaches the last screen row: the
 //! region's repaint model cannot write past the bottom without the
 //! terminal scrolling mid-paint and garbling the band.
@@ -61,6 +64,9 @@ const Reader = notui.input.Reader;
 /// Loop pacing: nextTimeout returns null on timeout, advancing one tick
 /// (the animation + scroll cadence).
 const tick_ms: i32 = 100;
+
+/// Band height in terminal rows: the four rows the showcase owns.
+const band_height: u16 = 4;
 
 /// A scroll line is appended above the band every this many ticks.
 const scroll_every_ticks: u32 = 15;
@@ -188,22 +194,22 @@ pub fn main(init: std.process.Init) !void {
     var parser: notui.parser = .{};
     const caps = try notui.caps.Capabilities.detect(gpa, &tty, &parser);
 
-    var region = try Region.init(gpa, .{ .height = 4 });
+    var region = try Region.init(gpa, .{ .height = band_height });
     defer region.deinit();
 
     // Size the band to the terminal before the first frame.
     const ws = try tty.getWinsize();
-    try region.resize(ws.cols, region.height);
+    try region.resize(ws.cols, ws.rows, band_height);
 
     const w = tty.writer();
 
     // Transmit every image once (transmits are position-independent).
     // Placements need the band's ABSOLUTE screen rows, which are only
-    // known once the first CPR reply anchors the band (see the `.cpr`
-    // arm below): `region.placeAt` CUP's to the absolute cell, places,
-    // then parks back at the band bottom. Every sprite is re-placed
-    // each tick (cell-anchored placements would detach from the band
-    // otherwise — the band text moves by repaint, not terminal
+    // known once a CPR reply has measured them (`region.anchorRow()`,
+    // see the `.cpr` arm below): `region.placeAt` CUP's to the absolute
+    // cell, places, then parks back at the band bottom. Every sprite is
+    // re-placed each tick (cell-anchored placements would detach from
+    // the band otherwise — the band text moves by repaint, not terminal
     // scroll), keeping them glued to the band.
     if (caps.kitty_graphics) {
         try transmitAll(w);
@@ -223,10 +229,6 @@ pub fn main(init: std.process.Init) !void {
     var ball_col: u32 = 0;
     var ball_dir: i32 = 1;
     var frame_index: u32 = 0;
-    // The band's absolute top row is unknown until the FIRST CPR reply
-    // (the query fires before the first paint; see `.cpr` below). No
-    // placements are emitted before that — a tick or two at most.
-    var anchor_known: bool = false;
     var spinner: notui.component.Spinner = .{
         .label = if (caps.kitty_graphics) "images: ON" else "images: unsupported",
     };
@@ -244,23 +246,17 @@ pub fn main(init: std.process.Init) !void {
                 if (k.matches('q', .{})) break;
             },
             .cpr => |pos| {
-                if (!anchor_known) {
-                    // The FIRST reply answers the query emitted at the
-                    // first render start, BEFORE the first paint — the
-                    // cursor then sat at the pre-frame row. The
-                    // region's bookkeeping already holds every shift
-                    // applied since (CNL reservation + any appends
-                    // flushed), so applyFirstCpr re-anchors exactly.
-                    region.applyFirstCpr(pos.row);
-                    anchor_known = true;
-                } else {
-                    // Steady-state: the cursor parks at the band bottom
-                    // after every frame, so the bottom-based correction
-                    // applies.
-                    try region.applyCpr(pos.row, pos.col);
-                }
+                // Every reply answers a post-paint query: the cursor
+                // parks at the band bottom, so `applyCpr` maps the
+                // reply back to the band top. First and later replies
+                // take this same path — each one re-measures the anchor
+                // from scratch.
+                try region.applyCpr(pos.row, pos.col);
             },
-            .winsize => |wsz| try region.resize(wsz.cols, region.height),
+            .winsize => |wsz| {
+                screen_rows = wsz.rows;
+                try region.resize(wsz.cols, wsz.rows, band_height);
+            },
             else => {},
         };
 
@@ -268,7 +264,7 @@ pub fn main(init: std.process.Init) !void {
         if (tty.checkResize()) {
             const wsz = try tty.getWinsize();
             screen_rows = wsz.rows;
-            try region.resize(wsz.cols, region.height);
+            try region.resize(wsz.cols, wsz.rows, band_height);
         }
 
         // The moving ball: bounce horizontally across the row width.
@@ -287,18 +283,22 @@ pub fn main(init: std.process.Init) !void {
         // bottom reaches the last screen row, where further appends
         // would scroll the terminal mid-paint and garble the band. The
         // `.line` slice points into `line_buf`, alive through the
-        // render that flushes the append queue this same iteration.
-        if (tick % scroll_every_ticks == 0 and
-            region.anchorRow() + region.height <= screen_rows)
+        // render that flushes the append queue this same iteration. The
+        // bound is read off a MEASURED band top only: `anchorRow()` is
+        // 0 while the anchor is unknown or invalidated, and treating
+        // that as "band at row 0" would keep appending.
+        var line_buf: [64]u8 = undefined;
+        if (tick % scroll_every_ticks == 0 and region.anchorRow() > 0 and
+            region.anchorRow() + band_height <= screen_rows)
         {
             scroll_n += 1;
-            var line_buf: [64]u8 = undefined;
             try region.append(.{ .line = scrollLine(io, &line_buf, scroll_n, region.width) });
         }
 
         try drawBand(io, &region, &spinner);
 
-        if (caps.kitty_graphics and anchor_known) {
+        try region.render(w);
+        if (caps.kitty_graphics and region.anchorRow() > 0) {
             // Re-place = animation: `region.placeAt` CUP's to the
             // absolute cell (current anchor + band row), places, then
             // parks back — the images stay glued to the band as append
@@ -308,7 +308,10 @@ pub fn main(init: std.process.Init) !void {
             // re-placing move the existing placement instead of
             // stacking a new one (the ball and the gallery squares
             // reuse their image ids; the flip-book cycles frame ids
-            // into fixed slot 500).
+            // into fixed slot 500). The guard skips every placement
+            // while the anchor is unknown or invalidated — a stale
+            // absolute row would land the sprites off the band — and
+            // the next measured anchor re-places them all.
             try region.placeAt(w, 0, ball_col + 1, .{
                 .id = ball_id,
                 .placement = ball_id,
@@ -331,7 +334,6 @@ pub fn main(init: std.process.Init) !void {
             });
         }
 
-        try region.render(w);
         try w.flush();
         tick += 1;
     }
@@ -424,7 +426,7 @@ fn isCtrlC(k: Key) bool {
 /// band without any image bytes (piped run).
 fn runPlain(gpa: std.mem.Allocator, io: std.Io) !void {
     var region = try Region.init(gpa, .{
-        .height = 4,
+        .height = band_height,
         .append_lines = false,
         .interactive = false,
     });

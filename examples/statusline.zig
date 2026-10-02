@@ -17,13 +17,9 @@
 //!   exit without parking. The same frame renders styled on a tty and
 //!   plain in a pipe (no SGR, no interactive sequences).
 //!
-//! fd-capture interaction (architecture §9.2 — known, deferred): the
-//! Region's anchor is tracked from its OWN writes only. Any external
-//! write to fd 1/2 between frames (a log line, another component)
-//! drifts the terminal cursor and with it the tracked anchor. v0 does
-//! not consume the CPR reply, so `reanchor()` buys a re-query but no
-//! correction — apps must not write to the tty outside the region, or
-//! must call `reanchor()` and accept one frame of drift.
+//! External fd-1/fd-2 writes move the cursor outside Region's ownership.
+//! This example consumes the region's CPR replies; callers that write
+//! outside the region must also request `reanchor()` afterward.
 
 const std = @import("std");
 const notui = @import("notui");
@@ -46,6 +42,9 @@ const Key = notui.key;
 const component = notui.component;
 
 /// Region height: StatusBar, Gauge, and one wrapped-message row.
+/// `Region.resize` receives the terminal's visible rows separately. A
+/// terminal shorter than this fixed band can scroll its leading rows into
+/// scrollback; regrowth restores room for all rows.
 const region_height: u16 = 3;
 
 /// Monotonic anchor for the gauge's elapsed-time animation (module
@@ -55,6 +54,19 @@ var frame_anchor: ?component.Clock = null;
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
+    // Native opt-in declares exact capacity, unused terminal-generated tail
+    // padding and conforming oldest-source eviction; it is not auto-detected.
+    var terminal_reflow: Region.TerminalReflow = .none;
+    var args = std.process.Args.Iterator.init(init.minimal.args);
+    defer args.deinit();
+    _ = args.next();
+    const capacity_arg = "--terminal-scrollback-rows=";
+    while (args.next()) |arg| {
+        if (!std.mem.startsWith(u8, arg, capacity_arg)) return error.InvalidArgument;
+        terminal_reflow = .{ .non_cursor_rows = .{
+            .scrollback_rows = try std.fmt.parseInt(u32, arg[capacity_arg.len..], 10),
+        } };
+    }
 
     if (!notui.tty.Tty.isTty(std.posix.STDIN_FILENO)) {
         // Piped stdin: there is no terminal to query or put into raw
@@ -62,7 +74,7 @@ pub fn main(init: std.process.Init) !void {
         // exit without parking.
         return runPiped(gpa, io);
     }
-    try runInteractive(gpa, io);
+    try runInteractive(gpa, io, terminal_reflow);
 }
 
 /// Non-TTY path: no Tty is opened, no makeRaw, no Caps.detect — the
@@ -103,7 +115,11 @@ fn runPiped(gpa: std.mem.Allocator, io: std.Io) !void {
 /// `Region.resize`, so stale wide rows never survive (plan §9.3). The
 /// gauge animates because the frame is rebuilt once per loop iteration
 /// (each tick advances the sin-driven value).
-fn runInteractive(gpa: std.mem.Allocator, io: std.Io) !void {
+fn runInteractive(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    terminal_reflow: Region.TerminalReflow,
+) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
 
@@ -119,11 +135,12 @@ fn runInteractive(gpa: std.mem.Allocator, io: std.Io) !void {
         .height = region_height,
         .sync_output = caps.sync_output,
         .width_policy = caps.widthPolicy(),
+        .terminal_reflow = terminal_reflow,
     });
     defer region.deinit();
 
     const ws = try tty.getWinsize();
-    try region.resize(ws.cols, region_height);
+    try region.resize(ws.cols, ws.rows, region_height);
 
     var reader = notui.input.Reader.init(&tty);
     const w = tty.writer();
@@ -136,7 +153,7 @@ fn runInteractive(gpa: std.mem.Allocator, io: std.Io) !void {
     while (true) {
         if (tty.checkResize()) {
             const nws = try tty.getWinsize();
-            try region.resize(nws.cols, region_height);
+            try region.resize(nws.cols, nws.rows, region_height);
             need_redraw = true;
         }
 
@@ -159,6 +176,7 @@ fn runInteractive(gpa: std.mem.Allocator, io: std.Io) !void {
                 if (k.matches(Key.ctrl_c, .{}) or k.matches('c', .{ .ctrl = true }) or
                     k.matches('q', .{})) break;
             },
+            .cpr => |pos| try region.applyCpr(pos.row, pos.col),
             else => {},
         };
 

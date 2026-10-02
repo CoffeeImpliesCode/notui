@@ -7,9 +7,11 @@
 //! {d}ms" after a completed eval, a keybinding hint otherwise). While the
 //! user types a symbol and the eval worker is idle, a sorted candidate
 //! popup (base-ui Suggestions) appears below the input aligned under the
-//! cursor column: the band grows to `base_height + shown` rows and the
-//! status band moves down. Tab accepts the highlighted candidate, ↑/↓
-//! navigate (not history), Esc dismisses. Completed
+//! cursor column: the band grows to `base_height + shown` rows (clamped
+//! to the terminal's own row count, so the status band is always its
+//! last row) and the status band moves down. Tab accepts the highlighted
+//! candidate, ↑/↓ navigate (not history), Esc dismisses until the line is
+//! edited again. Completed
 //! submissions append above the band as plain `.line` scrollback rows:
 //! the query (keyword-styled), the `⇒ answer (Type)` line, and muted
 //! captured library output (capped at 5 lines + "N more captured").
@@ -78,9 +80,19 @@ const cont_status = "multiline: Enter to continue";
 /// Band geometry for the inline-suggestion popup (§4): the band is 2 rows
 /// (input + status) and grows to `base_height + shown` while the popup is
 /// open, capped at `max_rows` candidate rows (an 8-row popup keeps a
-/// 2-row band at 10 rows, never ballooning past a short terminal).
+/// 2-row band at 10 rows).
 const base_height: u16 = 2;
 const max_rows: u16 = 8;
+
+/// Region height for a popup asking for `want_rows` rows: the input and
+/// status rows plus the popup, never more than the terminal has. A
+/// 6-row terminal keeps input + status + a 4-row popup window, a 2-row
+/// terminal shows no popup at all, and a 1-row terminal keeps the input
+/// row alone.
+fn bandHeight(term_rows: u16, want_rows: u16) u16 {
+    const room = term_rows -| base_height;
+    return @min(term_rows, base_height + @min(want_rows, room));
+}
 
 /// Answer guard caps (§6): a huge pretty answer is truncated at 16 KiB
 /// (worker side) and at 200 scrollback rows (append side).
@@ -149,6 +161,19 @@ const libc = struct {
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
+    // Native opt-in declares exact capacity, unused terminal-generated tail
+    // padding and conforming oldest-source eviction; it is not auto-detected.
+    var terminal_reflow: Region.TerminalReflow = .none;
+    var args = std.process.Args.Iterator.init(init.minimal.args);
+    defer args.deinit();
+    _ = args.next();
+    const capacity_arg = "--terminal-scrollback-rows=";
+    while (args.next()) |arg| {
+        if (!std.mem.startsWith(u8, arg, capacity_arg)) return error.InvalidArgument;
+        terminal_reflow = .{ .non_cursor_rows = .{
+            .scrollback_rows = try std.fmt.parseInt(u32, arg[capacity_arg.len..], 10),
+        } };
+    }
 
     // Non-TTY degradation: skip the tty entirely (Tty.init opens /dev/tty,
     // which is wrong and can fail without a controlling terminal) and
@@ -165,11 +190,19 @@ pub fn main(init: std.process.Init) !void {
     var parser: notui.parser = .{};
     const caps = try notui.caps.Capabilities.detect(gpa, &tty, &parser);
 
-    var region = try Region.init(gpa, .{ .height = 2 });
+    var region = try Region.init(gpa, .{
+        .height = 2,
+        .terminal_reflow = terminal_reflow,
+    });
     defer region.deinit();
 
     const ws = try tty.getWinsize();
-    try region.resize(ws.cols, region.height);
+    // The band never outgrows the terminal: term_rows bounds the popup,
+    // popup_rows is what the open popup asked for (0 when closed), so a
+    // resize re-derives the height from both.
+    var term_rows: u16 = ws.rows;
+    var popup_rows: u16 = 0;
+    try region.resize(ws.cols, ws.rows, bandHeight(term_rows, popup_rows));
 
     // App arena: the typed line, worker results, history entries and the
     // styled scrollback rows all live here for the whole session. Arena
@@ -208,6 +241,10 @@ pub fn main(init: std.process.Init) !void {
     // never frees, matching the session-lifetime slice pattern) and
     // selected starts at 0 each time the popup opens.
     var sugg: ?notui.component.Suggestions = null;
+    // An Escape dismissal holds until the next edit of the line: idle
+    // ticks, redraws, resizes and pure cursor moves leave it set, so a
+    // dismissed popup cannot re-open under the finger.
+    var skip_suggest: bool = false;
     // §7: eval start timestamp (set in submit) and the last completed
     // eval's duration in ms (status band; cleared on the next keypress).
     var eval_start: std.Io.Timestamp = .fromNanoseconds(0);
@@ -249,7 +286,8 @@ pub fn main(init: std.process.Init) !void {
                     // (submit or multi-line continuation) runs.
                     if (sugg != null) {
                         sugg = null;
-                        try region.setHeight(base_height);
+                        popup_rows = 0;
+                        try region.setHeight(bandHeight(term_rows, popup_rows));
                     }
                     // Meta commands / multi-line continuation / submit
                     // (§4-§5); ignored while a submission is in flight.
@@ -270,11 +308,17 @@ pub fn main(init: std.process.Init) !void {
                     // closed popup falls through to the text insert).
                     try acceptSuggestion(aa, &line, &cursor, sugg.?);
                     sugg = null;
-                    try region.setHeight(base_height);
+                    popup_rows = 0;
+                    try region.setHeight(bandHeight(term_rows, popup_rows));
                     accepted = true;
                 } else if (sugg != null and k.matches(Key.escape, .{})) {
-                    sugg = null; // dismiss without accepting (line untouched)
-                    try region.setHeight(base_height);
+                    // Dismiss without accepting (line untouched) and hold
+                    // the dismissal until the next edit of the line, so
+                    // the popup cannot re-open on the recompute below.
+                    sugg = null;
+                    skip_suggest = true;
+                    popup_rows = 0;
+                    try region.setHeight(bandHeight(term_rows, popup_rows));
                 } else if (sugg != null and k.matches(Key.up, .{})) {
                     // Navigate candidates (wrap), NOT history.
                     sugg.?.selected = (sugg.?.selected + sugg.?.candidates.len - 1) % sugg.?.candidates.len;
@@ -334,21 +378,27 @@ pub fn main(init: std.process.Init) !void {
                     try insertKeyText(aa, &line, &cursor, k);
                 }
 
+                // An edit of the line re-arms completion; every other key
+                // (cursor move, Tab, Escape) leaves a dismissal standing.
+                if (editsLine(k)) skip_suggest = false;
+
                 // Recompute the popup for the post-key token (idle only):
-                // every idle keypress re-filters, so the popup tracks the
+                // every idle edit re-filters, so the popup tracks the
                 // token under the cursor after text, nav and kill keys.
                 // Never while an eval is in flight — completion reads
-                // root_ns, and the worker owns the runtime during an eval.
-                if (worker == null and !accepted) {
+                // root_ns, and the worker owns the runtime during an
+                // eval — and never under a standing Escape dismissal.
+                if (worker == null and !accepted and !skip_suggest) {
                     std.debug.assert(worker == null);
                     const prefix = tokenAtCursor(line.items, cursor);
                     const cands = if (prefix.len == 0) &.{} else candidates(aa, rt, prefix);
                     if (cands.len == 0) {
-                        // Zero matches (empty/number token, or a prefix
-                        // nothing starts with): dismiss.
+                        // Zero matches (empty token, a number/string/comment
+                        // context, or a prefix nothing starts with): dismiss.
                         if (sugg != null) {
                             sugg = null;
-                            try region.setHeight(base_height);
+                            popup_rows = 0;
+                            try region.setHeight(bandHeight(term_rows, popup_rows));
                         }
                     } else {
                         var s = if (sugg) |s0|
@@ -358,11 +408,15 @@ pub fn main(init: std.process.Init) !void {
                         s.candidates = cands;
                         if (s.selected >= cands.len) s.selected = 0; // recompute shrank the list
                         sugg = s;
-                        try region.setHeight(base_height + @as(u16, @intCast(@min(cands.len, @as(usize, max_rows)))));
+                        popup_rows = @intCast(@min(cands.len, @as(usize, max_rows)));
+                        try region.setHeight(bandHeight(term_rows, popup_rows));
                     }
                 }
             },
-            .winsize => |wsz| try region.resize(wsz.cols, region.height),
+            .winsize => |wsz| {
+                term_rows = wsz.rows;
+                try region.resize(wsz.cols, wsz.rows, bandHeight(term_rows, popup_rows));
+            },
             // The reply to the region's own CPR query (first render,
             // resize, reanchor): correct the bookkeeping anchor so an
             // external fd-1/fd-2 write can't leave the band drifted.
@@ -372,7 +426,8 @@ pub fn main(init: std.process.Init) !void {
 
         if (tty.checkResize()) {
             const wsz = try tty.getWinsize();
-            try region.resize(wsz.cols, region.height);
+            term_rows = wsz.rows;
+            try region.resize(wsz.cols, wsz.rows, bandHeight(term_rows, popup_rows));
         }
 
         // Poll the eval slot; append the finished submission when ready.
@@ -1060,9 +1115,10 @@ fn candidates(alloc: std.mem.Allocator, rt: *skript.Runtime, prefix: []const u8)
         if (std.mem.startsWith(u8, kw, prefix)) out.append(alloc, kw) catch break;
     }
     std.mem.sort([]const u8, out.items, {}, lessThan);
-    // Arena-backed: toOwnedSlice transfers the backing array to the arena
-    // (the caller frees nothing — the arena resets each frame); on OOM
-    // degrade to no candidates, consistent with the append catches above.
+    // Arena-backed: toOwnedSlice transfers the backing array to the app
+    // arena, which is never freed before exit (session lifetime), so the
+    // caller frees nothing; on OOM degrade to no candidates, consistent
+    // with the append catches above.
     return out.toOwnedSlice(alloc) catch return &.{};
 }
 
@@ -1082,22 +1138,89 @@ fn isCompletionDelim(c: u8) bool {
     };
 }
 
-/// The in-progress symbol prefix at `cursor`. Empty when the cursor is at
-/// a token boundary or the token can't be a symbol (number / string), in
-/// which case NO popup should show. Scans `line.items[0..cursor]`; the
-/// `\n` delimiter already handles multi-line continuation safety.
-fn tokenAtCursor(line: []const u8, cursor: usize) []const u8 {
+/// Byte index where the token ending at `cursor` starts. Shared by
+/// tokenAtCursor, the popup anchor in drawBand and acceptSuggestion, so
+/// the three can never disagree about the word being completed.
+fn tokenStart(line: []const u8, cursor: usize) usize {
     var start = cursor;
     while (start > 0 and !isCompletionDelim(line[start - 1])) start -= 1;
-    const tok = line[start..cursor];
-    if (tok.len == 0) return "";
-    if (isDigit(tok[0])) return ""; // number literal → no symbol completion
+    return start;
+}
+
+/// Whether the cursor sits inside a string literal or a comment, using
+/// the same conventions as the scanner above (and as skript's lexer):
+/// a `"` string ends only at the matching quote — `\` escapes the next
+/// byte — and may span continuation rows; a `;` comment ends at the
+/// newline; a `#| … |#` block comment nests and spans rows.
+fn inStringOrComment(line: []const u8, cursor: usize) bool {
+    var i: usize = 0;
+    var in_string = false;
+    var in_line_comment = false;
+    var depth: usize = 0; // open `#|` block comments
+    while (i < cursor) {
+        const c = line[i];
+        if (depth > 0) {
+            if (c == '#' and i + 1 < line.len and line[i + 1] == '|') {
+                depth += 1;
+                i += 2;
+            } else if (c == '|' and i + 1 < line.len and line[i + 1] == '#') {
+                depth -= 1;
+                i += 2;
+            } else i += 1;
+        } else if (in_string) {
+            // The escaped byte is consumed even when it is the quote
+            // that would otherwise close the string.
+            if (c == '\\') {
+                i += 2;
+            } else if (c == '"') {
+                in_string = false;
+                i += 1;
+            } else i += 1;
+        } else if (in_line_comment) {
+            // A line comment ends at the newline and nowhere else.
+            if (c == '\n') in_line_comment = false;
+            i += 1;
+        } else if (c == ';') {
+            in_line_comment = true;
+            i += 1;
+        } else if (c == '#' and i + 1 < line.len and line[i + 1] == '|') {
+            depth = 1;
+            i += 2;
+        } else if (c == '"') {
+            in_string = true;
+            i += 1;
+        } else i += 1;
+    }
+    return in_string or in_line_comment or depth > 0;
+}
+
+/// True when the token lexes as a number literal rather than a symbol:
+/// skript reads a digit, or a sign directly followed by a digit, `i`
+/// (`inf`) or `n` (`nan`), as a number.
+fn isNumberToken(tok: []const u8) bool {
+    if (isDigit(tok[0])) return true;
+    if (tok.len < 2) return false;
+    return (tok[0] == '+' or tok[0] == '-') and
+        (isDigit(tok[1]) or tok[1] == 'i' or tok[1] == 'n');
+}
+
+/// The in-progress symbol prefix at `cursor`. Empty when the cursor is at
+/// a token boundary, inside a string or comment, or over a token that
+/// lexes as a number — in which cases NO popup should show. The `\n`
+/// delimiter keeps a token on the active continuation row.
+fn tokenAtCursor(line: []const u8, cursor: usize) []const u8 {
+    if (inStringOrComment(line, cursor)) return "";
+    const tok = line[tokenStart(line, cursor)..cursor];
+    if (tok.len == 0 or isNumberToken(tok)) return "";
     return tok;
 }
 
-/// Replace the current token with the highlighted candidate and move the
-/// cursor to its end. Dismissal (sugg = null + setHeight) is the caller's
-/// job.
+/// Replace the token before the cursor with the highlighted candidate and
+/// move the cursor to its end. The text AFTER the cursor survives: only
+/// the partial token is spliced, so accepting mid-line never eats the
+/// rest of the query. The reservation comes FIRST, so a refused
+/// allocation leaves the query and the cursor exactly as they were.
+/// Dismissal (sugg = null + setHeight) is the caller's job.
 fn acceptSuggestion(
     aa: std.mem.Allocator,
     line: *std.ArrayList(u8),
@@ -1105,11 +1228,13 @@ fn acceptSuggestion(
     s: notui.component.Suggestions,
 ) !void {
     const cand = s.candidates[s.selected];
-    // Re-derive the token range exactly as tokenAtCursor (§2.2).
-    var start = cursor.*;
-    while (start > 0 and !isCompletionDelim(line.items[start - 1])) start -= 1;
-    line.items.len = start; // drop the partial token
-    try line.insertSlice(aa, start, cand); // splice in the candidate
+    const start = tokenStart(line.items, cursor.*);
+    // Room for the result (token replaced by `cand`, suffix kept) before
+    // anything is moved; a no-op when the capacity is already there.
+    try line.ensureTotalCapacity(aa, start + cand.len + (line.items.len - cursor.*));
+    @memmove(line.items[start..][0 .. line.items.len - cursor.*], line.items[cursor.*..]);
+    line.items.len -= cursor.* - start; // drop the partial token only
+    line.insertSliceAssumeCapacity(start, cand); // splice in the candidate
     cursor.* = start + cand.len; // cursor past the accepted symbol
 }
 
@@ -1118,9 +1243,14 @@ fn acceptSuggestion(
 /// Paint the band: row 0 = continuation prompt (when the pending buffer
 /// spans lines) or the main prompt, then the ACTIVE line with a
 /// reverse-video cursor block; rows 1..shown = the open suggestion popup
-/// aligned under the cursor column (base-ui Suggestions); the status row
-/// (busy spinner, "done in {d}ms" after a completed eval (§7), or the
-/// idle hint) sits at `1 + shown` — row 1 when the popup is closed.
+/// aligned under the cursor column (base-ui Suggestions), windowed to
+/// the rows the band has left below the input row; the status row (busy
+/// spinner, "done in {d}ms" after a completed eval (§7), or the idle
+/// hint) sits at `1 + shown` — row 1 when the popup is closed, the
+/// band's last row otherwise. The query is scanned ONCE over its whole
+/// length and the active row is clipped out of it, so syntax that
+/// starts on an earlier row (a string, a `#|` comment) still styles this
+/// one and the tail right of the cursor keeps that context.
 fn drawBand(
     aa: std.mem.Allocator,
     region: *Region,
@@ -1147,39 +1277,45 @@ fn drawBand(
     const prompt_col = x;
     const cur_style: Style = .{ .attrs = .{ .reverse = true } }; // reverse-video block
 
+    // ONE scan of the whole query: the active row's left side, the
+    // cursor cell and its right side all read the same segments, so a
+    // string or comment that opened before the cursor — on this row or
+    // on an earlier one — styles the text after it too.
+    const segs = try scanQuery(aa, line);
+    const cur_abs = active_off + cur; // absolute byte index of the cursor
+    const cell_len = if (cur_abs < line.len) utf8SeqLen(line, cur_abs) else 0;
     // Left of the cursor.
-    const left_segs = try scanQuery(aa, active[0..cur]);
-    for (left_segs) |seg| x += try region.cur.draw(seg.style, seg.text, x, 0);
+    x += try drawSpan(&region.cur, segs, line, active_off, cur_abs, x, 0);
     // The TOKEN-START column (the popup's anchor): the first column of the
     // word being completed. Scan back to the completion delimiter, then
     // measure the display width of everything before it — so the popup
     // starts at the word's beginning and STAYS there while the cursor
     // moves within the word (typing more chars, or Left/Right through it).
-    var token_start: usize = cur;
-    while (token_start > 0 and !isCompletionDelim(active[token_start - 1])) token_start -= 1;
-    const token_col: u16 = prompt_col + @as(u16, @intCast(notui.width.strWidth(active[0..token_start])));
+    const token_start = tokenStart(active, cur);
+    // Saturating: a query wider than the band still anchors inside it.
+    const lead_cols: usize = @min(notui.width.strWidth(active[0..token_start]), region.width);
+    const token_col: u16 = @min(prompt_col +| @as(u16, @intCast(lead_cols)), region.width);
 
-    if (cur < active.len) {
-        // Cursor sits ON a codepoint: reverse-video it, then the rest.
-        const clen = utf8SeqLen(active, cur);
-        const cell = active[cur .. cur + clen];
-        _ = try region.cur.draw(cur_style, cell, x, 0);
-        x += @as(u16, @intCast(notui.width.strWidth(cell)));
-        const right_segs = try scanQuery(aa, active[cur + clen ..]);
-        for (right_segs) |seg| _ = try region.cur.draw(seg.style, seg.text, x, 0);
+    if (cell_len > 0) {
+        // Cursor sits ON a codepoint: reverse-video it.
+        x += try region.cur.draw(cur_style, line[cur_abs .. cur_abs + cell_len], x, 0);
     } else {
         _ = try region.cur.draw(cur_style, " ", x, 0); // block cursor at EOL
     }
+    // Right of the cursor, in the segments' own styles.
+    _ = try drawSpan(&region.cur, segs, line, cur_abs + cell_len, line.len, x, 0);
 
     // Popup rows (1..shown) under the cursor column; the status row moves
     // down to `y` (1 + shown when open, 1 otherwise).
     var y: u16 = 1;
     if (sugg) |s0| {
         var s = s0; // draw takes *Suggestions; the payload is copied out of the const optional
-        // Anchor under the TOKEN START (not the cursor): the list begins
-        // where the completed word begins, clamped to the band width.
-        const popup_x: u16 = @min(token_col, region.width);
-        y += try s.draw(aa, &region.cur, popup_x, y, now);
+        // The popup may take only the rows the band has below the input
+        // row, never the status row: a short terminal keeps the input,
+        // a windowed popup and the status. Suggestions scrolls its window
+        // around the selection, so the selected candidate stays visible.
+        s.max_rows = @min(s.max_rows, region.height -| base_height);
+        y += try s.draw(aa, &region.cur, token_col, y, now);
     }
 
     if (busy) {
@@ -1191,6 +1327,34 @@ fn drawBand(
     } else {
         _ = try region.cur.draw(.{}, if (multiline) cont_status else idle_status, 0, y);
     }
+}
+
+/// Paint the part of `segs` that covers `line[from..to]`, in segment
+/// order, starting at column `x` of row `y`. The segments are
+/// contiguous slices of `line` in source order, so one walk locates
+/// every overlap and each is painted in its own style. Returns the
+/// columns painted.
+fn drawSpan(
+    buf: *notui.buffer.Buffer,
+    segs: []const ScanSeg,
+    line: []const u8,
+    from: usize,
+    to: usize,
+    x: u16,
+    y: u16,
+) !u16 {
+    var painted: u16 = 0;
+    var off: usize = 0;
+    for (segs) |seg| {
+        const end = off + seg.text.len;
+        if (end > from and off < to) {
+            const lo = @max(off, from);
+            const hi = @min(end, to);
+            painted += try buf.draw(seg.style, line[lo..hi], x + painted, y);
+        }
+        off = end;
+    }
+    return painted;
 }
 
 // ── history ring (contract §8) ──────────────────────────
@@ -1248,6 +1412,31 @@ fn isCtrlD(k: Key) bool {
     return k.matches(ctrl_d, .{}) or k.matches('d', .{ .ctrl = true });
 }
 
+/// The keypresses that change the line's text: an inserted character, a
+/// deletion, a kill, ^C's clear, Enter's submit or continuation, and a
+/// history recall. Every other key — cursor moves, Tab, Escape — leaves
+/// the line alone, which is what lets an Escape dismissal stand until
+/// the next edit.
+fn editsLine(k: Key) bool {
+    if (k.matches(Key.backspace, .{}) or k.matches(Key.delete, .{})) return true;
+    if (k.matches('k', .{ .ctrl = true }) or k.matches('u', .{ .ctrl = true }) or
+        k.matches('w', .{ .ctrl = true }) or isCtrlC(k)) return true;
+    if (k.matches(Key.enter, .{}) or k.matches(Key.up, .{}) or
+        k.matches(Key.down, .{})) return true;
+    // ^A / ^E jump to the line ends: a printable codepoint the loop
+    // binds to a cursor move, so it is not an edit either.
+    if (k.matches('a', .{ .ctrl = true }) or k.matches('e', .{ .ctrl = true })) return false;
+    if (k.text) |t| return t.len > 0;
+    return isPrintable(k.codepoint);
+}
+
+/// Codepoints a keypress can turn into inserted text: printable Unicode
+/// minus DEL and the private-use ranges. Shared by insertKeyText and
+/// editsLine so the two cannot drift apart.
+fn isPrintable(cp: u21) bool {
+    return !(cp < 0x20 or cp == 0x7F or (cp >= 0xE000 and cp <= 0xF8FF) or cp > 0x10FFFF);
+}
+
 /// Copy the key's text into the app arena and INSERT it at the cursor
 /// (§3.2), with automatic matching-bracket insertion: typing `(` inserts
 /// `()` with the cursor between; typing `)` when the auto-inserted `)` is
@@ -1259,9 +1448,8 @@ fn insertKeyText(aa: std.mem.Allocator, line: *std.ArrayList(u8), cursor: *usize
     const text: []const u8 = if (k.text) |t|
         t
     else blk: {
-        const cp = k.codepoint;
-        if (cp < 0x20 or cp == 0x7F or (cp >= 0xE000 and cp <= 0xF8FF) or cp > 0x10FFFF) return;
-        const n = try std.unicode.utf8Encode(cp, &text_buf);
+        if (!isPrintable(k.codepoint)) return;
+        const n = try std.unicode.utf8Encode(k.codepoint, &text_buf);
         break :blk text_buf[0..n];
     };
 
@@ -1335,4 +1523,455 @@ fn runPlain(io: std.Io) !void {
     const stdout = std.Io.File.stdout();
     try stdout.writeStreamingAll(io, hint_plain);
     try stdout.writeStreamingAll(io, "\n");
+}
+
+// ── regression tests ────────────────────
+
+/// The visible text of band row `y`: the cell graphemes in column
+/// order (wide continuations emit nothing, blank cells render as the
+/// default space). Right-trimmed, so the result ends with the row's
+/// last painted cell.
+fn bandRow(buf: *const notui.buffer.Buffer, y: u16, out: []u8) []const u8 {
+    var n: usize = 0;
+    var x: u16 = 0;
+    while (x < buf.width) : (x += 1) {
+        const cell = buf.get(x, y);
+        if (cell.wide or cell.grapheme.len == 0) continue;
+        @memcpy(out[n..][0..cell.grapheme.len], cell.grapheme);
+        n += cell.grapheme.len;
+    }
+    return std.mem.trimEnd(u8, out[0..n], " ");
+}
+
+/// The reverse-video cursor block drawBand paints on the cell under
+/// the cursor.
+const cursor_block: Style = .{ .attrs = .{ .reverse = true } };
+
+/// Ten candidates: a four-row popup window has to scroll to reach the
+/// selected one.
+const many_candidates = [_][]const u8{
+    "aaa", "bbb", "ccc", "ddd", "eee", "fff", "ggg", "hhh", "iii", "jjj",
+};
+
+test "repl band: a midline cursor keeps the styled right tail visible" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var region = try Region.init(arena.allocator(), .{ .height = 2 });
+    defer region.deinit();
+    var spinner: notui.component.Spinner = .{ .label = "evaluating" };
+
+    // Type `(f) ba` and leave `r 42 "s"` behind the cursor: the tail
+    // paints as a plain run, a number run and a string run, which have
+    // to advance across the row instead of overwriting one column.
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(arena.allocator());
+    var cursor: usize = 0;
+    for ("(f) ba") |cp| {
+        try insertKeyText(arena.allocator(), &line, &cursor, .{ .codepoint = @as(u21, cp) });
+    }
+    try line.appendSlice(arena.allocator(), "r 42 \"s\"");
+
+    try drawBand(
+        arena.allocator(),
+        &region,
+        line.items,
+        cursor,
+        null,
+        &spinner,
+        false,
+        .fromNanoseconds(0),
+        null,
+    );
+
+    var row: [512]u8 = undefined;
+    try std.testing.expectEqualStrings("skript> (f) bar 42 \"s\"", bandRow(&region.cur, 0, &row));
+    // Column 8 is the first input column: `r` is the cursor block, `4`
+    // the number run and `"` the string run behind it.
+    try std.testing.expect(region.cur.get(14, 0).style.eql(cursor_block));
+    try std.testing.expect(region.cur.get(16, 0).style.eql(number_style));
+    try std.testing.expect(region.cur.get(19, 0).style.eql(string_style));
+}
+
+test "repl band: moving the cursor left keeps the tail it moved off" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var region = try Region.init(arena.allocator(), .{ .height = 2 });
+    defer region.deinit();
+    var spinner: notui.component.Spinner = .{ .label = "evaluating" };
+
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(arena.allocator());
+    try line.appendSlice(arena.allocator(), "(f) bar 42 \"s\"");
+    // Walk left from the end of the line onto the `4` of the number:
+    // the rest of the number and the string are now the right tail.
+    var cursor: usize = line.items.len;
+    for (0..6) |_| cursor = prevCodepoint(line.items, cursor);
+    try std.testing.expectEqual(@as(usize, 8), cursor);
+
+    try drawBand(
+        arena.allocator(),
+        &region,
+        line.items,
+        cursor,
+        null,
+        &spinner,
+        false,
+        .fromNanoseconds(0),
+        null,
+    );
+
+    var row: [512]u8 = undefined;
+    try std.testing.expectEqualStrings("skript> (f) bar 42 \"s\"", bandRow(&region.cur, 0, &row));
+    try std.testing.expect(region.cur.get(16, 0).style.eql(cursor_block));
+    try std.testing.expect(region.cur.get(17, 0).style.eql(number_style));
+    try std.testing.expect(region.cur.get(19, 0).style.eql(string_style));
+}
+
+test "repl band: a midline backspace keeps the tail it did not touch" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var region = try Region.init(arena.allocator(), .{ .height = 2 });
+    defer region.deinit();
+    var spinner: notui.component.Spinner = .{ .label = "evaluating" };
+
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(arena.allocator());
+    try line.appendSlice(arena.allocator(), "(f) bar 42 \"s\"");
+    // Backspace the `a` of `bar` with the cursor right after `ba`, so
+    // `r 42 "s"` is the tail the frame has to keep legible.
+    var cursor: usize = 6;
+    const start = prevCodepoint(line.items, cursor);
+    @memmove(line.items[start..][0 .. line.items.len - cursor], line.items[cursor..]);
+    line.items.len -= cursor - start;
+    cursor = start;
+
+    try drawBand(
+        arena.allocator(),
+        &region,
+        line.items,
+        cursor,
+        null,
+        &spinner,
+        false,
+        .fromNanoseconds(0),
+        null,
+    );
+
+    var row: [512]u8 = undefined;
+    try std.testing.expectEqualStrings("skript> (f) br 42 \"s\"", bandRow(&region.cur, 0, &row));
+    try std.testing.expect(region.cur.get(13, 0).style.eql(cursor_block));
+    try std.testing.expect(region.cur.get(15, 0).style.eql(number_style));
+    try std.testing.expect(region.cur.get(18, 0).style.eql(string_style));
+}
+
+test "repl band: a cursor inside a string keeps the string's styles around it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var region = try Region.init(arena.allocator(), .{ .height = 2 });
+    defer region.deinit();
+    var spinner: notui.component.Spinner = .{ .label = "evaluating" };
+
+    // `(f) "ab 42 cd" 7` with the cursor parked between `ab` and `42`:
+    // the number INSIDE the literal is string text, the closing quote
+    // still closes it, and the `7` after it is a number again.
+    try drawBand(
+        arena.allocator(),
+        &region,
+        "(f) \"ab 42 cd\" 7",
+        7,
+        null,
+        &spinner,
+        false,
+        .fromNanoseconds(0),
+        null,
+    );
+
+    var row: [512]u8 = undefined;
+    try std.testing.expectEqualStrings("skript> (f) \"ab 42 cd\" 7", bandRow(&region.cur, 0, &row));
+    try std.testing.expect(region.cur.get(15, 0).style.eql(cursor_block));
+    try std.testing.expect(region.cur.get(16, 0).style.eql(string_style));
+    try std.testing.expect(region.cur.get(21, 0).style.eql(string_style));
+    try std.testing.expect(region.cur.get(23, 0).style.eql(number_style));
+}
+
+test "repl band: a cursor inside a line comment keeps the comment's styles" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var region = try Region.init(arena.allocator(), .{ .height = 2 });
+    defer region.deinit();
+    var spinner: notui.component.Spinner = .{ .label = "evaluating" };
+
+    // The `42` behind the cursor is comment text, not a number.
+    try drawBand(
+        arena.allocator(),
+        &region,
+        "(f x) ; note 42 more",
+        12,
+        null,
+        &spinner,
+        false,
+        .fromNanoseconds(0),
+        null,
+    );
+
+    var row: [512]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "skript> (f x) ; note 42 more",
+        bandRow(&region.cur, 0, &row),
+    );
+    try std.testing.expect(region.cur.get(20, 0).style.eql(cursor_block));
+    try std.testing.expect(region.cur.get(21, 0).style.eql(comment_style));
+    try std.testing.expect(region.cur.get(24, 0).style.eql(comment_style));
+}
+
+test "repl band: a cursor inside a block comment keeps the comment's styles" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var region = try Region.init(arena.allocator(), .{ .height = 2 });
+    defer region.deinit();
+    var spinner: notui.component.Spinner = .{ .label = "evaluating" };
+
+    // `#| blk 42 |# x`: the number and the closing `|#` are comment text,
+    // and only the `x` after it is ordinary code.
+    try drawBand(
+        arena.allocator(),
+        &region,
+        "#| blk 42 |# x",
+        6,
+        null,
+        &spinner,
+        false,
+        .fromNanoseconds(0),
+        null,
+    );
+
+    var row: [512]u8 = undefined;
+    try std.testing.expectEqualStrings("skript> #| blk 42 |# x", bandRow(&region.cur, 0, &row));
+    try std.testing.expect(region.cur.get(14, 0).style.eql(cursor_block));
+    try std.testing.expect(region.cur.get(15, 0).style.eql(comment_style));
+    try std.testing.expect(region.cur.get(18, 0).style.eql(comment_style));
+    try std.testing.expect(region.cur.get(20, 0).style.eql(.{}));
+}
+
+test "repl band: a string spanning rows styles the continuation row" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var region = try Region.init(arena.allocator(), .{ .height = 2 });
+    defer region.deinit();
+    var spinner: notui.component.Spinner = .{ .label = "evaluating" };
+
+    // The quote opens on the row above, so `cd 7"` on the ACTIVE row is
+    // still string text and the `9` after it is a number again.
+    try drawBand(
+        arena.allocator(),
+        &region,
+        "\"ab\ncd 7\" ef 9",
+        6,
+        null,
+        &spinner,
+        false,
+        .fromNanoseconds(0),
+        null,
+    );
+
+    var row: [512]u8 = undefined;
+    try std.testing.expectEqualStrings("    · cd 7\" ef 9", bandRow(&region.cur, 0, &row));
+    try std.testing.expect(region.cur.get(6, 0).style.eql(string_style));
+    try std.testing.expect(region.cur.get(8, 0).style.eql(cursor_block));
+    try std.testing.expect(region.cur.get(9, 0).style.eql(string_style));
+    try std.testing.expect(region.cur.get(10, 0).style.eql(string_style));
+    try std.testing.expect(region.cur.get(15, 0).style.eql(number_style));
+}
+
+test "repl token: refuses a token inside a string literal" {
+    // An open string: the token is literal text, never a symbol.
+    try std.testing.expectEqualStrings("", tokenAtCursor("\"hello wor", 10));
+    // The escaped quote does not close the string, so the cursor is
+    // still inside it.
+    try std.testing.expectEqualStrings("", tokenAtCursor("\"a\\\"b wor", 8));
+    // A closed string hands completion back to the text after it.
+    try std.testing.expectEqualStrings("wor", tokenAtCursor("\"a\\\"b\" wor", 10));
+    try std.testing.expectEqualStrings("ab", tokenAtCursor("(+ \"x\" ab", 9));
+    // A string spans rows: skript's lexer stops only at the matching
+    // quote (Token.zig:373-391), so an open quote on an earlier
+    // continuation row still owns the cursor.
+    try std.testing.expectEqualStrings("", tokenAtCursor("\"ab\ncd wor", 10));
+}
+
+test "repl token: refuses a token inside a comment" {
+    // `;` runs to the newline…
+    try std.testing.expectEqualStrings("", tokenAtCursor("(f x) ; note wor", 15));
+    // …and the next continuation row is plain text again.
+    try std.testing.expectEqualStrings("wor", tokenAtCursor("(f x) ; note\nwor", 16));
+    // A block comment swallows the cursor, on one row or across rows.
+    try std.testing.expectEqualStrings("", tokenAtCursor("#| block wor", 12));
+    try std.testing.expectEqualStrings("", tokenAtCursor("#| a\nb wor", 9));
+    // A closed block comment hands completion back.
+    try std.testing.expectEqualStrings("wor", tokenAtCursor("#| c |# wor", 11));
+}
+
+test "repl token: refuses a token the lexer reads as a number" {
+    try std.testing.expectEqualStrings("", tokenAtCursor("(+ 12", 5));
+    try std.testing.expectEqualStrings("", tokenAtCursor("(+ 1+", 5));
+    // A sign starts a number when a digit, `inf` or `nan` follows it
+    // (skript Token.zig:141-147), so neither completes as a symbol.
+    try std.testing.expectEqualStrings("", tokenAtCursor("(+ +1", 5));
+    try std.testing.expectEqualStrings("", tokenAtCursor("(+ -inf", 7));
+    // A bare `+` is an operator symbol, and `.` is NOT a delimiter in
+    // skript (Token.zig:233-236): `x.wor` is one qualified-name token.
+    try std.testing.expectEqualStrings("+", tokenAtCursor("(f +", 4));
+    try std.testing.expectEqualStrings("x.wor", tokenAtCursor("(f x.wor", 8));
+    // A plain symbol still completes.
+    try std.testing.expectEqualStrings("x", tokenAtCursor("(f x", 4));
+}
+
+test "repl completion: accepting mid-line keeps the text after the cursor" {
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(std.testing.allocator);
+    try line.appendSlice(std.testing.allocator, "(f) ba z-qux");
+    var cursor: usize = 6; // right after `ba`, with ` z-qux` behind it
+    const s: notui.component.Suggestions = .{ .candidates = &.{ "bar", "baz" } };
+
+    try acceptSuggestion(std.testing.allocator, &line, &cursor, s);
+
+    try std.testing.expectEqualStrings("(f) bar z-qux", line.items);
+    try std.testing.expectEqual(@as(usize, 7), cursor);
+}
+
+test "repl completion: a refused accept leaves the query and the cursor intact" {
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(std.testing.allocator);
+    // Size the buffer to EXACTLY the query before filling it: a spare
+    // slot would let the one-byte growth succeed in place, and the point
+    // is to make the reservation itself the allocation that fails.
+    try line.ensureTotalCapacityPrecise(std.testing.allocator, "(f) ba z-qux".len);
+    try line.appendSlice(std.testing.allocator, "(f) ba z-qux");
+    var cursor: usize = 6; // right after `ba`, with ` z-qux` behind it
+    // Refuse both allocation and resize/remap: growth goes through
+    // realloc, and a DebugAllocator remap can absorb a small growth.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    failing.resize_fail_index = 0;
+    const s: notui.component.Suggestions = .{ .candidates = &.{ "bar", "baz" } };
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        acceptSuggestion(failing.allocator(), &line, &cursor, s),
+    );
+
+    // A refused accept is a no-op: the query and the cursor are exactly
+    // what the user typed.
+    try std.testing.expectEqualStrings("(f) ba z-qux", line.items);
+    try std.testing.expectEqual(@as(usize, 6), cursor);
+}
+
+test "repl band: the band never outgrows the terminal rows" {
+    // A tall terminal gets the whole popup; a short one keeps the input
+    // and status rows and spends what is left on the popup.
+    try std.testing.expectEqual(@as(u16, 10), bandHeight(24, max_rows));
+    try std.testing.expectEqual(@as(u16, 6), bandHeight(6, max_rows));
+    try std.testing.expectEqual(@as(u16, 3), bandHeight(6, 1));
+    // Two rows are input + status: no popup fits.
+    try std.testing.expectEqual(@as(u16, 2), bandHeight(2, max_rows));
+    // One row is the input alone, and the band is never exceeded.
+    try std.testing.expectEqual(@as(u16, 1), bandHeight(1, max_rows));
+    try std.testing.expectEqual(@as(u16, 0), bandHeight(0, max_rows));
+    // A closed popup is the base band, clamped the same way.
+    try std.testing.expectEqual(@as(u16, 2), bandHeight(24, 0));
+    try std.testing.expectEqual(@as(u16, 1), bandHeight(1, 0));
+}
+
+test "repl band: a six-row terminal windows the popup and keeps the status row" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    // The popup materializes its rows into this scratch THROUGH
+    // drawBand's allocator (the arena), so it is freed the same way.
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(arena.allocator());
+    var region = try Region.init(arena.allocator(), .{ .height = 6 });
+    defer region.deinit();
+    var spinner: notui.component.Spinner = .{ .label = "evaluating" };
+    const s: notui.component.Suggestions = .{
+        .candidates = &many_candidates,
+        .selected = 9, // below a four-row window: the list must scroll
+        .max_rows = max_rows,
+        .scratch = &scratch,
+    };
+
+    try drawBand(
+        arena.allocator(),
+        &region,
+        "(f x) b",
+        6,
+        s,
+        &spinner,
+        false,
+        .fromNanoseconds(0),
+        null,
+    );
+
+    var row: [512]u8 = undefined;
+    // The input row is untouched by the popup.
+    try std.testing.expectEqualStrings("skript> (f x) b", bandRow(&region.cur, 0, &row));
+    // Four popup rows fit between the input and the status row, and the
+    // window scrolls so the selected candidate is the last one shown.
+    const anchor = " " ** "skript> (f x) ".len;
+    try std.testing.expectEqualStrings(anchor ++ "ggg", bandRow(&region.cur, 1, &row));
+    try std.testing.expectEqualStrings(anchor ++ "hhh", bandRow(&region.cur, 2, &row));
+    try std.testing.expectEqualStrings(anchor ++ "iii", bandRow(&region.cur, 3, &row));
+    try std.testing.expectEqualStrings(anchor ++ "jjj", bandRow(&region.cur, 4, &row));
+    try std.testing.expect(region.cur.get(14, 4).style.eql(cursor_block));
+    // The status row is the band's last row, never crowded out.
+    try std.testing.expectEqualStrings(idle_status, bandRow(&region.cur, 5, &row));
+}
+
+test "repl band: a two-row terminal keeps input and status, the popup gets no rows" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    // Owned by the same arena drawBand allocates through (see above).
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(arena.allocator());
+    var spinner: notui.component.Spinner = .{ .label = "evaluating" };
+    const s: notui.component.Suggestions = .{
+        .candidates = &many_candidates,
+        .selected = 0,
+        .max_rows = max_rows,
+        .scratch = &scratch,
+    };
+    var row: [512]u8 = undefined;
+
+    {
+        var region = try Region.init(arena.allocator(), .{ .height = 2 });
+        defer region.deinit();
+        try drawBand(
+            arena.allocator(),
+            &region,
+            "(f x) b",
+            6,
+            s,
+            &spinner,
+            false,
+            .fromNanoseconds(0),
+            null,
+        );
+        try std.testing.expectEqualStrings("skript> (f x) b", bandRow(&region.cur, 0, &row));
+        try std.testing.expectEqualStrings(idle_status, bandRow(&region.cur, 1, &row));
+    }
+    {
+        // A one-row terminal keeps the input row: the status row has
+        // nowhere to go and must not corrupt it.
+        var region = try Region.init(arena.allocator(), .{ .height = 1 });
+        defer region.deinit();
+        try drawBand(
+            arena.allocator(),
+            &region,
+            "(f x) b",
+            6,
+            s,
+            &spinner,
+            false,
+            .fromNanoseconds(0),
+            null,
+        );
+        try std.testing.expectEqualStrings("skript> (f x) b", bandRow(&region.cur, 0, &row));
+    }
 }
