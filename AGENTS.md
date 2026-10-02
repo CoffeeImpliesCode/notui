@@ -8,7 +8,7 @@ Zig 0.16 inline-first terminal UI toolkit. It provides cell-buffer primitives, b
 - External `zg` provides Unicode 16 width, grapheme, and text support; keep it distinct from local hand-copied zigzag/libvaxis source. `skript` is vendored at `vendor/skript` (the Lisp runtime behind the REPL example) — re-vendor with the `jj file list | rsync` recipe in `build.zig.zon`; do not edit it in place.
 - `src/main.zig` is the `std.process.Init` executable entry; `src/root.zig` is the library root and holds unit tests. `build.zig` defines module, executable, run, and test steps.
 - Use `jj`, not Git commands.
-- Use locally built analysis tools when available: `~/.local/bin/zlint`, `~/tools/ziglint`, `~/tools/zbc`, and `~/tools/zcov`; they may include setup-specific patches.
+- Use the analysis tools that are on `PATH`: `zlint`, `ziglint`, `zbc`, and `zcov`; a locally built one may carry setup-specific patches.
 
 ## Conventions
 
@@ -27,7 +27,7 @@ zig build           # debug build: zig-out/bin/notui
 zig build run       # build and run
 zig build test      # unit tests
 zig fmt --check .   # format check
-zlint               # prefer ~/.local/bin/zlint
+zlint               # prefer a locally built zlint when one is installed
 zig-gate            # all gates; zbc advisory unless ZBC_STRICT=1; --cov is optional
 jj st               # working-copy status
 ```

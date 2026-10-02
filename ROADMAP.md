@@ -97,9 +97,12 @@ remote is `https://github.com/CoffeeImpliesCode/notui` (private).
 | A1 | `PORTING.md`: remote URL, the commit Phase 6 was ported from, and the four-rule frame contract quoted once for both sides | zomp's blocker §1 updated with a verifiable commit id |
 | A2 | Mark which public types are stable port surface (`Buffer`, `Region`, `App`, `View`, `Cmd`, `Context`, `event`) and which are internal | a doc section the port can cite; no API change |
 
-## Status
+## Status (integration baseline, 625 tests)
 
-Every item above is implemented and verified on this host. The evidence:
+Every item above was implemented and verified on this host. These numbers closed
+this plan. They are a historical integration baseline: they predate the deep QA
+pass and the visual risks that came out of it, so they are not a current QA
+verdict. The evidence for that baseline:
 
 - `zig build test` — 625/625 pass in Debug and ReleaseSafe.
 - `zig-gate` — formatting, build, tests, AST checks, and zlint pass.
@@ -120,8 +123,11 @@ Every item above is implemented and verified on this host. The evidence:
   live file exercised capture/kill/yank/yank-pop/undo/redo and the
   grapheme cursor boundary.
 
-No implementation items remain open. `NEXT.md` records the key text
-synthesis contract and explains the advisory `zbc` reports.
+No implementation item of this plan is open. `NEXT.md` records the key text
+synthesis contract and explains the advisory `zbc` reports. The latest QA status,
+including the red bottom-row tests, the open width-reflow and height-archive
+risks, and the current gate state, is in
+[`README.md`](README.md#post-repair-deep-qa-2026-10-0102).
 
 ## Non-goals
 

@@ -17,6 +17,8 @@ graphify-out/
 /agent-notes
 
 # NFS leaves a `.nfsXXXX` copy of a file it has unlinked while another
-# process still has it open (here: the code indexer). It cannot be
-# removed, so never snapshot it.
+# process still has it open. It cannot be removed, so never snapshot it.
 .nfs*
+
+# Local handoff note (session state, never commit)
+HANDOFF.md
