@@ -1,22 +1,42 @@
 //! ztex.atom — superflat LaTeX atom (AST).
 //!
-//! Pattern: house superflat AST (cf. `~/projects/{vain,skript}`). The whole
-//! tree is one flat array of fixed-size AoS nodes; child links are contiguous
-//! index runs; source provenance is via a parallel token table with byte
-//! offsets. No pointers, no pointer chasing, no per-node allocation.
+//! The whole tree is one flat array of fixed-size AoS nodes; child links are
+//! contiguous index runs; source provenance is via a parallel token table
+//! with byte offsets. No pointers, no pointer chasing, no per-node
+//! allocation.
 //!
 //! Duplication protocol: a parent's `createNode` re-appends copies of its
 //! immediate children immediately before itself, so a node's child run is
 //! always contiguous. Each subtree appears in the pool more than once; only
 //! the root-reachable chain is the tree.
+//!
+//! This module types the tree, the `Node.data` codecs, and the `Ast`
+//! pool with its builders and readers. `ztex.parse` fills an `Ast` and
+//! `ztex.layout` consumes one, and `Ast.init` with `pushToken`,
+//! `createLeaf` and `createNode` build one for a caller that does its own.
+//! An `Ast` borrows its `src` and owns its two pools, so the source must
+//! outlive it and one `deinit` releases it.
+//!
+//! Every `Node.data` field is an opaque `u32` here, read through what its
+//! tag names. A bit-packed tag names one of the inline codecs below; every
+//! other tag names its `data` domain in that variant's own comment under
+//! `Tag`. A decoder needs no write access to the node.
 
 const std = @import("std");
 const token = @import("token.zig");
 
-// Re-export the provenance types so consumers import only ztex.atom.
+/// Lexical token kind; the re-exported `ztex.token.Tag`.
 pub const TokenTag = token.Tag;
+
+/// A lexed token with its byte span; the re-exported `ztex.token.Token`.
 pub const Token = token.Token;
+
+/// A half-open byte range `[start, end)` into the source; the re-exported
+/// `ztex.token.Span`. Re-exported so consumers need only `ztex.atom`.
 pub const Span = token.Span;
+
+/// The zero-width span at offset 0, used where a node spans no tokens and
+/// `Ast.span` cannot name a range.
 pub const null_span: token.Span = .{ .start = 0, .end = 0 };
 
 /// Math/text font style of a character or text run.
@@ -39,38 +59,70 @@ pub const CharStyle = enum(u8) {
     mono,
 };
 
-/// Big operator (rendered large; scripts become limits in display style).
+/// Which big operator an `.op` node's `data` names. Layout renders it at the
+/// large display size and turns its scripts into over/under limits in display
+/// style, beside the base otherwise.
+///
+/// Each tag is the TeX command without its backslash — `\sum`, `\int`,
+/// `\prod`, `\coprod`, `\bigcup`, `\bigcap`, `\bigsqcup`, `\oint` — and
+/// layout maps it to the display codepoint it draws (∫, ∮, ∐ and so on). The
+/// ordinal is the `data` encoding, so the order is part of the contract.
 pub const BigOp = enum(u8) {
+    /// `\sum` — n-ary summation, drawn ∑.
     sum,
+    /// `\int` — n-ary integral, drawn ∫.
     int,
+    /// `\prod` — n-ary product, drawn ∏.
     prod,
+    /// `\coprod` — n-ary coproduct, drawn ∐.
     coprod,
+    /// `\bigcup` — n-ary union, drawn ⋃.
     bigcup,
+    /// `\bigcap` — n-ary intersection, drawn ⋂.
     bigcap,
+    /// `\bigsqcup` — n-ary square union, drawn ⨆.
     bigsqcup,
+    /// `\oint` — n-ary contour integral, drawn ∮.
     oint,
 };
 
-/// TeX math style. Layout's `Style` is an alias of this, so the parser can
-/// pack a forced style into a `fraction` node's `data` or a `.mathstyle`
-/// node's `data` without a layout import.
+/// TeX math style; `ztex.layout.Style` is an alias of this, so the parser
+/// can pack a forced style into a `fraction` node's `data` or a
+/// `.mathstyle` node's `data` without a layout import. The ordinal is part of
+/// both encodings, so the four values keep these numbers.
 pub const MathStyle = enum(u8) {
+    /// Display: a formula set on its own line, at the current font size.
     display = 0,
+    /// Text: a formula set inline inside running text, with the tighter gaps
+    /// that implies.
     text = 1,
+    /// Script: the style, size and gaps of a superscript or subscript.
     script = 2,
+    /// Script-script: the same for a script of a script.
     script_script = 3,
 };
 
 /// Math environment kinds, packed into an `.env` node's `data` low bits.
+/// The ordinals are the encoding, so they keep these numbers.
 pub const EnvKind = enum(u8) {
+    /// `matrix`: a bare array of rows, no delimiters.
     matrix = 0,
+    /// `pmatrix`: rows wrapped in parentheses.
     pmatrix = 1,
+    /// `bmatrix`: rows wrapped in square brackets.
     bmatrix = 2,
+    /// `Bmatrix`: rows wrapped in curly braces.
     Bmatrix = 3,
+    /// `vmatrix`: rows wrapped in a single vertical bar.
     vmatrix = 4,
+    /// `Vmatrix`: rows wrapped in a double vertical bar.
     Vmatrix = 5,
+    /// `cases`: a two-column brace, the second column set in text style.
     cases = 6,
+    /// `aligned`: points that align on the `&` separators, no delimiters.
     aligned = 7,
+    /// `array`: an environment that takes an explicit column spec — the only
+    /// kind for which `envSpecCount` is non-zero.
     array = 8,
 };
 
@@ -84,37 +136,61 @@ pub const EnvKind = enum(u8) {
 ///             edge). Max 6 spec columns; beyond the spec, columns align
 ///             centered (TeX: extra columns default to c).
 pub const EnvBits = struct {
+    /// Bits 0-3 of `data`; the mask leaves room for every `EnvKind`.
     pub const kind_mask: u32 = 0xF;
+    /// Bit offset of the packed colspec length.
     pub const count_shift: u5 = 4;
+    /// Bit offset of column 0's colspec nibble.
     pub const col_shift: u5 = 8;
+    /// Mask isolating one colspec nibble; 4-7 are not assigned by `envData`.
     pub const col_nibble: u32 = 0xF;
+    /// Left-aligned column (`l`).
     pub const col_l: u32 = 0;
+    /// Centered column (`c`; also the reading for an unassigned nibble).
     pub const col_c: u32 = 1;
+    /// Right-aligned column (`r`).
     pub const col_r: u32 = 2;
+    /// Vertical rule drawn before this column (`|`).
     pub const col_rule: u32 = 3;
+    /// Colspec columns the packed field can hold: 6 nibbles fill bits 8-31,
+    /// so `envColSpec` names no column at or beyond this index.
     pub const max_spec_cols: usize = 6;
 };
 
 /// The environment kind of an `.env` node.
+///
+/// `data` must name an `EnvKind` in bits 0-3 — every `envData` result does,
+/// and so does every node `ztex.parse` builds. A `data` whose low nibble is
+/// 9-15 names no environment and traps in a checked build mode.
 pub inline fn envKind(data: u32) EnvKind {
     return @enumFromInt(data & EnvBits.kind_mask);
 }
 
-/// Number of array colspec nibbles packed in `data` (0 for non-array envs).
+/// Number of array colspec nibbles `data` claims, 0-15 from bits 4-7.
+///
+/// `envData` never writes above `EnvBits.max_spec_cols`; a hand-built `data`
+/// may claim more, and `envColSpec` then answers `null` for the columns past
+/// the six nibbles the field actually holds.
 pub inline fn envSpecCount(data: u32) usize {
     return (data >> EnvBits.count_shift) & 0xF;
 }
 
-/// The packed colspec nibble for column `i`, or null beyond the packed
-/// spec (callers default to centered alignment).
+/// The packed colspec nibble for column `i`, or `null` when `data` carries
+/// no nibble for it — beyond the packed count, at or past
+/// `EnvBits.max_spec_cols`, or for a non-`array` environment (which packs no
+/// colspec). A `null` means "no spec for this column"; callers align such a
+/// column centered.
 pub inline fn envColSpec(data: u32, i: usize) ?u32 {
     if (i >= envSpecCount(data)) return null;
+    if (i >= EnvBits.max_spec_cols) return null;
     return (data >> (EnvBits.col_shift + @as(u5, @intCast(4 * i)))) & EnvBits.col_nibble;
 }
 
 /// Pack an `.env` node's `data` from the kind and the array colspec (a byte
-/// string of l/c/r/| chars; unknown chars count as centered). The spec is
-/// truncated to `max_spec_cols` columns.
+/// string of l/c/r/| chars; any other char counts as centered). `colspec`
+/// is truncated to `EnvBits.max_spec_cols` columns, and the packed count is
+/// the truncated length — so a longer spec decodes as "no spec" past column
+/// 5, and `envColSpec` answers `null` there.
 pub inline fn envData(kind: EnvKind, colspec: []const u8) u32 {
     var data: u32 = @intFromEnum(kind);
     const n = @min(colspec.len, EnvBits.max_spec_cols);
@@ -131,9 +207,12 @@ pub inline fn envData(kind: EnvKind, colspec: []const u8) u32 {
     return data;
 }
 
-/// Presence bits stored in a `script` node's `data`.
+/// Presence bits stored in a `script` node's `data`: at least one of a
+/// superscript or subscript is attached.
 pub const ScriptBits = struct {
+    /// The base carries a `^` superscript.
     pub const sup: u32 = 1 << 0;
+    /// The base carries a `_` subscript.
     pub const sub: u32 = 1 << 1;
 };
 
@@ -144,19 +223,29 @@ pub const ScriptBits = struct {
 /// rule_thickness or \atop's no rule). A plain \frac/\atop keeps data 0/1 —
 /// byte-identical to the pre-feature encoding.
 pub const FractionBits = struct {
+    /// The fraction draws a rule line (\frac as against \atop).
     pub const line: u32 = 1 << 0;
+    /// Bit offset of the forced math-style code.
     pub const forced_shift: u5 = 1;
+    /// Mask isolating the forced math-style code: 0 = unset, otherwise
+    /// `@intFromEnum(MathStyle) + 1`, so 1-4 name the four styles.
     pub const forced_mask: u32 = 0xF;
+    /// \cfrac lays both parts out in display style.
     pub const parts_display: u32 = 1 << 5;
     /// \genfrac's explicit rule thickness in bits 6-21 (Q8.8 fixed point:
-    /// 1/256 pt resolution, up to 255.99 pt). Zero means "no explicit
-    /// thickness": \frac/\atop use the font's rule_thickness (or no rule).
+    /// 1/256 pt resolution). Zero means "no explicit thickness":
+    /// \frac/\atop use the font's rule_thickness (or no rule).
     pub const thick_shift: u5 = 6;
+    /// Mask isolating the Q8.8 thickness, 0-65535.
     pub const thick_mask: u32 = 0xFFFF;
+    /// Largest thickness the packed field holds: `thick_mask` in Q8.8,
+    /// 255.99609375 pt. `fracThicknessBits` clamps a larger request here.
+    pub const thick_max_pt: f32 = @as(f32, @floatFromInt(thick_mask)) / 256.0;
 };
 
 /// Encode fraction `data` from the line flag, the optional forced style
 /// (\dfrac → .display, \tfrac → .text), and \cfrac's parts-at-display flag.
+/// The thickness bits are left at 0; `fracThicknessBits` ORs them in.
 pub inline fn fracData(line: bool, forced: ?MathStyle, parts_display: bool) u32 {
     const code: u32 = if (forced) |f| @as(u32, @intFromEnum(f)) + 1 else 0;
     return @intFromBool(line) |
@@ -169,10 +258,13 @@ pub inline fn fracLine(data: u32) bool {
     return data & FractionBits.line != 0;
 }
 
-/// The forced style of a \dfrac/\tfrac/\cfrac fraction; null for \frac/\atop.
+/// The forced style of a \dfrac/\tfrac/\cfrac fraction; `null` when the
+/// fraction carries none — a plain \frac/\atop, and also a code naming no
+/// `MathStyle`, which no `fracData` result produces.
 pub inline fn fracForcedStyle(data: u32) ?MathStyle {
     const code = (data >> FractionBits.forced_shift) & FractionBits.forced_mask;
     if (code == 0) return null;
+    if (code > @typeInfo(MathStyle).@"enum".fields.len) return null;
     return @enumFromInt(code - 1);
 }
 
@@ -183,17 +275,24 @@ pub inline fn fracPartsDisplay(data: u32) bool {
 }
 
 /// Encode a \genfrac rule thickness (pt) as Q8.8 in the thick bits; 0 for
-/// "no explicit thickness". Values are clamped to [0, 255.99]; a non-rule
-/// genfrac (\atop-style) carries thickness 0 like a plain \frac/\atop.
+/// "no explicit thickness". `pt` is clamped in points to
+/// `[0, FractionBits.thick_max_pt]` before the conversion, so a request
+/// outside the field — `1e10`, or `std.math.inf(f32)` — saturates at the
+/// bound instead of overflowing the integer cast, and a negative value or a
+/// NaN encodes 0. A non-rule genfrac (\atop-style) carries thickness 0 like
+/// a plain \frac/\atop.
 pub inline fn fracThicknessBits(pt: f32) u32 {
-    const q: i32 = @intFromFloat(@round(@max(pt, 0) * 256.0));
-    return (@as(u32, @intCast(@min(q, 0xFFFF))) << FractionBits.thick_shift) &
+    if (std.math.isNan(pt)) return 0;
+    const clamped = @min(@max(pt, 0.0), FractionBits.thick_max_pt);
+    const q: u32 = @intFromFloat(@round(clamped * 256.0));
+    return (q << FractionBits.thick_shift) &
         (FractionBits.thick_mask << FractionBits.thick_shift);
 }
 
 /// The \genfrac rule thickness in pt (absolute TeX dimension — layout does
 /// NOT scale it with the font size); 0 when the fraction has no explicit
-/// thickness (plain \frac/\atop, or a 0pt genfrac).
+/// thickness (plain \frac/\atop, or a 0pt genfrac). Total: every bit
+/// pattern decodes, the range being `[0, FractionBits.thick_max_pt]`.
 pub inline fn fracThickness(data: u32) f32 {
     const q: i32 = @bitCast((data >> FractionBits.thick_shift) & FractionBits.thick_mask);
     return @as(f32, @floatFromInt(q)) / 256.0;
@@ -215,20 +314,35 @@ pub const LimitsBits = struct {
     pub const value_mask: u32 = 0x1FFF_FFFF;
 };
 
-/// Atom (node) tag.
+/// Atom (node) tag. `Node.data` is tag-specific. A bit-packed tag names
+/// its inline codec — `ScriptBits` for `.script`, `FractionBits` for
+/// `.fraction`, `LimitsBits` for `.op`/`.opname`, `EnvBits` for `.env` —
+/// and every other tag names its `data` domain in that variant's own
+/// comment below.
 pub const Tag = enum(u8) {
-    /// a sequence of sibling atoms; children = the atoms in order
+    /// a sequence of sibling atoms; children = the atoms in order. `data` 0
+    /// is an ordinary row: what `ztex.parse` emits for plain source, and
+    /// the only value a caller builds. A nonzero `data` is reserved
+    /// parser/layout metadata, and this module names no codec for it.
+    /// `ztex.layout` builds a construct only from the markers it handles,
+    /// so a nonzero value promises no layout of its own. A caller must not
+    /// manufacture one, nor read one as a domain of its own.
     row,
     /// `{ ... }`; exactly 1 child
     group,
-    /// a glyph; leaf. Codepoint re-read from the source span. The effective
-    /// font style comes from the nearest enclosing `styled` node.
+    /// a glyph; leaf. The codepoint is re-read from the source span when
+    /// `data` is 0 — and `data` holds an explicit codepoint instead when
+    /// the parser synthesizes the glyph from a command (`\alpha`, `\cdot`,
+    /// an environment delimiter, an operator word's letters) or a caller
+    /// builds the leaf directly. The effective font style comes from the
+    /// nearest enclosing `styled` node.
     char,
     /// `base^sup_sub`; children[0]=base, [1]=sup, [2]=sub (null if absent)
     script,
     /// `\frac{num}{den}` / `\atop`; children[0]=num, [1]=den; data: line flag
     fraction,
-    /// horizontal space (\, \; \quad); leaf; data: width_em as Q16.16
+    /// horizontal space (\, \; \quad); leaf; data: width_em as Q16.16 — the
+    /// `emToFixed`/`fixedToEm` codec, not an ordinal
     space,
     /// `\text{...}`; leaf; raw bytes re-read from source span; data: CharStyle
     text,
@@ -250,7 +364,10 @@ pub const Tag = enum(u8) {
     /// `\left <delim> ... \right <delim>`: children [open?, inner, close?]
     /// where open/close are delimiter char leaves (absent for `\left.` /
     /// `\right.`); the inner is the delimited row. Layout stretches the
-    /// delimiters to cover the inner's height.
+    /// delimiters to cover the inner's height. `data` 0 is that
+    /// auto-sizing pair; 1-4 is a `\big \Big \bigg \Bigg` ladder level, whose
+    /// node carries a SINGLE delimiter child and no inner for
+    /// `ztex.layout` to size by that entry.
     left,
     /// `\overline{x}` / `\underline{x}`: 1 child = the content (a single
     /// atom or braced group); `data` = 0 over / 1 under. Layout lays the
@@ -289,78 +406,110 @@ pub const Tag = enum(u8) {
     env,
 };
 
-/// A flat, fixed-size AST node.
+/// A flat, fixed-size AST node. A node stores indices only; the pool is the
+/// `Ast`, and a node value copied out of it stays valid as long as the pool
+/// is. Reads are bounds-checked by the pool, so an index a caller did not
+/// get from `createNode`/`createLeaf`/`child` is out of contract.
 pub const Node = struct {
     tag: Tag,
     /// index of the first token this node spans (into Ast.tokens)
     first_token: u32,
     /// number of tokens this node spans
     num_tokens: u32,
-    /// index of the first child (into Ast.nodes); 0 = null/leaf
+    /// index of the first child (into Ast.nodes); `null_node` = null/leaf
     first_child: u32,
     /// number of children in the contiguous run starting at `first_child`
     num_children: u16,
-    /// tag-specific scalar payload (style, width, line flag)
+    /// tag-specific payload, read through the codec the `Tag` names
     data: u32,
 };
 
-/// Sentinel "no child / no node" index.
+/// Sentinel "no child / no node" index, valid for `Node.first_child` and for
+/// any index a caller may hold to mean "absent".
 pub const null_node: u32 = 0;
 
 /// Encode a width-in-em as Q16.16 fixed point (for `space` node data).
+/// `em` must lie in the signed Q16.16 range, `[-32768, 32767.99998]`; the
+/// parser only ever encodes glue below 1em. A value outside it traps in a
+/// checked build mode.
 pub inline fn emToFixed(em: f32) u32 {
     return @bitCast(@as(i32, @intFromFloat(em * 65536.0)));
 }
 
-/// Decode a Q16.16 fixed-point width-in-em back to f32.
+/// Decode a Q16.16 fixed-point width-in-em back to f32. Total: the sign bit
+/// is the Q16.16 sign, so the range is the encoding's own.
 pub inline fn fixedToEm(v: u32) f32 {
     return @floatCast(@as(f64, @floatFromInt(@as(i32, @bitCast(v)))) / 65536.0);
 }
 
 /// The superflat AST: source + parallel token table + flat node pool.
 ///
-/// Owns nothing beyond the two ArrayLists; the caller provides `gpa`. Free
-/// with `deinit`. Node addresses are stable for the lifetime of the Ast (the
-/// pool is append-only).
+/// `Ast` owns `tokens` and `nodes` and allocates them from the `gpa` given
+/// to `init`; `src` is borrowed, never copied, so it must outlive the `Ast`
+/// and every `Span` taken from one. Copying an `Ast` copies both pool
+/// handles, not the pools, so a copy is not a second owner and must not be
+/// `deinit`'d separately — exactly one `deinit` per `init`. The pool is
+/// append-only, so a `Node` copied out of `node` stays valid until then.
+///
+/// Appending invalidates previously returned indices only in the sense that
+/// they now name more siblings; every index already handed out keeps
+/// naming its own node. A stable address is not part of the contract: take
+/// indices, not pointers.
 pub const Ast = struct {
+    /// Allocator for `tokens` and `nodes`; the caller owns it and outlives
+    /// the `Ast`.
     gpa: std.mem.Allocator,
+    /// The formula bytes; borrowed from the caller, never copied.
     src: []const u8,
+    /// Lexed tokens, parallel to `src`.
     tokens: std.ArrayList(token.Token) = .empty,
+    /// Node pool, in the duplication order `createNode` writes.
     nodes: std.ArrayList(Node) = .empty,
     /// index of the root node (the whole formula), set by the parser
     root: u32 = 0,
 
-    /// Create an empty Ast over `src`. The caller must pre-lex into `tokens`
-    /// before parsing (see ztex.parse.lexer).
+    /// Create an empty Ast over `src`, with no tokens and no nodes. The
+    /// caller must pre-lex into `tokens` before parsing (see
+    /// `ztex.parse.lexer`).
     pub fn init(gpa: std.mem.Allocator, src: []const u8) Ast {
         return .{ .gpa = gpa, .src = src };
     }
 
+    /// Release `tokens` and `nodes`. `gpa` and `src` are not released. The
+    /// Ast and every index and span taken from it are invalid afterward, and
+    /// a second call is a double free.
     pub fn deinit(self: *Ast) void {
         self.tokens.deinit(self.gpa);
         self.nodes.deinit(self.gpa);
         self.* = undefined;
     }
 
-    /// Preallocate the token table (~src.len/4 tokens, then nodes).
+    /// Preallocate the token table and the node pool. Capacity-only: a later
+    /// append past either reservation still succeeds by growing. On error the
+    /// reservation that already succeeded stands; the `Ast` stays usable.
     pub fn reserve(self: *Ast, token_count: usize, node_count: usize) !void {
         try self.tokens.ensureTotalCapacity(self.gpa, token_count);
         try self.nodes.ensureTotalCapacity(self.gpa, node_count);
     }
 
-    /// Append a token; returns nothing (caller tracks indices via items.len).
+    /// Append a token and return nothing; the new token's index is
+    /// `tokens.items.len - 1` afterwards. On `error.OutOfMemory` the token
+    /// table is unchanged.
     pub fn pushToken(self: *Ast, t: token.Token) !void {
         try self.tokens.append(self.gpa, t);
     }
 
-    /// Append a single node; returns its index.
+    /// Append a single node and return its index. On `error.OutOfMemory`
+    /// nothing is appended, so the returned index is not produced.
     pub fn pushNode(self: *Ast, n: Node) !u32 {
         const idx: u32 = @intCast(self.nodes.items.len);
         try self.nodes.append(self.gpa, n);
         return idx;
     }
 
-    /// Append a contiguous run of nodes; returns the index of the first.
+    /// Append a contiguous run of nodes and return the index of the first;
+    /// index `i` of `ns` lands at `first + i`. On `error.OutOfMemory`
+    /// nothing is appended.
     pub fn pushNodes(self: *Ast, ns: []const Node) !u32 {
         const first: u32 = @intCast(self.nodes.items.len);
         try self.nodes.appendSlice(self.gpa, ns);
@@ -369,6 +518,17 @@ pub const Ast = struct {
 
     /// Create a node with a contiguous child run: copies `children` into the
     /// pool, then appends the parent pointing at that run.
+    ///
+    /// `children` are COPIES, not links — the caller's originals stay
+    /// independent, and this is what lets each subtree appear in the pool
+    /// more than once. `first_token`/`num_tokens` are the token range the
+    /// parser has already consumed for this node.
+    ///
+    /// The two appends fail independently, and the pool is append-only
+    /// with no truncation, so `error.OutOfMemory` leaves one of two
+    /// residues: a failure of the child-run copy leaves the pool
+    /// unchanged, while a failure of the parent append leaves the copied
+    /// `children` run in `nodes` with no parent index produced.
     pub fn createNode(
         self: *Ast,
         tag: Tag,
@@ -388,7 +548,7 @@ pub const Ast = struct {
         });
     }
 
-    /// Create a leaf node (no children).
+    /// Create a leaf node (no children) and return its index.
     pub fn createLeaf(
         self: *Ast,
         tag: Tag,
@@ -406,11 +566,14 @@ pub const Ast = struct {
         });
     }
 
+    /// A copy of node `idx`. `idx` must be below `nodes.items.len`; the pool
+    /// index is out of contract otherwise.
     pub fn node(self: *const Ast, idx: u32) Node {
         return self.nodes.items[idx];
     }
 
-    /// The `i`-th child index of node `idx`.
+    /// The `i`-th child index of node `idx`. `i` must be below that node's
+    /// `num_children`; nothing here range-checks it.
     pub fn child(self: *const Ast, idx: u32, i: usize) u32 {
         const n = self.node(idx);
         return n.first_child + @as(u32, @intCast(i));
@@ -418,11 +581,17 @@ pub const Ast = struct {
 
     /// Byte span of a node in the source, via its token range.
     ///
-    /// O(1): `src[tokens[first].start .. tokens[last].end]`. Only meaningful
-    /// for nodes whose token range is non-empty.
+    /// O(1): `src[tokens[first].start .. tokens[last].end]`. A node with no
+    /// tokens yields `null_span` — the answer is "no range", which is also
+    /// what offset 0 with zero width would have named, so a caller that
+    /// highlights `null_span` highlights nothing.
+    ///
+    /// The node's token range must lie inside the table: `first_token +
+    /// num_tokens` may not exceed `tokens.items.len`. Both token ends are
+    /// read unchecked, so an out-of-table range is out of contract.
     pub fn span(self: *const Ast, idx: u32) token.Span {
         const n = self.node(idx);
-        if (n.num_tokens == 0) return .{ .start = 0, .end = 0 };
+        if (n.num_tokens == 0) return null_span;
         const first_t = self.tokens.items[n.first_token];
         const last_t = self.tokens.items[n.first_token + n.num_tokens - 1];
         return .{ .start = first_t.start, .end = last_t.end };
@@ -460,10 +629,10 @@ test "ast: createNode builds contiguous child run" {
     const row = try a.createNode(.row, 0, 3, &children, 0);
     const rn = a.node(row);
     try testing.expectEqual(@as(u16, 2), rn.num_children);
-    // contiguous run: c1 copy at first_child, c2 copy right after
-    try testing.expectEqual(@as(u32, rn.first_child + 1), rn.first_child + 1);
-    try testing.expectEqual(.char, a.node(rn.first_child).tag);
-    try testing.expectEqual(.char, a.node(rn.first_child + 1).tag);
+    // The run is contiguous and in order: c1's copy lands at first_child and
+    // c2's immediately after, each keeping its own token range.
+    try testing.expectEqual(@as(u32, 0), a.node(rn.first_child).first_token);
+    try testing.expectEqual(@as(u32, 2), a.node(rn.first_child + 1).first_token);
 }
 
 test "ast: span resolves token range to bytes" {
@@ -501,4 +670,38 @@ test "atom: genfrac thickness bits round-trip" {
     try testing.expectApproxEqAbs(@as(f32, 1.5), fracThickness(data), 1e-3);
     // negative clamps to 0 (no explicit thickness)
     try testing.expectEqual(@as(u32, 0), fracThicknessBits(-2));
+}
+
+test "atom: genfrac thickness saturates instead of overflowing the cast" {
+    // 1e10 * 256 does not fit in u32: the clamp must happen in points,
+    // before the conversion, or the cast overflows a checked build mode.
+    const huge = fracThicknessBits(1e10);
+    try testing.expectEqual(
+        FractionBits.thick_mask << FractionBits.thick_shift,
+        huge,
+    );
+    try testing.expectApproxEqAbs(
+        FractionBits.thick_max_pt,
+        fracThickness(huge),
+        1e-3,
+    );
+    // an infinity has no position in [0, thick_max_pt] either: same bound
+    try testing.expectEqual(huge, fracThicknessBits(std.math.inf(f32)));
+    try testing.expectEqual(huge, fracThicknessBits(FractionBits.thick_max_pt));
+    // a NaN has none at all, and reads as "no explicit thickness"
+    try testing.expectEqual(@as(u32, 0), fracThicknessBits(std.math.nan(f32)));
+}
+
+test "atom: packed decoders answer null past their field" {
+    // A hand-built `data` claiming 15 packed colspec columns: only six
+    // nibbles exist, so column 6 and beyond name nothing.
+    const data = (@as(u32, 15) << EnvBits.count_shift) | @intFromEnum(EnvKind.array);
+    try testing.expectEqual(@as(usize, 15), envSpecCount(data));
+    try testing.expectEqual(@as(?u32, EnvBits.col_l), envColSpec(data, 0));
+    try testing.expectEqual(@as(?u32, null), envColSpec(data, EnvBits.max_spec_cols));
+    try testing.expectEqual(@as(?u32, null), envColSpec(data, 14));
+    // A forced-style code naming no MathStyle reads as "not forced", the
+    // same answer as the unset code 0.
+    const bad_code: u32 = 7 << FractionBits.forced_shift;
+    try testing.expectEqual(@as(?MathStyle, null), fracForcedStyle(bad_code));
 }

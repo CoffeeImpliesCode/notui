@@ -1,14 +1,27 @@
-//! App(Model): the Elm-style runtime loop on top of the shipped
-//! primitives (framework-contract.md §5).
+//! The Elm-style runtime loop over the notui primitives: the terminal
+//! session, capability detection, the region renderer and the message pump a
+//! model plugs into.
 //!
-//! Wiring: `Tty.init → makeRaw → Caps.detect → Region.init → loop →
-//! Region.exit → caps.restore → tty.restore` (architecture §3), with an
-//! Elm-shaped Model contract on top (`Msg`/`init`/`update`/`view`).
-//! Single-threaded: the loop is fps-paced `Reader.nextTimeout` → filter
-//! to Msg → update → processCmd → render-on-demand with the View
-//! signature idle skip. Worker-thread patterns stay APP-level — the
-//! worker publishes to a slot; the main tick reads it and calls `send`.
-//! `send` from a worker thread must be guarded by a user mutex (§8).
+//! `App(Model)` is the published entry point; `Context`, `View` and `Cmd` are
+//! re-exported here so a model needs one import.
+//!
+//! A session is `start` (open the terminal, enter raw mode, detect
+//! capabilities, build the region, the arenas and the message queue, then run
+//! `Model.init` and its initial command), the loop (`tick`: read one event,
+//! translate it through the filter to a `Msg`, run `update`, run the returned
+//! command, then paint a frame when one is owed) and teardown (`Region.exit`,
+//! `Capabilities.restore`, `Tty.deinit`, `App.deinit`). `start` covers the
+//! whole acquisition: if any step fails, including a failing `Model.init`,
+//! everything already acquired is released and the terminal modes are
+//! restored before the error reaches the caller.
+//!
+//! `Pacer` and `FrameStats` are published on their own: a headless driver
+//! (`frameHeadless`) reads the same measurements without a terminal.
+//!
+//! The loop is single-threaded. A worker-thread pattern stays at the
+//! application level: the worker publishes into a slot the main tick reads and
+//! hands to `send`, which is not synchronized and must be guarded by the
+//! caller when more than one thread can reach it.
 
 const std = @import("std");
 const posix = std.posix;
@@ -27,14 +40,16 @@ const view_mod = @import("view.zig");
 const output = @import("output.zig");
 const transcript = @import("transcript.zig");
 const watchdog = @import("watchdog.zig");
-
 /// Adaptive frame pacing: a nominal input cadence plus a ~50% duty cap.
-/// The loop waits `nominal` for input; when the last frame cost more
-/// than half of that, the wait grows to twice the measured cost, so
-/// composing frames can occupy at most ~50% of the loop's time however
-/// slow the renderer is (roadmap intro: cadence + duty cycle +
-/// backpressure). A slow frame therefore costs animation smoothness,
-/// never input latency.
+///
+/// The loop waits `nominal` for input; when the last frame cost more than
+/// half of that, the wait grows to twice the measured cost, so composing
+/// frames can occupy at most ~50% of the loop's time however slow the
+/// renderer is. A slow frame therefore costs animation smoothness, never
+/// input latency.
+///
+/// The pacer holds plain counters: it allocates nothing, reads no clock, and
+/// is only meaningful on the thread that drives the loop.
 pub const Pacer = struct {
     /// Cost of the last measured frame, in nanoseconds.
     last_cost_ns: u64 = 0,
@@ -43,6 +58,8 @@ pub const Pacer = struct {
     /// Longest single frame cost seen (bench p-max).
     worst_ns: u64 = 0,
 
+    /// Record the cost of one frame, in nanoseconds, and update the
+    /// telemetry counters. Called by the App after every composed frame.
     pub fn noteFrameCost(self: *Pacer, cost_ns: u64) void {
         self.last_cost_ns = cost_ns;
         self.samples += 1;
@@ -80,16 +97,20 @@ pub const FrameStats = struct {
     deferred_frames: u64 = 0,
 };
 
-/// The framework surface, re-exported from app.zig (framework-contract.md
-/// file layout): `App` itself plus the Context/View/Cmd types it threads.
+/// The per-frame state a model receives. Re-export of `context.zig`;
+/// see that type for the frame arena split and the borrow rules.
 pub const Context = @import("context.zig").Context;
+/// The per-frame declaration and its paint callback. Re-export of
+/// `view.zig`; see that type for the closed `DrawError` rule.
 pub const View = @import("view.zig").View;
+/// The effect vocabulary `update` returns. Re-export of `command.zig`; see
+/// that type for the timer payloads and the borrowed slices.
 pub const Cmd = @import("command.zig").Cmd;
 
-/// The Model contract, comptime-checked by `App`: `Msg`, `init`, `update`
-/// and `view` must all be declared. Returns the list of missing members
-/// (empty when the model satisfies the contract). A module-level helper
-/// so the compile-error behavior is testable.
+/// The declarations `App` requires of a model: `Msg`, `init`, `update` and
+/// `view`. Returns the missing names, empty when the model satisfies the
+/// contract. Module-level so the list is testable; `App` turns a non-empty
+/// result into a compile error.
 fn modelViolations(comptime Model: type) []const []const u8 {
     var list: []const []const u8 = &.{};
     if (!@hasDecl(Model, "Msg")) list = list ++ &[_][]const u8{"Msg"};
@@ -99,28 +120,38 @@ fn modelViolations(comptime Model: type) []const []const u8 {
     return list;
 }
 
-/// The Elm-style app runner. `Model` MUST declare (comptime-checked
-/// below):
+/// One session of one model: the terminal, the renderer, the message pump and
+/// the loop that connects them.
 ///
-///   pub const Msg = <type>;                                   // the message type
-///   pub fn init(allocator: std.mem.Allocator) !struct {      // initial state
-///       model: Model,                                        //   + the
-///       cmd: Cmd(Msg),                                       //   initial effect
+/// `Model` MUST declare (checked at comptime):
+///
+///   pub const Msg = <type>;                              // the message type
+///   pub fn init(allocator: std.mem.Allocator) !struct { // initial state plus
+///       model: Model,                                   //   its first effect
+///       cmd: Cmd(Msg),
 ///   };
 ///   pub fn update(self: *Model, msg: Msg, ctx: *Context) !Cmd(Msg);
-///   pub fn view(self: *const Model, ctx: *Context) View;
+///   pub fn view(self: *const Model, ctx: *Context) View(Model);
 ///
-/// `start` owns init: it builds the model via `Model.init(gpa)` and runs
-/// the initial Cmd through the same effect path as queued msgs — an
-/// init-armed `Cmd.every`/`Cmd.tick` timer is live before the first
-/// loop iteration, so a demo can animate with no input.
+/// `Model` MAY declare `pub const DrawError: <error set>` to widen the paint
+/// error set past `std.mem.Allocator.Error`; see `view.zig`.
 ///
-/// Single-threaded. Worker-thread patterns (the REPL's eval worker
-/// writing a result slot polled each tick, skript_repl.zig:379-385) stay
-/// APP-level: the worker publishes to a slot; the main tick reads it and
-/// calls `send`/update. `send` from a worker thread must be guarded by a
-/// user mutex (the framework is otherwise single-threaded; see
-/// framework-contract.md §8).
+/// `Model` MAY declare `pub fn deinit(self: *Model, gpa: std.mem.Allocator)
+/// void`. The App calls it exactly once per successful `Model.init` — also
+/// when the initial command or a later startup step fails — and never for a
+/// model that was not built. It is how a model that owns memory releases it;
+/// a model that owns nothing omits it.
+///
+/// One instance owns everything it acquired: the model, the tty descriptors
+/// and the terminal mode state, the region, the output queue, both arenas,
+/// the transcript and the message queue. `deinit` releases all of it and is
+/// safe to call more than once on the same instance. Copies share allocations but copy
+/// ownership state by value; only one instance may be operated and disposed.
+/// Keep its address stable after `start`: its reader borrows the embedded tty.
+///
+/// Serialize `send`, ticks and lifecycle operations, not merely concurrent send calls.
+/// `run` takes no lock; workers should publish into a synchronized application slot
+/// that the loop reads before calling `send`.
 pub fn App(comptime Model: type) type {
     comptime {
         const violations = modelViolations(Model);
@@ -133,151 +164,335 @@ pub fn App(comptime Model: type) type {
     const Msg = Model.Msg;
 
     return struct {
+        /// How one session is built. Read once at `start`; a later change to
+        /// the struct the caller kept has no effect on the running session.
         pub const Options = struct {
-            /// Loop pacing. fps > 0: `Reader.nextTimeout(1000/fps)` paces
-            /// timed ticks. fps == 0: block on input (`Reader.next`), no
-            /// timed ticks — animation must be driven by `every` Cmds.
+            /// Loop pacing in frames per second. Above zero the loop waits
+            /// `1000 / fps` milliseconds for input each tick, widened by the
+            /// pacer; zero blocks until input arrives, so animation must then
+            /// come from an armed timer.
             fps: u32 = 60,
-            /// Initial inline band height (Region.Options.height,
-            /// region.zig:178).
+            /// Initial inline band height in rows, and the height a resize
+            /// keeps until a `View` asks for another.
             region_height: u16 = 3,
-            /// Region space reservation (Region.Options.append_lines).
+            /// Reserve scrollback space above the band for appended content.
+            /// With this off the region relies on the terminal's own
+            /// scrolling when a line is appended.
             append_lines: bool = true,
-            /// Optional default event→Msg translator (also settable via
-            /// setFilter).
+            /// The default event→`Msg` translator, installed by `start`. The
+            /// same slot is writable later through `setFilter`. `null` means
+            /// no translation: every event the framework handles itself is
+            /// handled and the rest are dropped, and no message is ever
+            /// synthesized from them.
             filter: ?*const fn (*Context, Event) ?Msg = null,
-            /// Bounded output staging (roadmap B1): `capacity` is the
-            /// hard bound on staged bytes, `watermark` the point at
-            /// which the App stops composing frames until the terminal
-            /// drains.
+            /// Bounds for the output queue in front of the terminal:
+            /// `capacity` is the hard byte bound on staged output and
+            /// `watermark` the pending level above which the loop stops
+            /// composing frames until the transport drains.
             output: output.OutputQueue.Options = .{},
-            /// Width-change behaviour for the inline band (C2).
+            /// What a width change does to the band's own content.
             resize_mode: ResizeMode = .append,
-            /// Declared native profile: exact capacity, transcript tail and oldest-source eviction.
-            /// Tail blanks must be unused terminal padding; nonconforming terminals use .none.
+            /// The terminal's declared reflow profile: exact capacity,
+            /// transcript tail and oldest-source eviction. The default
+            /// assumes nothing; a terminal whose trailing blanks are unused
+            /// padding must be declared as `.none`.
             terminal_reflow: Region.TerminalReflow = .none,
         };
 
         const Self = @This();
+        /// Alias for the frame state type; `App(M).Ctx` is `Context`.
         pub const Ctx = Context;
+        /// Alias for this model's frame type; `App(M).Vw` is `View(Model)`.
         pub const Vw = View(Model);
 
+        /// One armed one-shot timer: the instant the deadline passes and the
+        /// message enqueued when it does. `Cmd.tick` copies both into the
+        /// session; `null` when no one-shot timer is armed.
+        const TickTimer = struct {
+            deadline: std.Io.Timestamp,
+            msg: Msg,
+        };
+
+        /// One armed periodic timer: the interval in milliseconds, the instant
+        /// the current cycle started, and the message enqueued every interval.
+        /// `Cmd.every` copies all three into the session; `null` when no
+        /// periodic timer is armed.
+        const EveryTimer = struct {
+            interval_ms: u32,
+            last_fire: std.Io.Timestamp,
+            msg: Msg,
+        };
+
+        /// The model. `undefined` until `start` runs `Model.init`; the loop
+        /// reads and writes it in place, so a pointer taken by a paint
+        /// callback is stable for the session. `deinit` releases what the
+        /// model owns through the model's own optional `deinit` hook.
         model: Model,
+        /// Whether this instance holds a live model. It is false before
+        /// `Model.init` has returned, true from then until the model is
+        /// disposed, and false again afterwards — including when a startup
+        /// step after `Model.init` failed and the model was released with
+        /// everything else.
+        ///
+        /// Read it to tell a session that owns a model from one that owns
+        /// nothing; only the App's own startup and teardown set it, and
+        /// setting it by hand makes `deinit` call a model hook on a model
+        /// that was never built.
+        model_ready: bool = false,
+        /// The options `start` was called with.
         opts: Options,
 
-        // framework-owned runtime (populated by start/run)
+        /// The session `std.Io`, stored by `start` and handed to the model
+        /// through `Context.io`. `null` before `start`.
         io: ?std.Io = null,
+        /// The session allocator, stored by `start`. It owns the model, the
+        /// region, the queue, the arenas and the message queue, and `deinit`
+        /// releases all of them through it. Undefined before `start`.
         gpa: std.mem.Allocator = undefined,
+        /// The opened terminal: descriptors, original termios and raw-mode
+        /// state. `null` in a degraded session and after `deinit`.
         tty: ?Tty = null,
+        /// The capability-detection parser. Reset at the start of an
+        /// interactive session; its decode scratch lives inside the value,
+        /// so the parser keeps this address for the session.
         parser: Parser = .{},
+        /// What the terminal reported it supports; `null` in a degraded
+        /// session, where detection never ran.
         caps: ?caps.Capabilities = null,
+        /// The inline band and its scrollback; `null` before `start` and after
+        /// `deinit`. A `Context` points at this value.
         region: ?Region = null,
+        /// The input reader, borrowed from `tty`. `null` in a degraded
+        /// session, which never reads input.
         reader: ?Reader = null,
-        arena: ?std.heap.ArenaAllocator = null, // app arena (long-lived, never reset)
-        scratch: ?std.heap.ArenaAllocator = null, // per-tick scratch arena
-        /// Bounded pending-byte queue in front of the terminal (B1).
-        /// Every frame is staged here and submitted with one nonblocking
-        /// write attempt; bytes the terminal has not taken stay queued
-        /// and composition stops at the watermark.
+        /// The session arena behind `Context.frame_arena`, released by
+        /// `deinit` and never reset while the session runs: the cells of the
+        /// previous frame still borrow its memory.
+        arena: ?std.heap.ArenaAllocator = null,
+        /// The per-frame arena behind `Context.scratch_arena`. Reset with its
+        /// capacity retained at the top of every frame, so a slice taken from
+        /// it dies with the frame that took it.
+        scratch: ?std.heap.ArenaAllocator = null,
+        /// The bounded byte queue in front of the terminal. Every frame is
+        /// staged here and submitted with one nonblocking write attempt;
+        /// bytes the transport has not taken stay queued and composition stops
+        /// at the watermark. `null` in a degraded session and after `deinit`.
         out: ?output.OutputQueue = null,
 
-        // loop state
+        /// True between `start` and the loop's exit. `quit` clears it; a
+        /// failed `start` leaves it false.
         running: bool = false,
-        /// Terminal modes currently active (diffed per frame).
+        /// The terminal modes currently active, diffed against each frame's
+        /// declaration so a mode sequence is written only on a change.
         modes: view_mod.Modes = .{},
-        /// Signature of the last rendered View (idle-frame skip).
+        /// Whether this session's exit sequences have already gone out. Set
+        /// by the finished path and by the unwinding one, so a terminal is
+        /// restored once however many times the cleanup runs.
+        terminal_restored: bool = false,
+        /// The signature of the last composed frame; a frame with the same one
+        /// is not composed again. Seeded to a value no frame can hash to.
         last_sig: u64 = std.math.maxInt(u64),
+        /// Ticks entered in this session, including the current one: 1 during
+        /// the first tick's callbacks. Zero before the first tick,
+        /// `frameHeadless` does not advance it, and `deinit` resets it.
         frame_count: u64 = 0,
+        /// Time since the previous frame; `.zero` on the first one.
         frame_delta: std.Io.Duration = .zero,
-        /// Set by update/view/cmds; forces a repaint this tick.
+        /// Set by `update`, `view` or a command to force a repaint this frame.
+        /// Cleared at the top of every frame.
         render_requested: bool = false,
+        /// The instant the previous frame started, on the session clock.
         last_tick: ?std.Io.Timestamp = null,
+        /// Messages waiting for `update`, in arrival order. Owned by the App
+        /// and released by `deinit`; the `Msg` values themselves are copied
+        /// in, and whatever they point at stays the sender's.
         msg_queue: std.ArrayList(Msg) = .empty,
+        /// The live event→`Msg` translator; `null` drops every event the
+        /// framework does not handle itself.
         filter: ?*const fn (*Context, Event) ?Msg = null,
-        title: ?[]const u8 = null,
-        /// Absolute deadline armed by `Cmd.tick` (one-shot Msg.tick).
-        tick_deadline: ?std.Io.Timestamp = null,
-        /// Interval (ms) armed by `Cmd.every` (periodic Msg.tick).
-        every_interval: ?u32 = null,
-        /// Last periodic Msg.tick dispatch time.
-        last_fire: ?std.Io.Timestamp = null,
+        /// The one-shot timer armed by `Cmd.tick`, with the message it will
+        /// enqueue; `null` when none is armed.
+        tick_timer: ?TickTimer = null,
+        /// The periodic timer armed by `Cmd.every`, with the message it will
+        /// enqueue each interval; `null` when none is armed.
+        every_timer: ?EveryTimer = null,
 
-        /// Adaptive pacing state (~50% duty cap).
+        /// Adaptive pacing state: the last frame cost and the duty cap.
         pacer: Pacer = .{},
-        /// Loop watchdog (F3): the previous frame is observed BEFORE
-        /// this one re-pings, so a stall inside a frame is caught rather
-        /// than swallowed by the reset.
+        /// The loop watchdog. Each frame observes the previous heartbeat
+        /// before re-pinging, so a stall inside a frame is reported instead
+        /// of being swallowed by the reset.
         watchdog: watchdog.Watchdog = .init(watchdog.default_budget_ns),
-        /// Per-frame measurements for the bench and the debug server.
+        /// Per-frame measurements for a headless driver and the debug server.
         frame_stats: FrameStats = .{},
-        /// Streaming transcript (C3), allocated only by
-        /// `initTranscript`. The product settles blocks; the App retires
-        /// them inside the frame budget, writes each delta as one ledger
-        /// batch, and commits the blocks when the transport accepted the
-        /// receipt.
+        /// The streaming transcript, allocated only by `initTranscript`. The
+        /// product settles blocks; the App retires settled ones inside the
+        /// frame budget, writes each delta as one ledger batch, and commits a
+        /// block once the transport accepted the receipt behind its rows.
         transcript: ?transcript.Transcript = null,
 
         // ── construction ──
-        /// The model is NOT passed in: `start` owns init — it calls
-        /// `Model.init(gpa)` and stores the returned model (Elm-style, the
-        /// runtime drives init so the initial Cmd arms effects).
+        /// A session with default options and no resources acquired yet.
+        ///
+        /// The model is not a parameter: `start` owns init, because the
+        /// initial command can only be processed once the region and the
+        /// arenas exist. `model` is `undefined` until it returns, so nothing
+        /// may read or write the model between `init` and `start`.
         pub fn init() Self {
             return initWithOptions(.{});
         }
+
+        /// A session with `opts`, and with `opts.filter` installed as the
+        /// event→`Msg` translator. Resources are acquired only by `start`.
         pub fn initWithOptions(opts: Options) Self {
             return .{ .model = undefined, .opts = opts, .filter = opts.filter };
         }
 
         // ── lifecycle ──
-        /// Open /dev/tty, enter raw mode, detect capabilities, init the
-        /// region and the app arena. Non-TTY stdin degrades: no raw mode,
-        /// no caps, a plain single frame (region sync_output = false
-        /// path, region.zig:262-274).
+        /// Acquire the whole session and build the model, so the instance is
+        /// ready for `tick` when this returns.
+        ///
+        /// With a terminal on stdin it opens `/dev/tty` twice (a blocking
+        /// descriptor for input and termios, a nonblocking one for frames),
+        /// enters raw mode, detects capabilities, and builds the region, the
+        /// output queue, both arenas and the reader. Without one it degrades:
+        /// no tty, no raw mode, no detection, one region that emits a single
+        /// plain frame and no input.
+        ///
+        /// It then runs `Model.init(gpa)` and processes the command that
+        /// returns, so a timer armed by `init` is live before the first tick.
+        ///
+        /// The whole acquisition is covered: any failure — a refused open, a
+        /// raw-mode failure, an exhausted allocator, a failing `Model.init` —
+        /// runs the same teardown a finished session would. The terminal modes
+        /// are restored, every owned resource is released and `running` stays
+        /// false, so the instance owns nothing afterwards and `deinit` is safe
+        /// to call again.
+        ///
+        /// The instance keeps `io` and `gpa` after a failure, and a later
+        /// `start` may be attempted on the same instance.
         pub fn start(self: *Self, io: std.Io, gpa: std.mem.Allocator) !void {
+            return self.acquire(io, gpa, Tty.isTty(std.posix.STDIN_FILENO));
+        }
+
+        /// The whole acquisition, once `start` has decided which session it is
+        /// opening. Storing `io` and `gpa` is the first step and the single
+        /// cleanup is registered before the next one, so a failure at any
+        /// point releases everything acquired before it.
+        ///
+        /// `interactive` selects the route: open the terminal, enter raw mode
+        /// and detect capabilities, or degrade to a region that emits one
+        /// plain frame and never reads input.
+        fn acquire(self: *Self, io: std.Io, gpa: std.mem.Allocator, interactive: bool) !void {
             self.io = io;
             self.gpa = gpa;
-            if (Tty.isTty(std.posix.STDIN_FILENO)) {
+            errdefer self.abortSession();
+            if (interactive) {
                 self.tty = try Tty.init(io);
-                errdefer {
-                    self.tty.?.deinit();
-                    self.tty = null;
-                }
                 try self.tty.?.makeRaw();
                 try self.startTty(io, gpa);
             } else {
                 try self.startPlain(gpa);
             }
-            // Elm contract: init arms the initial effect. The runtime
-            // (region/arena/tty) exists now, so the initial Cmd is
-            // processed through the same path as queued msgs (timer Cmds
-            // anchor at this moment; the first fire is one interval out).
+            // The runtime exists now, so the initial command takes the same
+            // path as a queued message: a timer anchors at this instant and
+            // its first fire is one interval out.
             try self.processInit();
         }
 
-        /// Build the initial model via `Model.init` and run its initial
-        /// Cmd through the same effect path as queued msgs — so an
-        /// init-armed `every`/`tick` timer is live before the first tick.
-        /// Called by `start`; `w` is null in the degraded (non-TTY) path,
-        /// matching `tick`'s writer rule (mode/title writes skipped).
+        /// Release everything `start` or the loop acquired, and put the
+        /// terminal back the way it was: queued bytes first, then
+        /// `Region.exit`, `Capabilities.restore` and the original termios.
+        ///
+        /// Every step is best-effort and reports nothing, because every caller
+        /// is already propagating the error that started the unwind. It is
+        /// used both by a failed `start` and by a failed `run`.
+        fn abortSession(self: *Self) void {
+            self.releaseTerminal();
+            self.deinit();
+        }
+
+        /// Write out what is queued and restore the terminal's modes, without
+        /// reporting anything. The termios goes back one step later, when
+        /// `deinit` releases the tty. Does nothing when no terminal was
+        /// opened, so a degraded session skips it, and nothing when the
+        /// sequences already went out, so a stall that restored the terminal
+        /// is not restored twice.
+        fn releaseTerminal(self: *Self) void {
+            const t = if (self.tty) |*t| t else return;
+            if (self.terminal_restored) return;
+            self.terminal_restored = true;
+            const w = t.writer();
+            if (self.out) |*q| {
+                // The frame in progress was never committed: it is dropped
+                // rather than flushed, because its bytes may contradict the
+                // state the teardown writes next.
+                q.abortFrame();
+                q.drainAll(w) catch |err| std.log.scoped(.notui_app).warn(
+                    "could not flush the output queue while unwinding: {s}",
+                    .{@errorName(err)},
+                );
+            }
+            self.writeTeardown(w) catch |err| std.log.scoped(.notui_app).warn(
+                "could not restore the terminal while unwinding: {s}",
+                .{@errorName(err)},
+            );
+            w.flush() catch |err| std.log.scoped(.notui_app).warn(
+                "could not flush the terminal while unwinding: {s}",
+                .{@errorName(err)},
+            );
+        }
+
+        /// Build the initial model through `Model.init` and run its command on
+        /// the same path a queued message takes. Called by `acquire` once the
+        /// runtime exists. The writer is null in a degraded session, where
+        /// mode and title writes are skipped because there is no terminal.
         fn processInit(self: *Self) !void {
             const init_res = try Model.init(self.gpa);
             self.model = init_res.model;
+            // Armed before the command runs: an initial command that fails
+            // must still release the model it was built for.
+            self.model_ready = true;
             var ictx = self.makeCtx();
             const w: ?*std.Io.Writer = if (self.tty != null) self.tty.?.writer() else null;
             try self.processCmd(init_res.cmd, &ictx, w);
             self.render_requested = ictx.render_requested;
         }
 
-        /// One loop iteration: timers → read one event (paced to fps) →
-        /// filter to Msg → update → processCmd → view → render decision
-        /// (with the View-signature idle skip) → mode diff → draw +
-        /// render. Valid after `start`.
+        /// Release what the model owns, through the model's own `deinit` when
+        /// it declares one. Called exactly once per successful `Model.init`: a
+        /// model that was never built is not disposed, and one that was
+        /// already disposed is not disposed twice.
+        ///
+        /// The hook is the model's own release path, so a model that owns no
+        /// memory omits it and needs nothing here. It returns nothing: a
+        /// cleanup cannot report a failure to a caller that is already
+        /// unwinding or returning.
+        fn disposeModel(self: *Self) void {
+            if (!self.model_ready) return;
+            self.model_ready = false;
+            if (@hasDecl(Model, "deinit")) Model.deinit(&self.model, self.gpa);
+        }
+
+        /// One loop iteration: arm checks, one input event (paced to `fps`),
+        /// filter to a message, `update` per queued message, the returned
+        /// commands, then the frame — composed only when one is owed, mode
+        /// diff first, then paint and submit. Valid after `start`.
+        ///
+        /// It blocks in the reader for up to the paced timeout, and returns
+        /// `error.EndOfStream` only as a quit request: the loop stops and no
+        /// error escapes. Every other failure — a paint error, a full output
+        /// queue, an exhausted allocator, a watchdog trip — is returned, and
+        /// `run` then unwinds through the teardown.
+        ///
+        /// A due timer keeps its deadline and cycle anchor if enqueue returns
+        /// `error.OutOfMemory`. A caller that drives `tick` may handle that error
+        /// and retry. `run` instead returns the error and tears down the session.
         pub fn tick(self: *Self) !void {
-            // 1. Per-tick scratch: reset the scratch arena (the app arena
-            //    backing `ctx.frame_arena` is NEVER reset — the frame
-            //    Buffer's cells borrow their grapheme slices from it,
-            //    cell.zig); render_requested clears so each frame
-            //    re-declares.
+            // 1. Per-frame scratch: reset it, capacity retained. The session
+            //    arena behind `ctx.frame_arena` is never reset — the previous
+            //    frame's cells still borrow its memory — and
+            //    `render_requested` clears so each frame re-declares.
             if (self.scratch) |*s| _ = s.reset(.retain_capacity);
             self.render_requested = false;
 
@@ -293,21 +508,21 @@ pub fn App(comptime Model: type) type {
             if (self.watchdog.tripped(now)) try self.degradeStall();
             self.watchdog.ping(now);
 
-            // 2. Timers: the one-shot `tick` deadline and the periodic
-            //    `every` timer dispatch `Msg.tick` through the queue.
-            if (self.tick_deadline) |dl| {
-                if (now.nanoseconds >= dl.nanoseconds) {
-                    self.tick_deadline = null;
-                    try self.enqueueTick();
+            // 2. Timers enqueue the message they were armed with.
+            // The state advances only after enqueue succeeds, so a caller that
+            // handles the error can retry the timer on another tick.
+            if (self.tick_timer) |timer| {
+                if (now.nanoseconds >= timer.deadline.nanoseconds) {
+                    try self.send(timer.msg);
+                    self.tick_timer = null;
                 }
             }
-            if (self.every_interval) |interval_ms| {
-                const last = self.last_fire orelse now;
-                if (now.nanoseconds - last.nanoseconds >=
-                    @as(i96, interval_ms) * std.time.ns_per_ms)
+            if (self.every_timer) |*timer| {
+                if (now.nanoseconds - timer.last_fire.nanoseconds >=
+                    @as(i96, timer.interval_ms) * std.time.ns_per_ms)
                 {
-                    self.last_fire = now;
-                    try self.enqueueTick();
+                    try self.send(timer.msg);
+                    timer.last_fire = now;
                 }
             }
 
@@ -328,12 +543,11 @@ pub fn App(comptime Model: type) type {
                 };
             }
 
-            // 4. Dispatch the event: winsize resizes the inline region;
-            //    cpr feeds the region's anchor correction (the framework
-            //    owns the region — it is NOT forwarded to the model, so
-            //    the model surface stays clean); other events go through
-            //    the filter to a Msg (null = the event is dropped — the
-            //    framework never synthesizes one).
+            // 4. Dispatch the event. A winsize resizes the inline band, and a
+            //    cursor-position report corrects the region's anchor; the
+            //    framework owns the region, so neither reaches the model.
+            //    Every other event goes through the filter, and a null from
+            //    the filter drops it: the framework never invents a message.
             var dispatched = ev != null;
             if (ev) |e| switch (e) {
                 .cpr => |pos| {
@@ -353,16 +567,15 @@ pub fn App(comptime Model: type) type {
                 else => {
                     if (self.filter) |f| {
                         var fctx = self.makeCtx();
-                        if (f(&fctx, e)) |m| try self.msg_queue.append(self.gpa, m);
+                        if (f(&fctx, e)) |m| try self.send(m);
                         self.render_requested = fctx.render_requested;
                     }
                 },
             };
 
-            // 5. The output writer for this tick's effects: the tty writer
-            //    when interactive; null in the degraded (non-TTY) path —
-            //    that session's single plain frame is rendered by `run`
-            //    at exit (§5.5), never from tick.
+            // 5. The writer this frame's immediate effects use: the tty's
+            //    buffered writer when there is a terminal, null in a degraded
+            //    session, whose single plain frame is painted by `run` at exit.
             const w: ?*std.Io.Writer = if (self.tty != null) self.tty.?.writer() else null;
 
             // 6. Drain the queue: update + processCmd per msg (batch/
@@ -377,57 +590,57 @@ pub fn App(comptime Model: type) type {
                 self.render_requested = uctx.render_requested;
             }
 
-            // 7. The declarative frame.
+            // 7. The declaration for this frame, read after every message was
+            //    processed so it sees the final model state.
             var ctx = self.makeCtx();
             const vw = Model.view(&self.model, &ctx);
             self.render_requested = ctx.render_requested;
 
-            // 8. Frame-level declaration: the dynamic band height. The
-            //    terminal title is staged inside the frame (step 9) so
-            //    it shares the frame's single write.
+            // 8. The declared band height, applied before the frame is
+            //    painted. The declared title is staged inside the frame itself
+            //    so it shares the frame's single write.
             if (vw.height != 0 and vw.height != self.region.?.height) {
                 try self.region.?.setHeight(vw.height);
             }
 
-            // 9. The frame: staged into the bounded output queue and
-            //    submitted once (see `renderStep`). The degraded
-            //    (non-TTY) session renders its single plain frame in
-            //    `run`, never from tick.
+            // 9. The frame: staged into the bounded output queue and submitted
+            //    once (see `renderStep`). A degraded session has no terminal
+            //    and paints its one plain frame in `run`, never here.
             if (self.tty != null) {
                 _ = try self.renderStep(vw, &ctx, dispatched, output.Transport.from(&self.tty.?));
             }
         }
 
-        /// One frame: stage the mode diff, the title and the band into
-        /// the output queue, commit the staging, then submit it with a
-        /// SINGLE nonblocking write attempt. Returns the bytes the
-        /// transport accepted.
+        /// One frame: stage the mode diff, the declared title and the band
+        /// into the output queue, commit the staging, then submit it with a
+        /// single nonblocking write attempt. Returns the bytes the transport
+        /// accepted; 0 means the frame is still queued.
         ///
-        /// Backpressure (B1): at the watermark the frame is neither
-        /// composed nor committed — the render stays requested and the
-        /// identical frame is retried next tick after a drain. Input is
-        /// read on every tick regardless, so a slow reader costs
-        /// animation latency, never responsiveness and never history.
+        /// Backpressure: at the watermark the frame is neither composed nor
+        /// committed — the render stays requested and the identical frame is
+        /// retried on a later frame after a drain. Input is read every frame
+        /// regardless, so a slow terminal costs animation latency, never
+        /// responsiveness and never history.
         ///
-        /// Idle tick: a tick that wants no new frame still drains the
-        /// queue, so a frame the transport accepted only in part stops
-        /// being half-painted without waiting for the next repaint.
+        /// Idle frame: a frame that owes nothing still drains the queue, so a
+        /// frame the transport accepted only in part stops being half-painted
+        /// without waiting for the next repaint.
         ///
-        /// Failure discipline (B2): a composition that overflows the
-        /// queue aborts before any frame state advances (no prev, no
-        /// dirty flag, no ledger receipt, no last_sig), so the retry
-        /// paints the whole frame again.
-        /// Terminal modes follow the same rule: the mode diff is staged
-        /// with the frame, so a failed composition restores the mode
-        /// state it would have advanced and the retry re-emits it.
+        /// Failure discipline: a composition that overflows the queue, or a
+        /// `draw` that fails, aborts before any frame state advances (no
+        /// previous snapshot, no dirty flag, no ledger receipt, no
+        /// `last_sig`), so the retry paints the whole frame again. Terminal
+        /// modes follow the same rule: the diff is staged with the frame, so a
+        /// failed composition rolls the mode state back and the retry re-emits
+        /// what the terminal never received.
         ///
-        /// Acknowledgement (C1): the ledger is acknowledged exactly when
-        /// the transport has taken every staged byte and never before,
-        /// and the transcript block behind a receipt is committed then —
-        /// at enqueue time the block is merely out of the mutable view.
+        /// Acknowledgement: the ledger is acknowledged exactly when the
+        /// transport has taken every staged byte and never before, and the
+        /// transcript block behind a receipt is committed then.
         ///
-        /// The error set is inferred because `View.draw` is an
-        /// `anyerror` callback owned by the model.
+        /// Returns `error.FrameTooLarge` for an overflow and the queue
+        /// writer's error when it cannot take the bytes, beside the model's
+        /// `View.DrawError` from `draw`.
         fn renderStep(self: *Self, vw: Vw, ctx: *Context, force: bool, sink: output.Transport) !usize {
             const q = if (self.out) |*queue| queue else return 0;
             // The stats describe THIS attempt, so a deferred frame never
@@ -478,19 +691,19 @@ pub fn App(comptime Model: type) type {
             self.frame_stats.written_bytes = taken;
             self.frame_stats.peak_pending = q.peak_pending;
             self.frame_stats.frame_cost_ns = cost_ns;
-            // The transport took every staged byte: the ledger receipts
-            // are acknowledged exactly once (C1) and the transcript
-            // blocks that produced them are committed (C3).
+            // The transport took every staged byte: the ledger receipts are
+            // acknowledged exactly once, and the transcript blocks behind them
+            // are committed.
             if (q.pending() == 0) self.commitHistory();
             return taken;
         }
 
-        /// Compose the frame in progress — the mode diff, the title and
-        /// the band — into the output queue. Nothing is published here
-        /// (`commitFrame` does that), so a failure rolls the staged
-        /// bytes AND the mode state back together: the retry emits the
-        /// very same mode sequences instead of declaring a mode the
-        /// terminal never received. Returns the damage the frame paints.
+        /// Compose the frame in progress — the mode diff, the declared title
+        /// and the band — into the output queue. Nothing is published here
+        /// (`commitFrame` does that), so any failure rolls the staged bytes
+        /// and the mode state back together and the retry re-emits exactly
+        /// the sequences the terminal never received. Returns the number of
+        /// cells the frame changes.
         fn stageFrame(self: *Self, vw: Vw, ctx: *Context) !usize {
             const q = &self.out.?;
             const modes_before = self.modes;
@@ -512,10 +725,10 @@ pub fn App(comptime Model: type) type {
             return dirty;
         }
 
-        /// One nonblocking drain for a tick that composes no frame: the
-        /// queued bytes leave, the accepted count is this attempt's
-        /// `written_bytes`, and the ledger receipts are acknowledged
-        /// only once the queue has taken every staged byte (C1).
+        /// One nonblocking drain for a frame that composes nothing: the queued
+        /// bytes leave, the accepted count is this attempt's `written_bytes`,
+        /// and the ledger is acknowledged only once the queue has taken every
+        /// staged byte.
         fn drainQueued(self: *Self, q: *output.OutputQueue, sink: output.Transport) !usize {
             if (q.pending() == 0) return 0;
             const taken = try q.drain(sink);
@@ -524,12 +737,21 @@ pub fn App(comptime Model: type) type {
             return taken;
         }
 
-        /// One frame without input — the headless seam the bench and the
-        /// debug server drive (`tick` also reads input, so it is not
-        /// usable headlessly). Runs view + draw, stages the frame into the
-        /// output queue, and attempts ONE drain into `sink`. Returns the
-        /// bytes the transport accepted; 0 means the frame is still
-        /// pending and the next call continues it.
+        /// One frame with no input read: the seam a headless driver uses,
+        /// because `tick` blocks on the reader. It resets `Context.scratch_arena`,
+        /// reads the declaration, applies its band height and runs the same
+        /// frame path as `tick`, then attempts one drain into `sink`.
+        ///
+        /// Valid on a live runtime: a region and both arenas, which every
+        /// `start` route builds before `Model.init` runs. The output queue is
+        /// not part of it — interactive startup installs one, a degraded
+        /// session does not, and its single plain frame is painted by `run` at
+        /// exit rather than staged here.
+        ///
+        /// Returns the bytes `sink` accepted. Zero can mean no bytes were
+        /// staged, a drain the transport blocked, or no output queue at all;
+        /// when `out` is present, inspect its `pending()` count for bytes
+        /// still queued.
         pub fn frameHeadless(self: *Self, sink: output.Transport) !usize {
             if (self.scratch) |*s| _ = s.reset(.retain_capacity);
             self.render_requested = false;
@@ -541,25 +763,40 @@ pub fn App(comptime Model: type) type {
             return self.renderStep(vw, &ctx, true, sink);
         }
 
-        /// Allocate the streaming transcript (C3). The 8 ms retirement
-        /// budget and the 256-block live bound are the defaults; an app
-        /// without streaming output never allocates one.
-        pub fn initTranscript(self: *Self, gpa: std.mem.Allocator, opts: transcript.Transcript.Options) !void {
+        /// Allocate the streaming transcript and hand it to the App, which
+        /// retires settled blocks inside each frame and releases it in
+        /// `deinit`. `gpa` must be the allocator that outlives the App.
+        ///
+        /// An instance that already has a transcript is released first, so any
+        /// block it had not committed is dropped: call this once, before the
+        /// first frame.
+        pub fn initTranscript(
+            self: *Self,
+            gpa: std.mem.Allocator,
+            opts: transcript.Transcript.Options,
+        ) !void {
+            if (self.transcript) |*t| {
+                t.deinit();
+                self.transcript = null;
+            }
             self.transcript = try transcript.Transcript.init(gpa, opts);
         }
 
-        /// Retire settled transcript blocks (C3) and stage the delta as
-        /// one ledger batch. Finality is the product's decision: this only
-        /// moves blocks the product settled, oldest first, within the
-        /// frame's time budget, and defers the rest to the next frame.
+        /// Retire settled transcript blocks and stage the delta as one ledger
+        /// batch. Finality is the product's decision: only blocks the product
+        /// settled move, oldest first, within this frame's time budget, and
+        /// the rest wait for the next frame.
         ///
-        /// The three steps are one transaction. `retire` reserves the
-        /// seal before a block leaves the mutable view and keeps an
-        /// unsealed delta alive, `writeTranscript` is the only step
-        /// that can fail, and a failure here aborts the frame with the
-        /// delta still pending: the next frame re-emits the same rows
-        /// and the same block ids, so a refused batch is retried, never
-        /// lost and never written twice.
+        /// Whether anything is pending is the transcript's own answer through
+        /// `Delta.isEmpty`, never a row count: a block that settled with no
+        /// rows of its own is still retired and still needs its receipt.
+        ///
+        /// The three steps are one transaction. `retire` reserves the seal
+        /// before a block leaves the mutable view and keeps an unsealed delta
+        /// alive, `writeTranscript` is the only step that can fail, and a
+        /// failure aborts the frame with the delta still pending: the next
+        /// frame re-emits the same rows under the same block ids, so a
+        /// refused batch is retried, never lost and never written twice.
         fn retireTranscript(self: *Self) !void {
             const t = if (self.transcript) |*t| t else return;
             var delta: transcript.Delta = .{};
@@ -584,27 +821,39 @@ pub fn App(comptime Model: type) type {
             }
         }
 
-        /// start + loop until quit + teardown (Region.exit → caps.restore
-        /// → tty.restore) + deinit. The framework's normal entry point.
+        /// The normal entry point: `start`, the loop until quit, the exit
+        /// sequence, then `deinit`.
+        ///
+        /// An interactive session writes `Region.exit` and
+        /// `Capabilities.restore` through the output queue and blocks until
+        /// every staged byte has left. A degraded session has no terminal and
+        /// instead paints its one plain frame to standard output.
+        ///
+        /// A failure anywhere after `start` unwinds through the same release
+        /// a finished session performs — queued bytes, terminal modes, termios,
+        /// then every owned resource — so an error never leaves a raw terminal
+        /// behind. `start`'s own failure releases everything it had acquired.
+        /// The allocator and `io` are borrowed for the call and not retained
+        /// beyond the resources the App now owns.
         pub fn run(self: *Self, io: std.Io, gpa: std.mem.Allocator) !void {
             try self.start(io, gpa);
-            errdefer self.deinit();
+            errdefer self.abortSession();
             try self.runLoop();
             if (self.tty) |*t| {
                 try self.emitTeardown(t.writer());
             } else if (self.region != null) {
-                // §5.5: the degraded (piped) session is one plain frame,
-                // rendered here at exit.
+                // A degraded session produces its single plain frame here, at
+                // exit, where a pipe consumer is waiting for it.
                 var stdout_w = std.Io.File.stdout().writer(io, &.{});
                 try self.renderPlainFrame(&stdout_w.interface);
             }
             self.deinit();
         }
 
-        /// The main loop. Degraded (non-TTY) mode runs one tick — the
-        /// loop's update/view pass without output — then stops; the plain
-        /// frame is rendered by `run` at exit (§5.5). Interactive mode
-        /// runs until quit.
+        /// The main loop. An interactive session runs until `quit` clears
+        /// `running`. A degraded one runs a single frame — the update and
+        /// declaration pass with no output — and stops, because its only frame
+        /// is painted by `run` at exit.
         fn runLoop(self: *Self) !void {
             if (self.tty != null) {
                 while (self.running) try self.tick();
@@ -614,15 +863,17 @@ pub fn App(comptime Model: type) type {
             }
         }
 
-        /// Render the degraded (non-TTY) session's single plain frame into
-        /// `w` (§5.5): fresh scratch, view, band height, draw, then the
-        /// region's plain-frame render. The app's `view` runs so a
-        /// non-TTY user sees the same content.
+        /// Paint the degraded session's single plain frame into `w`: reset
+        /// `Context.scratch_arena`, read the model's declaration and band height,
+        /// call `draw`, then render the region's plain frame and flush.
+        /// The loop has ended by then, so a piped consumer reads the one frame
+        /// a degraded session produces.
         ///
-        /// The declared title is deliberately NOT written: a pipe has no
+        /// The declared title is deliberately not written: a pipe has no
         /// window, so an OSC 0 sequence would be literal garbage in the
-        /// transcript. The degraded frame carries no escape byte at all
-        /// — not from the envelope, not from styles, not from here.
+        /// transcript. The frame carries no escape byte at all — not from the
+        /// envelope, not from styles, not from here. `w` is the caller's and is
+        /// left flushed on success.
         fn renderPlainFrame(self: *Self, w: anytype) !void {
             if (self.scratch) |*s| _ = s.reset(.retain_capacity);
             var ctx = self.makeCtx();
@@ -635,9 +886,23 @@ pub fn App(comptime Model: type) type {
             try w.flush();
         }
 
-        /// Tear down transcript/queue/arena/scratch/region/tty.
-        /// Idempotent; called by run.
+        /// Release every resource this instance owns: the model, the
+        /// transcript, the output queue, the session and frame arenas, the
+        /// region, the tty (which restores the original termios and closes
+        /// both descriptors) and the message queue.
+        ///
+        /// It does not write the terminal's exit sequences: a session that ran
+        /// does that itself, and a session that is unwinding does it in
+        /// `abortSession`. The caller owns `gpa` and `io`, which are not
+        /// released here, nor `opts` and `filter`.
+        ///
+        /// Every owned field is cleared and the loop state is reset, so a
+        /// second call on the same instance does nothing and `start` may be
+        /// called again. The model goes first: it is the only thing that may
+        /// still hold memory of its own, and it is disposed through its own
+        /// hook exactly once.
         pub fn deinit(self: *Self) void {
+            self.disposeModel();
             if (self.transcript) |*t| t.deinit();
             self.transcript = null;
             if (self.out) |*q| q.deinit();
@@ -658,44 +923,81 @@ pub fn App(comptime Model: type) type {
                 t.deinit();
                 self.tty = null;
             }
-            self.msg_queue.deinit(self.gpa);
+            self.terminal_restored = false;
+            // `gpa` is undefined until `start`, and a queue that never grew
+            // holds nothing to release.
+            if (self.msg_queue.capacity != 0) self.msg_queue.deinit(self.gpa);
             self.msg_queue = .empty;
+            self.reader = null;
+            self.caps = null;
+            self.tick_timer = null;
+            self.every_timer = null;
+            self.modes = .{};
+            self.last_sig = std.math.maxInt(u64);
+            self.frame_count = 0;
+            self.frame_delta = .zero;
+            self.last_tick = null;
+            self.watchdog.last_ping = null;
+            self.pacer = .{};
+            self.frame_stats = .{};
+            self.render_requested = false;
             self.running = false;
         }
 
         // ── messages ──
-        /// Enqueue a Msg for the next tick. Main-thread only unless the
-        /// app guards concurrent callers with a mutex (§8).
-        pub fn send(self: *Self, msg: Msg) void {
-            self.msg_queue.append(self.gpa, msg) catch return;
+        /// Enqueue `msg` for `update` on a later frame. The queue copies the value.
+        /// Keep referenced payloads live until `update` consumes them or the session ends.
+        ///
+        /// Returns `error.OutOfMemory` when the queue cannot grow. Nothing is
+        /// enqueued and nothing else changes, so the caller decides whether to
+        /// retry or to give up: a message is never dropped silently.
+        ///
+        /// Valid after a successful `start`. Serialize this call with ticks and
+        /// lifecycle operations, not only other senders. `run` takes no lock.
+        /// Workers should publish into a synchronized slot that the loop reads.
+        pub fn send(self: *Self, msg: Msg) std.mem.Allocator.Error!void {
+            try self.msg_queue.append(self.gpa, msg);
         }
 
-        /// Request quit; the loop breaks after the current tick.
+        /// Ask the loop to stop. The current frame runs to its end, `run`
+        /// writes the exit sequence and releases the session.
         pub fn quit(self: *Self) void {
             self.running = false;
         }
 
-        /// True while the loop is running (post-start, pre-quit).
+        /// True between a successful `start` and the exit `quit` requested.
         pub fn isRunning(self: *const Self) bool {
             return self.running;
         }
 
-        /// Replace the event→Msg translator. Returning null drops the
-        /// event (the framework never synthesizes a Msg from it). Ctrl+C
-        /// arrives as a normal `key_press` (Key.ctrl_c) — the filter
-        /// routes it to whatever Msg the app chooses (e.g. `.quit`); the
-        /// library never hard-quits (input.zig:122-124).
+        /// Replace the event→`Msg` translator. Returning null drops the event:
+        /// the framework never synthesizes a message from it. Ctrl+C arrives
+        /// as an ordinary `key_press` (`Key.ctrl_c`), so the filter routes it
+        /// to whatever message the app chooses; the library never quits by
+        /// itself.
+        ///
+        /// The function and everything it closes over must outlive the
+        /// session. It runs on the loop thread inside the frame, before
+        /// `update` for that frame, and may read `Context` but must not
+        /// reenter the App.
         pub fn setFilter(self: *Self, f: *const fn (*Context, Event) ?Msg) void {
             self.filter = f;
         }
 
-        // ── effects (framework-contract.md §6)
-        /// Execute one Cmd's effect. `msg` recurses into update;
-        /// batch/sequence drain each element in order — the loop is
-        /// single-threaded, so each element's effects complete before the
-        /// next starts (orchestrator Q2: identical path for both). `w` is
-        /// null in the degraded (non-TTY) path; mode/title writes are
-        /// skipped there (no terminal), the mode state still tracks.
+        // ── effects ──
+        /// Execute one command's effect and run what it returns, in order.
+        ///
+        /// `msg` re-enters `update` within this frame and processes the
+        /// command that returns next; `batch` and `sequence` take the same
+        /// in-order path, so each element's effects complete before the next
+        /// element starts. `tick` and `every` copy their message into the
+        /// session's timers, replacing whatever those timers held. `println`
+        /// queues a line above the band, `set_title` writes OSC 0, and
+        /// `mouse`/`cursor` write their mode sequences immediately.
+        ///
+        /// `w` is null in a degraded session, where there is no terminal to
+        /// write to: mode and title effects are skipped and only the mode
+        /// state tracks them.
         fn processCmd(self: *Self, cmd: Cmd(Msg), ctx: *Context, w: ?*std.Io.Writer) !void {
             switch (cmd) {
                 .none => {},
@@ -708,36 +1010,36 @@ pub fn App(comptime Model: type) type {
                 .batch => |cmds| for (cmds) |c| try self.processCmd(c, ctx, w),
                 .sequence => |cmds| for (cmds) |c| try self.processCmd(c, ctx, w),
                 .tick => |t| {
-                    if (comptime !@hasField(Msg, "tick"))
-                        @compileError("Cmd.tick requires the model's Msg to declare a `tick` field");
                     const deadline = std.Io.Timestamp.now(self.io.?, .awake)
                         .addDuration(.fromMilliseconds(@as(i64, t.delay_ms)));
-                    self.tick_deadline = deadline;
+                    self.tick_timer = .{ .deadline = deadline, .msg = t.msg };
                 },
                 .every => |t| {
-                    if (comptime !@hasField(Msg, "tick"))
-                        @compileError("Cmd.every requires the model's Msg to declare a `tick` field");
-                    self.every_interval = t.interval_ms;
-                    // Anchor at the arm moment: the first fire is one
-                    // interval after this Cmd, then every interval.
-                    self.last_fire = std.Io.Timestamp.now(self.io.?, .awake);
+                    self.every_timer = .{
+                        .interval_ms = t.interval_ms,
+                        // Anchored at the arm moment: the first fire is one
+                        // interval out, and each fire starts the next cycle.
+                        .last_fire = std.Io.Timestamp.now(self.io.?, .awake),
+                        .msg = t.msg,
+                    };
                 },
                 .println => |text| {
                     if (self.region) |*r| try r.append(.{ .line = text });
                     self.render_requested = true;
                 },
-                .set_title => |t| {
-                    try self.stageTitleNow(t, w);
-                    self.title = t;
+                .set_title => |text| {
+                    _ = try self.stageTitleNow(text, w);
                 },
                 .mouse => |on| {
                     // Immediate mode op; the next frame's View.mouse wins.
-                    try self.stageBytes(if (on) mouse_on else mouse_off, w);
-                    self.modes.mouse = on;
+                    if (try self.stageBytes(if (on) mouse_on else mouse_off, w)) {
+                        self.modes.mouse = on;
+                    }
                 },
                 .cursor => |show| {
-                    try self.stageBytes(if (show) emit.cursor_show else emit.cursor_hide, w);
-                    self.modes.hide_cursor = show;
+                    if (try self.stageBytes(if (show) emit.cursor_show else emit.cursor_hide, w)) {
+                        self.modes.hide_cursor = show;
+                    }
                 },
             }
         }
@@ -765,22 +1067,29 @@ pub fn App(comptime Model: type) type {
             }
         };
 
-        /// Stage an immediate effect (a title or a mode op) through the
-        /// output queue and submit it with one nonblocking write
-        /// attempt — still never blocking. Above the watermark the effect
-        /// is deferred, not grown: the next frame re-applies the
-        /// declaration and emits it. A session without a queue (the
-        /// degraded path) writes through the writer it was handed.
+        /// Stage an immediate effect (a title or a mode op) through the output
+        /// queue and submit it with one nonblocking write attempt. Returns
+        /// whether the bytes were staged.
+        ///
+        /// A false result means the watermark stopped composition: the effect
+        /// was not staged and the mode state is left alone, so the frame this
+        /// marked for repaint re-emits the declaration the terminal has not
+        /// seen. An app that relies on an imperative mode op must therefore
+        /// also declare it in the `View` it returns.
+        ///
+        /// A session without a queue (a degraded session) writes through the
+        /// writer it was handed and reports staged: there is no terminal and
+        /// nothing to defer to.
         fn stageWith(
             self: *Self,
             w: ?*std.Io.Writer,
             ctx: anytype,
             comptime stage: fn (@TypeOf(ctx), *std.Io.Writer) error{WriteFailed}!void,
-        ) error{ FrameTooLarge, WriteFailed }!void {
+        ) error{ FrameTooLarge, WriteFailed }!bool {
             if (self.out) |*q| {
                 if (!q.canCompose()) {
                     self.render_requested = true;
-                    return;
+                    return false;
                 }
                 q.beginFrame();
                 stage(ctx, q.writer()) catch {
@@ -795,33 +1104,46 @@ pub fn App(comptime Model: type) type {
                 }
                 q.commitFrame();
                 _ = try q.drain(&self.tty.?);
-                return;
+                return true;
             }
             if (w) |ww| try stage(ctx, ww);
+            return true;
         }
 
-        fn stageBytes(self: *Self, bytes: []const u8, w: ?*std.Io.Writer) error{ FrameTooLarge, WriteFailed }!void {
-            try self.stageWith(w, StageBytes{ .bytes = bytes }, StageBytes.write);
+        /// Stage `bytes` as one immediate effect. See `stageWith` for what the
+        /// result means.
+        fn stageBytes(
+            self: *Self,
+            bytes: []const u8,
+            w: ?*std.Io.Writer,
+        ) error{ FrameTooLarge, WriteFailed }!bool {
+            return self.stageWith(w, StageBytes{ .bytes = bytes }, StageBytes.write);
         }
 
-        /// Stage the View's declared title into the frame in progress,
-        /// so the OSC 0 change shares the frame's single write instead
-        /// of becoming a write of its own.
+        /// Write the frame's declared title into the frame in progress, so the
+        /// OSC 0 change shares that frame's single write instead of becoming a
+        /// write of its own.
         fn stageTitle(self: *Self, title: []const u8, w: *std.Io.Writer) error{WriteFailed}!void {
             _ = self;
             try (StageTitle{ .title = title }).write(w);
         }
 
-        /// The same OSC 0 write as an immediate effect, outside a frame.
-        fn stageTitleNow(self: *Self, title: []const u8, w: ?*std.Io.Writer) error{ FrameTooLarge, WriteFailed }!void {
-            try self.stageWith(w, StageTitle{ .title = title }, StageTitle.write);
+        /// The same OSC 0 write as an immediate effect, outside a frame. See
+        /// `stageWith` for what the result means.
+        fn stageTitleNow(
+            self: *Self,
+            title: []const u8,
+            w: ?*std.Io.Writer,
+        ) error{ FrameTooLarge, WriteFailed }!bool {
+            return self.stageWith(w, StageTitle{ .title = title }, StageTitle.write);
         }
 
         // ── internals ──
-        /// The interactive init sequence (contract §5.1): caps detect,
-        /// region with the detected width policy, winsize resize, app
-        /// arena, reader, clock anchor. Requires `self.tty` to be set and
-        /// already in raw mode.
+        /// The interactive half of `start`, after the tty is open and raw:
+        /// capability detection, the region, the output queue, the window
+        /// size, both arenas, the reader and the clock anchor. Each step that
+        /// allocates registers its own cleanup, and `start` covers the whole
+        /// sequence.
         fn startTty(self: *Self, io: std.Io, gpa: std.mem.Allocator) !void {
             self.parser = .{};
             self.caps = try caps.Capabilities.detect(gpa, &self.tty.?, &self.parser);
@@ -834,7 +1156,6 @@ pub fn App(comptime Model: type) type {
                 .sync_output = self.caps.?.sync_output,
                 .resize_mode = self.opts.resize_mode,
                 .terminal_reflow = self.opts.terminal_reflow,
-                .width_policy = self.caps.?.widthPolicy(),
             });
             errdefer {
                 self.region.?.deinit();
@@ -854,10 +1175,10 @@ pub fn App(comptime Model: type) type {
             self.running = true;
         }
 
-        /// The degraded (non-TTY) init sequence (contract §5.5): no tty,
-        /// no raw mode, no caps — a region with sync_output = false that
-        /// emits one plain frame. Input is never read; the loop stops
-        /// after that first frame.
+        /// The degraded half of `start`, used when stdin is not a terminal: no
+        /// tty, no raw mode and no capability detection, a region that emits
+        /// one plain frame with no envelope, both arenas, and no reader. The
+        /// loop runs a single frame and stops; `run` paints it at exit.
         fn startPlain(self: *Self, gpa: std.mem.Allocator) !void {
             self.region = try Region.init(gpa, .{
                 .height = self.opts.region_height,
@@ -867,7 +1188,6 @@ pub fn App(comptime Model: type) type {
                 .sync_output = false,
                 .resize_mode = self.opts.resize_mode,
                 .terminal_reflow = self.opts.terminal_reflow,
-                .width_policy = caps.Capabilities.WidthPolicy.zg_unicode,
             });
             errdefer {
                 self.region.?.deinit();
@@ -878,13 +1198,11 @@ pub fn App(comptime Model: type) type {
             self.running = true;
         }
 
-        /// Emit the exit sequences in order: Region.exit (cursor,
-        /// autowrap, sync) then caps.restore (contract §5.4). `run` calls
-        /// this before `deinit`.
-        ///
-        /// An interactive session stages the teardown into the output
-        /// queue and then blocks the remainder out, so the terminal never
-        /// keeps an envelope half-open and nothing staged is lost.
+        /// Write the exit sequences in order — `Region.exit`, then
+        /// `Capabilities.restore` — and get them out. An interactive session
+        /// stages them into the output queue and then blocks until every byte
+        /// has left, so the terminal never keeps an envelope half-open and
+        /// nothing staged is lost.
         fn emitTeardown(self: *Self, w: anytype) !void {
             if (self.out) |*q| {
                 q.beginFrame();
@@ -898,10 +1216,12 @@ pub fn App(comptime Model: type) type {
                 }
                 q.commitFrame();
                 try q.drainAll(self.tty.?.writer());
+                self.terminal_restored = true;
                 return;
             }
             try self.writeTeardown(w);
             try w.flush();
+            self.terminal_restored = true;
         }
 
         fn writeTeardown(self: *Self, w: anytype) !void {
@@ -909,35 +1229,20 @@ pub fn App(comptime Model: type) type {
             if (self.caps) |*c| try c.restore(w);
         }
 
-        /// The loop stalled (the watchdog saw a frame blow its budget).
-        /// Push out what is staged, restore the terminal, stop
-        /// composing, and propagate: a wedged loop must unwind, not keep
-        /// painting into a terminal nobody is reading.
-        fn degradeStall(self: *Self) error{ WriteFailed, FrameTooLarge, WatchdogTripped }!noreturn {
-            if (self.out) |*q| q.abortFrame();
-            if (self.tty) |*t| {
-                const w = t.writer();
-                if (self.out) |*q| {
-                    q.drainAll(w) catch |err| std.log.scoped(.notui_app).warn(
-                        "could not flush the output queue after a stall: {s}",
-                        .{@errorName(err)},
-                    );
-                }
-                self.writeTeardown(w) catch |err| std.log.scoped(.notui_app).warn(
-                    "could not restore the terminal after a stall: {s}",
-                    .{@errorName(err)},
-                );
-                w.flush() catch |err| std.log.scoped(.notui_app).warn(
-                    "could not flush the terminal after a stall: {s}",
-                    .{@errorName(err)},
-                );
-            }
+        /// The loop stalled: a frame blew the watchdog budget. Push out what
+        /// was staged, restore the terminal, stop composing and return
+        /// `error.WatchdogTripped`, so a wedged loop unwinds instead of
+        /// painting into a terminal nobody is reading. `run` then unwinds
+        /// through its own teardown.
+        fn degradeStall(self: *Self) error{WatchdogTripped}!noreturn {
+            self.releaseTerminal();
             self.running = false;
             return error.WatchdogTripped;
         }
 
-        /// Build a fresh Context for this tick. Call before every model
-        /// call so `render_requested`/`buf` changes flow into the frame.
+        /// A fresh `Context` for one model call. Called before each of them so
+        /// `render_requested` and the frame buffer changes flow into the frame;
+        /// the returned value lives on the caller's stack.
         fn makeCtx(self: *Self) Context {
             const r = &self.region.?;
             return .{
@@ -956,19 +1261,14 @@ pub fn App(comptime Model: type) type {
             };
         }
 
-        /// True when the region has unflushed work (first frame, a pending
-        /// resize/height change, queued appends, or a ledger batch the
-        /// terminal has not been sent yet) — forces a render.
+        /// True when the region still owes output: a first frame, a pending
+        /// resize or height change, queued appends, or a ledger batch the
+        /// terminal has not been sent. Such a frame is composed even when the
+        /// declaration did not change.
         fn regionPending(self: *Self) bool {
             const r = self.region.?;
             return r.first_frame or r.width_dirty or r.height_dirty or
                 r.append_queue.items.len > 0 or r.history.items.len > r.history_written;
-        }
-
-        /// Enqueue `Msg.tick` (the single periodic message name; models
-        /// map it to their own timer message in update, §6).
-        fn enqueueTick(self: *Self) !void {
-            try self.msg_queue.append(self.gpa, @as(Msg, .tick));
         }
     };
 }
@@ -1001,7 +1301,7 @@ const TestModel = struct {
     fn view(_: *const TestModel, _: *Context) View(TestModel) {
         return .{ .draw = &draw };
     }
-    fn draw(self: *TestModel, _: *Context, buf: *Buffer) anyerror!void {
+    fn draw(self: *TestModel, _: *Context, buf: *Buffer) !void {
         self.draws += 1;
         _ = try buf.draw(.{}, "hi", 0, 0);
     }
@@ -1033,7 +1333,7 @@ const RecModel = struct {
     fn view(_: *const RecModel, _: *Context) View(RecModel) {
         return .{ .draw = &draw };
     }
-    fn draw(_: *RecModel, _: *Context, _: *Buffer) anyerror!void {}
+    fn draw(_: *RecModel, _: *Context, _: *Buffer) !void {}
 };
 
 /// A model for the Ctrl+C filter test.
@@ -1052,7 +1352,7 @@ const CtrlModel = struct {
     fn view(_: *const CtrlModel, _: *Context) View(CtrlModel) {
         return .{ .draw = &draw };
     }
-    fn draw(_: *CtrlModel, _: *Context, buf: *Buffer) anyerror!void {
+    fn draw(_: *CtrlModel, _: *Context, buf: *Buffer) !void {
         _ = try buf.draw(.{}, "x", 0, 0);
     }
 };
@@ -1171,16 +1471,46 @@ const FakeTty = struct {
     }
 };
 
-/// Wire an app's runtime state against a fake tty, as `start` would for a
-/// real terminal (contract §5.1), minus the live caps queries (the fake
-/// never replies; detection would burn 5×250 ms per test).
-fn setupInteractive(comptime M: type, opts: App(M).Options) !struct { app: App(M), tty: FakeTty } {
-    var fake = try FakeTty.init();
-    errdefer fake.deinit();
-    var app = App(M).initWithOptions(opts);
+/// The fake-tty session `setupInteractive` builds: the app under test and the
+/// test's end of the fake tty.
+///
+/// Construct in the caller's final storage: the reader borrows the App's embedded
+/// tty, so returning an initialized fixture by value would leave a dangling pointer.
+fn InteractiveFixture(comptime M: type) type {
+    return struct {
+        const Self = @This();
+        app: App(M),
+        tty: FakeTty,
+
+        /// Release the app before the test ends of its fake tty; invalidate the fixture.
+        fn deinit(self: *Self) void {
+            self.app.deinit();
+            self.tty.deinit();
+            self.* = undefined;
+        }
+    };
+}
+
+/// Wire an app's runtime state against a fake tty, as `start` would for a real
+/// terminal, minus the live capability queries (the fake never replies;
+/// detection would burn five 250 ms deadlines per test).
+///
+/// The caller supplies stable storage and releases initialized resources with `deinit`.
+fn setupInteractive(
+    comptime M: type,
+    fixture: *InteractiveFixture(M),
+    opts: App(M).Options,
+) !void {
+    fixture.tty = try FakeTty.init();
+    errdefer fixture.tty.deinit();
+
+    // Built in place, so the reader below borrows this tty's final address.
+    fixture.app = App(M).initWithOptions(opts);
+    const app = &fixture.app;
     app.io = testing.io;
     app.gpa = testing.allocator;
-    app.tty = fake.tty();
+    app.tty = fixture.tty.tty();
+    errdefer app.deinit();
     app.caps = .{};
     app.region = try Region.init(testing.allocator, .{
         .height = opts.region_height,
@@ -1190,15 +1520,10 @@ fn setupInteractive(comptime M: type, opts: App(M).Options) !struct { app: App(M
         .resize_mode = opts.resize_mode,
         .terminal_reflow = opts.terminal_reflow,
     });
-    errdefer app.region.?.deinit();
     // The fake tty has no screen: the band's own rows are the whole
     // visible viewport, so no row is ever physically clipped here.
     try app.region.?.resize(80, opts.region_height, opts.region_height);
     app.out = try output.OutputQueue.init(testing.allocator, opts.output);
-    errdefer {
-        app.out.?.deinit();
-        app.out = null;
-    }
     app.arena = std.heap.ArenaAllocator.init(testing.allocator);
     app.scratch = std.heap.ArenaAllocator.init(testing.allocator);
     app.reader = Reader.init(&app.tty.?);
@@ -1207,7 +1532,6 @@ fn setupInteractive(comptime M: type, opts: App(M).Options) !struct { app: App(M
     // Mirror `start`: init builds the model and its initial Cmd is
     // processed through the normal effect path (arms init timers).
     try app.processInit();
-    return .{ .app = app, .tty = fake };
 }
 
 /// A valid model (passes the contract check).
@@ -1222,7 +1546,7 @@ const GoodModel = struct {
     fn view(_: *const GoodModel, _: *Context) View(GoodModel) {
         return .{ .draw = &draw };
     }
-    fn draw(_: *GoodModel, _: *Context, _: *Buffer) anyerror!void {}
+    fn draw(_: *GoodModel, _: *Context, _: *Buffer) !void {}
 };
 
 /// A model missing Msg/update/view (fails the contract check).
@@ -1237,6 +1561,9 @@ const BadModel = struct {
 fn cmdApp(comptime M: type) !App(M) {
     var app = App(M).init();
     app.model = (try M.init(testing.allocator)).model;
+    // The model exists, so `deinit` owns its release, exactly as after a
+    // real `start`.
+    app.model_ready = true;
     app.io = testing.io;
     app.gpa = testing.allocator;
     app.region = try Region.init(testing.allocator, .{ .height = 2, .interactive = false });
@@ -1270,7 +1597,7 @@ test "app: degraded path renders one plain frame, no raw mode" {
     try testing.expect(app.isRunning());
 
     // The degraded tick runs the update/view pass but never emits output;
-    // the single plain frame is rendered at run-exit (§5.5).
+    // the single plain frame is painted by `run` at exit.
     try app.tick();
     try testing.expect(app.region.?.first_frame); // nothing emitted yet
     try testing.expectEqual(@as(usize, 0), app.model.draws);
@@ -1298,7 +1625,7 @@ const PlainModel = struct {
     fn view(_: *const PlainModel, _: *Context) View(PlainModel) {
         return .{ .draw = &draw, .title = "window" };
     }
-    fn draw(_: *PlainModel, _: *Context, buf: *Buffer) anyerror!void {
+    fn draw(_: *PlainModel, _: *Context, buf: *Buffer) !void {
         _ = try buf.draw(.{ .fg = .{ .ansi = .red } }, "hi", 0, 0);
     }
 };
@@ -1331,10 +1658,204 @@ test "app: run in degraded mode stops after one plain frame" {
     try testing.expect(!app.isRunning());
 }
 
+/// A model whose `init` refuses: the runtime is already built when it runs, so
+/// its failure is the one that must still release everything.
+const RefusedInitModel = struct {
+    pub const Msg = union(enum) { pulse };
+
+    fn init(_: std.mem.Allocator) !struct { model: RefusedInitModel, cmd: Cmd(Msg) } {
+        return error.InitRefused;
+    }
+    fn update(_: *RefusedInitModel, _: Msg, _: *Context) !Cmd(Msg) {
+        return .none;
+    }
+    fn view(_: *const RefusedInitModel, _: *Context) View(RefusedInitModel) {
+        return .{ .draw = &draw };
+    }
+    fn draw(_: *RefusedInitModel, _: *Context, buf: *Buffer) !void {
+        _ = try buf.draw(.{}, "x", 0, 0);
+    }
+};
+
+/// The degraded acquisition, for the allocation-failure sweep. It owns a
+/// local App, so the run either returns with everything released or fails
+/// with the same cleanup `start` installed.
+fn acquireDegraded(gpa: std.mem.Allocator) !void {
+    var app = App(TestModel).init();
+    try app.acquire(testing.io, gpa, false);
+    app.deinit();
+}
+
+test "app: a failed Model.init leaves nothing owned and no loop running" {
+    var app = App(RefusedInitModel).init();
+    // The degraded route: no terminal to make raw, but the same single
+    // cleanup every route installs, with the runtime already built.
+    try testing.expectError(error.InitRefused, app.acquire(testing.io, testing.allocator, false));
+
+    try testing.expect(app.region == null);
+    try testing.expect(app.arena == null);
+    try testing.expect(app.scratch == null);
+    try testing.expect(app.out == null);
+    try testing.expect(app.transcript == null);
+    try testing.expect(app.reader == null);
+    try testing.expect(app.caps == null);
+    try testing.expect(app.tty == null);
+    try testing.expectEqual(@as(usize, 0), app.msg_queue.capacity);
+    try testing.expect(!app.isRunning());
+
+    // Releasing again is a no-op on the same instance.
+    app.deinit();
+    try testing.expect(!app.isRunning());
+}
+
+test "app: restarting does not inherit a stale heartbeat or session measurements" {
+    // The first session is a live runtime with an output queue, so its frame
+    // really composes: the counters the restart has to clear start from a
+    // measured frame, not from a runtime that never painted anything.
+    var app = try setupHeadless(TestModel);
+    defer app.deinit();
+    var sink: CountingSink = .{};
+    const transport = output.Transport.from(&sink);
+
+    app.watchdog.budget_ns = 3 * watchdog.default_budget_ns;
+    try app.send(.inc);
+    try app.tick();
+    try testing.expectEqual(@as(i32, 1), app.model.count);
+    const taken = try app.frameHeadless(transport);
+    try testing.expect(taken > 0);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sink.delivered(), "hi"));
+    try testing.expectEqual(@as(u64, 1), app.frame_stats.frames);
+    try testing.expectEqual(@as(u64, 1), app.pacer.samples);
+
+    // A heartbeat older than the budget: exactly what must not survive the
+    // restart, and armed, so the reset is observable rather than assumed.
+    const now = std.Io.Timestamp.now(testing.io, .awake);
+    app.watchdog.ping(.fromNanoseconds(
+        now.nanoseconds - @as(i96, app.watchdog.budget_ns) - 1,
+    ));
+    try testing.expect(app.watchdog.tripped(now));
+    app.deinit();
+    try testing.expect(!app.watchdog.armed());
+
+    // The second session is the degraded route: a live runtime — region and
+    // arenas — but no output queue, so a headless frame composes nothing and
+    // every counter the first session filled is gone.
+    try app.acquire(testing.io, testing.allocator, false);
+    try testing.expect(app.out == null);
+    try app.send(.inc);
+    // An inherited heartbeat this stale would stall the frame right here.
+    try app.tick();
+    try testing.expect(app.watchdog.armed());
+    try testing.expectEqual(@as(i32, 1), app.model.count);
+    try testing.expectEqual(@as(usize, 0), try app.frameHeadless(transport));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sink.delivered(), "hi"));
+    try testing.expectEqual(@as(u64, 0), app.frame_stats.frames);
+    try testing.expectEqual(@as(u64, 0), app.pacer.samples);
+    // The budget is configuration, not session state, so it outlives deinit.
+    try testing.expectEqual(3 * watchdog.default_budget_ns, app.watchdog.budget_ns);
+}
+
+/// A model that owns memory from the session allocator and returns a command
+/// that allocates too, so a startup failure can land on either side of the
+/// model existing.
+const OwnedModel = struct {
+    pub const Msg = union(enum) { tick };
+    buf: []u8 = &.{},
+    disposals: usize = 0,
+
+    fn init(gpa: std.mem.Allocator) !struct { model: OwnedModel, cmd: Cmd(Msg) } {
+        return .{
+            .model = .{ .buf = try gpa.alloc(u8, 64) },
+            .cmd = .{ .println = "note" },
+        };
+    }
+
+    /// The model's own release path. The App calls this exactly once per
+    /// successful `init`.
+    pub fn deinit(self: *OwnedModel, gpa: std.mem.Allocator) void {
+        self.disposals += 1;
+        if (self.buf.len != 0) gpa.free(self.buf);
+        self.buf = &.{};
+    }
+
+    fn update(_: *OwnedModel, _: Msg, _: *Context) !Cmd(Msg) {
+        return .none;
+    }
+    fn view(_: *const OwnedModel, _: *Context) View(OwnedModel) {
+        return .{ .draw = &draw };
+    }
+    fn draw(_: *OwnedModel, _: *Context, buf: *Buffer) !void {
+        _ = try buf.draw(.{}, "o", 0, 0);
+    }
+};
+
+/// The same acquisition driven by the owning model, for the sweep below.
+fn acquireOwned(gpa: std.mem.Allocator) !void {
+    var app = App(OwnedModel).init();
+    try app.acquire(testing.io, gpa, false);
+    app.deinit();
+}
+
+test "app: the model is disposed once, and only when it was built" {
+    var app = App(OwnedModel).init();
+    try app.acquire(testing.io, testing.allocator, false);
+    try testing.expect(app.model_ready);
+
+    app.deinit();
+    try testing.expectEqual(@as(usize, 1), app.model.disposals);
+    try testing.expect(!app.model_ready);
+
+    // The same instance, released again: nothing is disposed twice.
+    app.deinit();
+    try testing.expectEqual(@as(usize, 1), app.model.disposals);
+}
+
+test "app: a model that never started is not disposed" {
+    // A refusing `init` returns no model, so there is nothing to release and
+    // nothing may reach for one.
+    var app = App(RefusedInitModel).init();
+    try testing.expectError(error.InitRefused, app.acquire(testing.io, testing.allocator, false));
+    try testing.expect(!app.model_ready);
+}
+
+test "app: an allocation failure anywhere in startup releases the model too" {
+    // Failing every allocation index in turn reaches the case where the model
+    // was built and its initial command then failed: that memory is the
+    // model's, and only the model's own hook can give it back.
+    try testing.checkAllAllocationFailures(testing.allocator, acquireOwned, .{});
+}
+
+test "app: an allocation failure anywhere in startup releases what came before" {
+    // Every allocation index is failed in turn: a step whose cleanup was
+    // registered too late leaks here.
+    try testing.checkAllAllocationFailures(testing.allocator, acquireDegraded, .{});
+}
+
+test "app: send reports the allocator failure and keeps the message deliverable" {
+    var setup: InteractiveFixture(TimerModel) = undefined;
+    try setupInteractive(TimerModel, &setup, .{ .fps = 1000 });
+    defer setup.deinit();
+
+    // The queue cannot grow: the message is not enqueued, the failure is
+    // reported, and the model has not seen anything.
+    setup.app.gpa = testing.failing_allocator;
+    defer setup.app.gpa = testing.allocator;
+    try testing.expectError(error.OutOfMemory, setup.app.send(.pulse));
+    try testing.expectEqual(@as(usize, 0), setup.app.msg_queue.items.len);
+
+    // Nothing was consumed on the way out, so the same call succeeds. The
+    // session allocator is restored HERE, not at scope exit: everything below
+    // is the success path and has to run on an allocator that still works.
+    setup.app.gpa = testing.allocator;
+    try setup.app.send(.pulse);
+    try setup.app.tick();
+    try testing.expectEqualStrings("p", setup.app.model.seen[0..1]);
+}
+
 test "app: Ctrl+C routes through the filter to quit (never hard-quits)" {
-    var setup = try setupInteractive(CtrlModel, .{ .fps = 0 });
-    defer setup.app.deinit();
-    defer setup.tty.deinit();
+    var setup: InteractiveFixture(CtrlModel) = undefined;
+    try setupInteractive(CtrlModel, &setup, .{ .fps = 0 });
+    defer setup.deinit();
     setup.app.setFilter(&ctrlCFilter);
 
     try setup.tty.writeInput("\x03");
@@ -1343,9 +1864,9 @@ test "app: Ctrl+C routes through the filter to quit (never hard-quits)" {
 }
 
 test "app: without a filter Ctrl+C is dropped and the loop keeps running" {
-    var setup = try setupInteractive(CtrlModel, .{ .fps = 0 });
-    defer setup.app.deinit();
-    defer setup.tty.deinit();
+    var setup: InteractiveFixture(CtrlModel) = undefined;
+    try setupInteractive(CtrlModel, &setup, .{ .fps = 0 });
+    defer setup.deinit();
 
     try setup.tty.writeInput("\x03");
     try setup.app.tick();
@@ -1353,9 +1874,9 @@ test "app: without a filter Ctrl+C is dropped and the loop keeps running" {
 }
 
 test "app: fps-zero replaces a stale geometry query without a model message" {
-    var setup = try setupInteractive(TestModel, .{ .fps = 0 });
-    defer setup.app.deinit();
-    defer setup.tty.deinit();
+    var setup: InteractiveFixture(TestModel) = undefined;
+    try setupInteractive(TestModel, &setup, .{ .fps = 0 });
+    defer setup.deinit();
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
 
@@ -1387,24 +1908,24 @@ test "app: send drains next tick; quit breaks the loop; isRunning reflects state
     var fresh = App(TestModel).init();
     try testing.expect(!fresh.isRunning());
 
-    var setup = try setupInteractive(TestModel, .{ .fps = 1000 });
-    defer setup.app.deinit();
-    defer setup.tty.deinit();
+    var setup: InteractiveFixture(TestModel) = undefined;
+    try setupInteractive(TestModel, &setup, .{ .fps = 1000 });
+    defer setup.deinit();
 
     try testing.expect(setup.app.isRunning());
-    setup.app.send(.inc);
+    try setup.app.send(.inc);
     try setup.app.tick();
     try testing.expectEqual(@as(i32, 1), setup.app.model.count);
 
-    setup.app.send(.quit);
+    try setup.app.send(.quit);
     try setup.app.tick();
     try testing.expect(!setup.app.isRunning());
 }
 
 test "app: unchanged View signature skips draw on idle ticks" {
-    var setup = try setupInteractive(TestModel, .{ .fps = 1000 });
-    defer setup.app.deinit();
-    defer setup.tty.deinit();
+    var setup: InteractiveFixture(TestModel) = undefined;
+    try setupInteractive(TestModel, &setup, .{ .fps = 1000 });
+    defer setup.deinit();
 
     try setup.app.tick(); // first frame: signature change → draw
     try testing.expectEqual(@as(usize, 1), setup.app.model.draws);
@@ -1412,16 +1933,15 @@ test "app: unchanged View signature skips draw on idle ticks" {
     try setup.app.tick(); // idle: no event/msg, stable signature → skip
     try testing.expectEqual(@as(usize, 1), setup.app.model.draws);
 
-    setup.app.send(.inc); // a dispatched msg forces the frame
+    try setup.app.send(.inc); // a dispatched msg forces the frame
     try setup.app.tick();
     try testing.expectEqual(@as(usize, 2), setup.app.model.draws);
 }
 
-/// A model whose drawn text is allocated from the app-lifetime
-/// `frame_arena` (the frame Buffer borrows the slice, cell.zig) and
-/// changes every tick — the soundness regression: with a per-tick-reset
-/// frame arena, `prev` cells alias reused memory, `Cell.eql` sees stale
-/// content, and changed frames never repaint.
+/// A model whose drawn text is allocated from the session `frame_arena`, which
+/// the frame Buffer's cells borrow, and which changes every frame. With a
+/// per-frame reset the previous frame's cells would alias reused memory, the
+/// comparison would see stale content, and changed frames would never repaint.
 const ArenaDrawModel = struct {
     pub const Msg = union(enum) { tick };
     frame: usize = 0,
@@ -1437,7 +1957,7 @@ const ArenaDrawModel = struct {
     fn view(_: *const ArenaDrawModel, _: *Context) View(ArenaDrawModel) {
         return .{ .draw = &draw };
     }
-    fn draw(self: *ArenaDrawModel, ctx: *Context, buf: *Buffer) anyerror!void {
+    fn draw(self: *ArenaDrawModel, ctx: *Context, buf: *Buffer) !void {
         // No space: blank cells emit no bytes (the row erase covers them),
         // so assert on the exact byte stream.
         const text = try std.fmt.allocPrint(ctx.frame_arena, "frame{d}", .{self.frame});
@@ -1446,17 +1966,17 @@ const ArenaDrawModel = struct {
 };
 
 test "app: frame_arena text repaints when the content changes (no prev aliasing)" {
-    var setup = try setupInteractive(ArenaDrawModel, .{ .fps = 1000 });
-    defer setup.app.deinit();
-    defer setup.tty.deinit();
+    var setup: InteractiveFixture(ArenaDrawModel) = undefined;
+    try setupInteractive(ArenaDrawModel, &setup, .{ .fps = 1000 });
+    defer setup.deinit();
 
-    setup.app.send(.tick);
+    try setup.app.send(.tick);
     try setup.app.tick(); // draws "frame1"
     var out: [4096]u8 = undefined;
     const n1 = setup.tty.drainOutput(&out);
     try testing.expect(std.mem.indexOf(u8, out[0..n1], "frame1") != null);
 
-    setup.app.send(.tick);
+    try setup.app.send(.tick);
     try setup.app.tick(); // must repaint: the diff emits "frame2"
     const n2 = setup.tty.drainOutput(&out);
     try testing.expect(std.mem.indexOf(u8, out[0..n2], "frame2") != null);
@@ -1523,7 +2043,7 @@ test "cmd: batch drains each element in order" {
     try testing.expectEqualStrings("abb", app.model.log[0..3]);
 }
 
-test "cmd: sequence drains each element in order (same path as batch, Q2)" {
+test "cmd: sequence drains each element in order, on the batch path" {
     var app = try cmdApp(RecModel);
     defer app.deinit();
     var ctx = app.makeCtx();
@@ -1534,50 +2054,117 @@ test "cmd: sequence drains each element in order (same path as batch, Q2)" {
     try testing.expectEqualStrings("abb", app.model.log[0..3]);
 }
 
-test "cmd: tick fires Msg.tick only after the deadline" {
-    var setup = try setupInteractive(TestModel, .{ .fps = 1000 });
-    defer setup.app.deinit();
-    defer setup.tty.deinit();
+/// A model whose `Msg` has no `tick` payload at all: a timer carries the
+/// message it will deliver, so nothing requires a conventionally named field.
+const TimerModel = struct {
+    pub const Msg = union(enum) { pulse, beat, stop };
+    seen: [8]u8 = undefined,
+    seen_len: usize = 0,
+
+    fn init(_: std.mem.Allocator) !struct { model: TimerModel, cmd: Cmd(TimerModel.Msg) } {
+        return .{ .model = .{}, .cmd = .none };
+    }
+    fn update(self: *TimerModel, msg: Msg, _: *Context) !Cmd(Msg) {
+        self.seen[self.seen_len] = switch (msg) {
+            .pulse => 'p',
+            .beat => 'b',
+            .stop => 's',
+        };
+        self.seen_len += 1;
+        return .none;
+    }
+    fn view(_: *const TimerModel, _: *Context) View(TimerModel) {
+        return .{ .draw = &draw };
+    }
+    fn draw(_: *TimerModel, _: *Context, buf: *Buffer) !void {
+        _ = try buf.draw(.{}, "t", 0, 0);
+    }
+};
+
+test "cmd: tick delivers exactly the message it was armed with, once" {
+    // The premise: this model's message type has no `tick` field, so a timer
+    // that worked would have to carry its own payload.
+    try testing.expect(!@hasField(TimerModel.Msg, "tick"));
+
+    var setup: InteractiveFixture(TimerModel) = undefined;
+    try setupInteractive(TimerModel, &setup, .{ .fps = 1000 });
+    defer setup.deinit();
     var ctx = setup.app.makeCtx();
     var tw: TestWriter = .{};
     tw.init();
 
-    try setup.app.processCmd(.{ .tick = .{ .delay_ms = 40 } }, &ctx, &tw.w);
+    try setup.app.processCmd(.{ .tick = .{ .delay_ms = 40, .msg = .pulse } }, &ctx, &tw.w);
+    try testing.expect(setup.app.tick_timer != null);
 
-    try setup.app.tick(); // before the deadline: no fire
-    try testing.expectEqual(@as(i32, 0), setup.app.model.count);
+    try setup.app.tick(); // before the deadline: nothing delivered
+    try testing.expectEqual(@as(usize, 0), setup.app.model.seen_len);
 
     try std.Io.sleep(testing.io, .fromMilliseconds(60), .awake);
-    try setup.app.tick(); // deadline elapsed: Msg.tick dispatched
-    try testing.expectEqual(@as(i32, 1), setup.app.model.count);
+    try setup.app.tick(); // deadline passed: its own message, not a `tick`
+    try testing.expectEqualStrings("p", setup.app.model.seen[0..1]);
 
-    try setup.app.tick(); // one-shot: cleared, no repeat
-    try testing.expectEqual(@as(i32, 1), setup.app.model.count);
+    try setup.app.tick(); // one-shot: disarmed, nothing more
+    try testing.expectEqual(@as(usize, 1), setup.app.model.seen_len);
+    try testing.expect(setup.app.tick_timer == null);
 }
 
-test "cmd: every re-arms and fires Msg.tick periodically" {
-    var setup = try setupInteractive(TestModel, .{ .fps = 1000 });
-    defer setup.app.deinit();
-    defer setup.tty.deinit();
+test "cmd: every delivers its own message each interval, and re-arming replaces it" {
+    var setup: InteractiveFixture(TimerModel) = undefined;
+    try setupInteractive(TimerModel, &setup, .{ .fps = 1000 });
+    defer setup.deinit();
     var ctx = setup.app.makeCtx();
     var tw: TestWriter = .{};
     tw.init();
 
-    try setup.app.processCmd(.{ .every = .{ .interval_ms = 30 } }, &ctx, &tw.w);
+    try setup.app.processCmd(.{ .every = .{ .interval_ms = 30, .msg = .beat } }, &ctx, &tw.w);
 
-    try setup.app.tick(); // armed this frame: first fire is one interval away
-    try testing.expectEqual(@as(i32, 0), setup.app.model.count);
+    try setup.app.tick(); // armed this frame: the first fire is one interval out
+    try testing.expectEqual(@as(usize, 0), setup.app.model.seen_len);
 
     try std.Io.sleep(testing.io, .fromMilliseconds(50), .awake);
-    try setup.app.tick(); // due: fires and re-arms
-    try testing.expectEqual(@as(i32, 1), setup.app.model.count);
+    try setup.app.tick(); // due: delivers the armed message and starts a cycle
+    try testing.expectEqualStrings("b", setup.app.model.seen[0..1]);
 
     try setup.app.tick(); // just re-armed: not due again
-    try testing.expectEqual(@as(i32, 1), setup.app.model.count);
+    try testing.expectEqual(@as(usize, 1), setup.app.model.seen_len);
+
+    // Re-arming replaces the message, the interval and the cycle anchor.
+    try setup.app.processCmd(.{ .every = .{ .interval_ms = 10, .msg = .pulse } }, &ctx, &tw.w);
+    try std.Io.sleep(testing.io, .fromMilliseconds(50), .awake);
+    try setup.app.tick();
+    try testing.expectEqualStrings("bp", setup.app.model.seen[0..2]);
 
     try std.Io.sleep(testing.io, .fromMilliseconds(50), .awake);
-    try setup.app.tick(); // due again: the re-armed cycle continues
-    try testing.expectEqual(@as(i32, 2), setup.app.model.count);
+    try setup.app.tick();
+    try testing.expectEqualStrings("bpp", setup.app.model.seen[0..3]);
+}
+
+test "cmd: a due timer that cannot enqueue keeps its slot and retries" {
+    var setup: InteractiveFixture(TimerModel) = undefined;
+    try setupInteractive(TimerModel, &setup, .{ .fps = 1000 });
+    defer setup.deinit();
+    var ctx = setup.app.makeCtx();
+    var tw: TestWriter = .{};
+    tw.init();
+
+    try setup.app.processCmd(.{ .tick = .{ .delay_ms = 1, .msg = .pulse } }, &ctx, &tw.w);
+    try std.Io.sleep(testing.io, .fromMilliseconds(20), .awake);
+
+    // The queue cannot grow, so the message is not delivered and the failure
+    // is reported rather than swallowed.
+    setup.app.gpa = testing.failing_allocator;
+    defer setup.app.gpa = testing.allocator;
+    try testing.expectError(error.OutOfMemory, setup.app.tick());
+    try testing.expectEqual(@as(usize, 0), setup.app.model.seen_len);
+    // The timer is still armed, so the message is retried rather than lost.
+    try testing.expect(setup.app.tick_timer != null);
+
+    // Back on the session allocator: the retry below must find a queue that
+    // can grow, which is the whole point of the timer keeping its slot.
+    setup.app.gpa = testing.allocator;
+    try setup.app.tick();
+    try testing.expectEqualStrings("p", setup.app.model.seen[0..1]);
+    try testing.expect(setup.app.tick_timer == null);
 }
 
 /// A model whose `init` arms `Cmd.every` — the framework_counter spinner
@@ -1591,7 +2178,7 @@ const InitCmdModel = struct {
     draws: usize = 0,
 
     fn init(_: std.mem.Allocator) !struct { model: InitCmdModel, cmd: Cmd(InitCmdModel.Msg) } {
-        return .{ .model = .{}, .cmd = .{ .every = .{ .interval_ms = 30 } } };
+        return .{ .model = .{}, .cmd = .{ .every = .{ .interval_ms = 30, .msg = .tick } } };
     }
     fn update(self: *InitCmdModel, msg: Msg, _: *Context) !Cmd(Msg) {
         switch (msg) {
@@ -1602,20 +2189,20 @@ const InitCmdModel = struct {
     fn view(_: *const InitCmdModel, _: *Context) View(InitCmdModel) {
         return .{ .draw = &draw };
     }
-    fn draw(self: *InitCmdModel, _: *Context, buf: *Buffer) anyerror!void {
+    fn draw(self: *InitCmdModel, _: *Context, buf: *Buffer) !void {
         self.draws += 1;
         _ = try buf.draw(.{}, "tick", 0, 0);
     }
 };
 
 test "app: init's every Cmd arms the timer — Msg.tick fires and renders with no input" {
-    var setup = try setupInteractive(InitCmdModel, .{ .fps = 1000 });
-    defer setup.app.deinit();
-    defer setup.tty.deinit();
+    var setup: InteractiveFixture(InitCmdModel) = undefined;
+    try setupInteractive(InitCmdModel, &setup, .{ .fps = 1000 });
+    defer setup.deinit();
 
     // The initial Cmd was processed during setup (mirroring `start`):
     // the periodic timer is armed before any event/msg exists.
-    try testing.expectEqual(@as(u32, 30), setup.app.every_interval.?);
+    try testing.expectEqual(@as(u32, 30), setup.app.every_timer.?.interval_ms);
 
     try setup.app.tick(); // armed this frame: first fire is one interval away
     try testing.expectEqual(@as(usize, 0), setup.app.model.ticks);
@@ -1646,7 +2233,7 @@ test "cmd: println appends one Region.Append.line and forces a render" {
     try testing.expect(app.render_requested);
 }
 
-test "cmd: set_title writes OSC 0 and stores the title" {
+test "cmd: set_title writes OSC 0" {
     var app = try cmdApp(RecModel);
     defer app.deinit();
     var ctx = app.makeCtx();
@@ -1655,7 +2242,6 @@ test "cmd: set_title writes OSC 0 and stores the title" {
 
     try app.processCmd(.{ .set_title = "counter" }, &ctx, &tw.w);
     try testing.expectEqualStrings("\x1b]0;counter\x07", tw.w.buffered());
-    try testing.expectEqualStrings("counter", app.title.?);
 }
 
 test "cmd: mouse and cursor mode ops write the expected bytes" {
@@ -1752,7 +2338,7 @@ const ChurnModel = struct {
     fn view(_: *const ChurnModel, _: *Context) View(ChurnModel) {
         return .{ .draw = &draw };
     }
-    fn draw(self: *ChurnModel, ctx: *Context, buf: *Buffer) anyerror!void {
+    fn draw(self: *ChurnModel, ctx: *Context, buf: *Buffer) !void {
         const text = try std.fmt.allocPrint(ctx.frame_arena, "f{d}", .{self.frame});
         _ = try buf.draw(.{}, text, 0, 0);
         self.draws += 1;
@@ -1834,7 +2420,7 @@ test "app: a short-written frame drains on the next idle tick, receipts commit o
     try testing.expect(app.out.?.pending() > 0);
     // The frame is half-written, so the receipt behind its ledger rows
     // is still outstanding and the block is still retained.
-    try testing.expectEqual(@as(usize, 1), app.region.?.historyPending().len);
+    try testing.expectEqual(@as(usize, 1), (try app.region.?.historyPending()).len);
     try testing.expectEqual(@as(usize, 1), app.transcript.?.liveBlocks());
 
     // Nothing is owed a new frame — same View, same modes, no ledger
@@ -1853,9 +2439,9 @@ test "app: a short-written frame drains on the next idle tick, receipts commit o
     try testing.expectEqual(taken, app.frame_stats.written_bytes);
 
     // Every staged byte reached the terminal, the rows exactly once,
-    // and the receipt was acknowledged with them (C1).
+    // and the receipt was acknowledged with them.
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sink.delivered(), "idle\r\n"));
-    try testing.expectEqual(@as(usize, 0), app.region.?.historyPending().len);
+    try testing.expectEqual(@as(usize, 0), (try app.region.?.historyPending()).len);
     try testing.expectEqual(@as(usize, 0), app.transcript.?.liveBlocks());
     try testing.expectEqual(@as(?transcript.State, null), app.transcript.?.stateOf(block));
 
@@ -1869,12 +2455,12 @@ test "app: a short-written frame drains on the next idle tick, receipts commit o
 }
 
 test "app: a terminal that stopped reading defers frames and stays bounded" {
-    var setup = try setupInteractive(ChurnModel, .{
+    var setup: InteractiveFixture(ChurnModel) = undefined;
+    try setupInteractive(ChurnModel, &setup, .{
         .fps = 1000,
         .output = .{ .capacity = 2048, .watermark = 512 },
     });
-    defer setup.app.deinit();
-    defer setup.tty.deinit();
+    defer setup.deinit();
 
     // The fake terminal's buffer is full and nobody drains it, so every
     // submit would block. Each tick sends a message because a frame is
@@ -1883,7 +2469,7 @@ test "app: a terminal that stopped reading defers frames and stays bounded" {
     const filler = try setup.tty.stopReading();
     var staged: usize = 0;
     for (0..40) |i| {
-        setup.app.send(.tick);
+        try setup.app.send(.tick);
         setup.app.model.frame = i;
         try setup.app.tick();
         staged += setup.app.frame_stats.staged_bytes;
@@ -1901,7 +2487,7 @@ test "app: a terminal that stopped reading defers frames and stays bounded" {
     const composed = setup.app.frame_stats.frames;
     const queued = q.pending();
     for (0..20) |_| {
-        setup.app.send(.tick);
+        try setup.app.send(.tick);
         try setup.app.tick();
     }
     try testing.expectEqual(composed, setup.app.frame_stats.frames);
@@ -1914,7 +2500,7 @@ test "app: a terminal that stopped reading defers frames and stays bounded" {
     defer delivered.deinit(testing.allocator);
     for (0..20) |i| {
         try setup.tty.drainAll(&delivered);
-        setup.app.send(.tick);
+        try setup.app.send(.tick);
         setup.app.model.frame = 100 + i;
         try setup.app.tick();
         staged += setup.app.frame_stats.staged_bytes;
@@ -1949,12 +2535,12 @@ test "app: the pacer caps the frame duty cycle near 50%" {
 }
 
 test "app: input stays responsive while output is backed up" {
-    var setup = try setupInteractive(ChurnQuitModel, .{
+    var setup: InteractiveFixture(ChurnQuitModel) = undefined;
+    try setupInteractive(ChurnQuitModel, &setup, .{
         .fps = 1000,
         .output = .{ .capacity = 1024, .watermark = 256 },
     });
-    defer setup.app.deinit();
-    defer setup.tty.deinit();
+    defer setup.deinit();
     setup.app.setFilter(&ctrlCQuitFilter);
 
     // The fake terminal's buffer is full and nobody drains it, so the
@@ -1962,7 +2548,7 @@ test "app: input stays responsive while output is backed up" {
     // queue up behind it.
     _ = try setup.tty.stopReading();
     for (0..40) |i| {
-        setup.app.send(.tick);
+        try setup.app.send(.tick);
         setup.app.model.frame = i;
         try setup.app.tick();
     }
@@ -1993,7 +2579,7 @@ const ChurnQuitModel = struct {
     fn view(_: *const ChurnQuitModel, _: *Context) View(ChurnQuitModel) {
         return .{ .draw = &draw };
     }
-    fn draw(self: *ChurnQuitModel, ctx: *Context, buf: *Buffer) anyerror!void {
+    fn draw(self: *ChurnQuitModel, ctx: *Context, buf: *Buffer) !void {
         const text = try std.fmt.allocPrint(ctx.frame_arena, "c{d}", .{self.frame});
         _ = try buf.draw(.{}, text, 0, 0);
     }
@@ -2042,7 +2628,7 @@ test "app: settled transcript blocks reach the ledger exactly once" {
     _ = try app.frameHeadless(transport);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sink.delivered(), "alpha\r\n"));
     try testing.expectEqual(@as(usize, 0), std.mem.count(u8, sink.delivered(), "beta\r\n"));
-    try testing.expectEqual(@as(usize, 0), app.region.?.historyPending().len);
+    try testing.expectEqual(@as(usize, 0), (try app.region.?.historyPending()).len);
     try testing.expectEqual(@as(?transcript.State, null), app.transcript.?.stateOf(a));
     try testing.expectEqual(@as(usize, 1), app.transcript.?.liveBlocks());
 
@@ -2051,7 +2637,7 @@ test "app: settled transcript blocks reach the ledger exactly once" {
     // good.
     _ = try app.frameHeadless(transport);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sink.delivered(), "beta\r\n"));
-    try testing.expectEqual(@as(usize, 0), app.region.?.historyPending().len);
+    try testing.expectEqual(@as(usize, 0), (try app.region.?.historyPending()).len);
     try testing.expectEqual(@as(?transcript.State, null), app.transcript.?.stateOf(b));
     try testing.expectEqual(@as(usize, 0), app.transcript.?.liveBlocks());
 
@@ -2061,7 +2647,7 @@ test "app: settled transcript blocks reach the ledger exactly once" {
     _ = try app.frameHeadless(transport);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sink.delivered(), "alpha\r\n"));
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sink.delivered(), "beta\r\n"));
-    try testing.expectEqual(@as(usize, 0), app.region.?.historyPending().len);
+    try testing.expectEqual(@as(usize, 0), (try app.region.?.historyPending()).len);
     try testing.expectEqual(@as(usize, 0), app.transcript.?.liveBlocks());
 }
 
@@ -2081,13 +2667,13 @@ test "app: a blocked transport defers the transcript delta, then commits once" {
     // The block is out of the mutable view but not committed: it is
     // retained until the receipt is accepted.
     try testing.expectEqual(@as(usize, 0), app.transcript.?.mutableBlocks());
-    try testing.expectEqual(@as(usize, 1), app.region.?.historyPending().len);
+    try testing.expectEqual(@as(usize, 1), (try app.region.?.historyPending()).len);
 
     sink.block = false;
     _ = try app.frameHeadless(transport);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sink.delivered(), "held\r\n"));
     try testing.expectEqual(@as(usize, 0), app.transcript.?.liveBlocks());
-    try testing.expectEqual(@as(usize, 0), app.region.?.historyPending().len);
+    try testing.expectEqual(@as(usize, 0), (try app.region.?.historyPending()).len);
 }
 
 test "app: a refused ledger enqueue retries the same delta, losing nothing" {
@@ -2106,7 +2692,7 @@ test "app: a refused ledger enqueue retries the same delta, losing nothing" {
     app.region.?.opts.max_history_bytes = 1;
     try testing.expectError(error.HistoryTooLarge, app.frameHeadless(transport));
     try testing.expectEqual(@as(usize, 0), sink.len);
-    try testing.expectEqual(@as(usize, 0), app.region.?.historyPending().len);
+    try testing.expectEqual(@as(usize, 0), (try app.region.?.historyPending()).len);
     try testing.expectEqual(@as(usize, 1), app.transcript.?.liveBlocks());
 
     // The retry re-emits the SAME rows and the SAME block: they reach
@@ -2115,7 +2701,7 @@ test "app: a refused ledger enqueue retries the same delta, losing nothing" {
     app.region.?.opts.max_history_bytes = 256 * 1024;
     _ = try app.frameHeadless(transport);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sink.delivered(), "kept\r\n"));
-    try testing.expectEqual(@as(usize, 0), app.region.?.historyPending().len);
+    try testing.expectEqual(@as(usize, 0), (try app.region.?.historyPending()).len);
     try testing.expectEqual(@as(?transcript.State, null), app.transcript.?.stateOf(a));
 }
 
@@ -2167,7 +2753,7 @@ const HeaderModel = struct {
     fn view(self: *const HeaderModel, _: *Context) View(HeaderModel) {
         return .{ .draw = &draw, .mouse = self.mouse, .title = self.title };
     }
-    fn draw(self: *HeaderModel, _: *Context, buf: *Buffer) anyerror!void {
+    fn draw(self: *HeaderModel, _: *Context, buf: *Buffer) !void {
         self.draws += 1;
         _ = try buf.draw(.{}, "hdr", 0, 0);
     }
@@ -2211,12 +2797,83 @@ test "app: a failed mode or title stage re-emits on retry, nothing published" {
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sink.delivered(), "\x1b]0;hdr\x07"));
 }
 
+/// Declares its own paint errors, so the View's error set is the model's and
+/// not the allocator's.
+const PaintFailModel = struct {
+    pub const Msg = union(enum) { tick };
+    pub const DrawError = std.mem.Allocator.Error || error{NoGlyph};
+    fail: bool = false,
+    draws: usize = 0,
+
+    fn init(_: std.mem.Allocator) !struct { model: PaintFailModel, cmd: Cmd(PaintFailModel.Msg) } {
+        return .{ .model = .{}, .cmd = .none };
+    }
+    fn update(_: *PaintFailModel, _: Msg, _: *Context) !Cmd(Msg) {
+        return .none;
+    }
+    fn view(_: *const PaintFailModel, _: *Context) View(PaintFailModel) {
+        return .{ .draw = &draw };
+    }
+    fn draw(self: *PaintFailModel, _: *Context, buf: *Buffer) DrawError!void {
+        self.draws += 1;
+        if (self.fail) return error.NoGlyph;
+        _ = try buf.draw(.{}, "glyph", 0, 0);
+    }
+};
+
+test "app: a model's own paint error aborts the frame and reaches the caller" {
+    var app = try setupHeadless(PaintFailModel);
+    defer app.deinit();
+    var sink: CountingSink = .{};
+    const transport = output.Transport.from(&sink);
+
+    app.model.fail = true;
+    try testing.expectError(error.NoGlyph, app.frameHeadless(transport));
+    try testing.expectEqual(@as(usize, 0), sink.len);
+    // Nothing was published and the frame is still owed whole.
+    try testing.expect(app.region.?.first_frame);
+    try testing.expect(app.render_requested);
+
+    // The retry paints the complete frame, once.
+    app.model.fail = false;
+    _ = try app.frameHeadless(transport);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sink.delivered(), "glyph"));
+    try testing.expect(!app.region.?.first_frame);
+}
+
+test "cmd: a mode op the watermark deferred leaves the mode state honest" {
+    var setup: InteractiveFixture(HeaderModel) = undefined;
+    try setupInteractive(HeaderModel, &setup, .{
+        .fps = 1000,
+        .output = .{ .capacity = 64, .watermark = 16 },
+    });
+    defer setup.deinit();
+
+    // The terminal stopped reading, so the queue fills and composition stops.
+    _ = try setup.tty.stopReading();
+    for (0..20) |_| {
+        try setup.app.send(.tick);
+        try setup.app.tick();
+    }
+    try testing.expect(!setup.app.out.?.canCompose());
+    const queued = setup.app.out.?.pending();
+
+    var ctx = setup.app.makeCtx();
+    try setup.app.processCmd(.{ .mouse = true }, &ctx, setup.app.tty.?.writer());
+
+    // The bytes were not staged, so the App must not claim the terminal has
+    // mouse reporting on, and the frame is still owed that sequence.
+    try testing.expect(!setup.app.modes.mouse);
+    try testing.expect(setup.app.render_requested);
+    try testing.expectEqual(queued, setup.app.out.?.pending());
+}
+
 // ── F3: the loop watchdog ────────────────────────────
 
 test "app: a stalled loop trips the watchdog and stops the session" {
-    var setup = try setupInteractive(GoodModel, .{ .fps = 1000 });
-    defer setup.app.deinit();
-    defer setup.tty.deinit();
+    var setup: InteractiveFixture(GoodModel) = undefined;
+    try setupInteractive(GoodModel, &setup, .{ .fps = 1000 });
+    defer setup.deinit();
 
     // The previous frame's heartbeat is ancient: `tick` observes it
     // BEFORE re-pinging, so the stall is caught rather than swallowed.
@@ -2227,9 +2884,9 @@ test "app: a stalled loop trips the watchdog and stops the session" {
 }
 
 test "app: a healthy loop never trips the default watchdog budget" {
-    var setup = try setupInteractive(GoodModel, .{ .fps = 1000 });
-    defer setup.app.deinit();
-    defer setup.tty.deinit();
+    var setup: InteractiveFixture(GoodModel) = undefined;
+    try setupInteractive(GoodModel, &setup, .{ .fps = 1000 });
+    defer setup.deinit();
     try setup.app.tick();
     try testing.expect(setup.app.watchdog.armed());
     try testing.expect(setup.app.watchdog.budget_ns == watchdog.default_budget_ns);

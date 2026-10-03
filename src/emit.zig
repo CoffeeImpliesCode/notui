@@ -1,11 +1,10 @@
-//! ANSI emit helpers: cursor movement, erasure, line reservation,
-//! synchronized output, autowrap, and profile-gated SGR style writing.
+//! ANSI byte writers: cursor movement, erasure, line reservation,
+//! synchronized output, autowrap, and SGR style output.
 //!
-//! Adapted from zigzag `terminal/ansi.zig` constants (:8-63) and the
-//! cursor / SGR writers (:66-122, :294-321). OSC 8 (hyperlinks) is not
-//! copied (deferred per plan).
-//! Every writer is `w: anytype` and must be `std.Io.Writer`-compatible.
-//! No zg import — pure ANSI bytes.
+//! Every writer takes `w: anytype` and calls `writeAll`/`print` on it, so it
+//! works with any `std.Io.Writer`-compatible sink. Writes are not
+//! transactional: a writer error leaves whatever had already been written on
+//! the wire.
 
 const std = @import("std");
 const Color = @import("color.zig").Color;
@@ -14,29 +13,37 @@ const rgbToAnsi = @import("color.zig").rgbToAnsi;
 const rgbToAnsi256 = @import("color.zig").rgbToAnsi256;
 const Style = @import("style.zig").Style;
 
-/// ANSI escape codes.
+/// `ESC`; the introducer every escape sequence below starts with.
 pub const esc = "\x1b";
+
+/// `CSI`, `ESC [`: the introducer for a control sequence.
 pub const csi = esc ++ "[";
 
-// Cursor control
+/// Hides the cursor: `CSI ?25l`.
 pub const cursor_hide = csi ++ "?25l";
+
+/// Shows the cursor: `CSI ?25h`.
 pub const cursor_show = csi ++ "?25h";
 
-// Screen / line control
+/// Erases from the cursor to the end of the screen: `CSI J`.
 pub const screen_clear_below = csi ++ "J";
+
+/// Erases from the cursor to the end of the line: `CSI K`.
 pub const line_clear_right = csi ++ "K";
 
-// Autowrap (DECAWM). The paint envelope turns wrapping off so a frame
-// that writes into the last column cannot defer-wrap and scroll the
-// band; it is restored before the frame closes.
+/// Turns autowrap off (DECAWM): `CSI ?7l`.
 pub const autowrap_off = csi ++ "?7l";
+
+/// Turns autowrap back on (DECAWM): `CSI ?7h`.
 pub const autowrap_on = csi ++ "?7h";
 
-// Text attributes reset
+/// Resets every SGR attribute and colour: `CSI 0m`.
 pub const reset = csi ++ "0m";
 
-// Synchronized output (prevents tearing)
+/// Begins a synchronized-output frame: `CSI ?2026h`.
 pub const sync_start = csi ++ "?2026h";
+
+/// Ends a synchronized-output frame: `CSI ?2026l`.
 pub const sync_end = csi ++ "?2026l";
 
 /// Hide the cursor.
@@ -49,8 +56,7 @@ pub fn showCursor(w: anytype) !void {
     try w.writeAll(cursor_show);
 }
 
-/// Erase from the cursor to the end of the screen (strategy-2 clear;
-/// bounded below the band anchor — never erases above it).
+/// Erases from the cursor to the end of the screen.
 pub fn eraseToEnd(w: anytype) !void {
     try w.writeAll(screen_clear_below);
 }
@@ -74,18 +80,18 @@ pub fn appendLines(w: anytype, n: u16) !void {
     while (left > 0) : (left -= 1) try w.writeAll("\r\n");
 }
 
-/// Turn autowrap off (DECAWM, CSI ?7l) — the paint envelope's first
-/// mode change after the cursor/sync prologue.
+/// Turns autowrap off, so a frame that writes into the last column cannot
+/// defer-wrap and scroll the band it is painting.
 pub fn autowrapOff(w: anytype) !void {
     try w.writeAll(autowrap_off);
 }
 
-/// Turn autowrap back on (DECAWM, CSI ?7h) — the envelope epilogue.
+/// Turns autowrap back on; a frame that turned it off must restore it.
 pub fn autowrapOn(w: anytype) !void {
     try w.writeAll(autowrap_on);
 }
 
-/// Query the cursor position (CPR); the reply arrives as `Event.cpr`.
+/// Queries the cursor position; the reply arrives as `Event.cpr`.
 pub fn queryCursor(w: anytype) !void {
     try w.writeAll(csi ++ "6n");
 }
@@ -100,20 +106,24 @@ pub fn endSync(w: anytype) !void {
     try w.writeAll(sync_end);
 }
 
-/// Emit SGR for `s` assuming a truecolor profile (maximum fidelity).
-/// Emits only non-default fields; a fully default style emits `CSI 0m`.
+/// Emit SGR for `s` as a truecolor terminal renders it, with no downsampling.
+/// See `writeStyleProfile` for what is emitted and when.
 pub fn writeStyle(w: anytype, s: Style) !void {
     try writeStyleProfile(w, s, .truecolor);
 }
 
-/// Emit SGR for `s` with profile-gated color emission:
-/// - `truecolor`: rgb emits `38;2;r;g;b` / `48;2;r;g;b`.
-/// - `ansi256`: rgb downsamples via `rgbToAnsi256` to `38;5;N` / `48;5;N`.
-/// - `ansi`: rgb maps to the nearest base color (`30-37` / `40-47`,
-///   `90-97` / `100-107`).
+/// Emit SGR for `s`, narrowing `.rgb` colours to what `profile` can show.
 ///
-/// Only non-default fields are emitted; a fully default style emits
-/// `CSI 0m`. Hyperlinks (OSC 8) are not emitted (deferred).
+/// Under `.truecolor` an `.rgb` colour is written as `38;2;r;g;b` /
+/// `48;2;r;g;b`; under `.ansi256` it is downsampled to the nearest palette
+/// index and written as `38;5;N` / `48;5;N`; under `.ansi` it maps to the
+/// nearest `AnsiColor`. An `.ansi` or `.ansi256` colour is written unchanged
+/// under every profile, and `.default` writes nothing — so a style with
+/// nothing to write emits `CSI 0m`.
+///
+/// `Style.hyperlink` is not emitted: this package writes no OSC 8.
+///
+/// A writer error leaves a partial SGR sequence on the wire.
 pub fn writeStyleProfile(w: anytype, s: Style, profile: ColorProfile) !void {
     var count: usize = 0;
     const a = s.attrs;

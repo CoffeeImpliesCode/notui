@@ -3,6 +3,11 @@
 //! A pure function: (atom tree + FontMetrics + style) → box pool. Each box
 //! carries its dimensions and the source byte span of the atom it came from,
 //! preserving provenance end to end.
+//!
+//! Everything lands in the caller-owned `BoxList`, which this module
+//! appends to and never frees; `ztex.layout.draw.flatten` reads the result.
+//! Measuring through a wired `FontMetrics` writes that metrics' font cache,
+//! so a layout run is single-threaded per metrics instance.
 
 const std = @import("std");
 const zg = @import("zg");
@@ -17,7 +22,10 @@ const Graphemes = @import("Graphemes");
 /// into a `fraction` node's `data` or a `.mathstyle` node's `data`.
 pub const Style = atom.MathStyle;
 
-/// Layout allocates from the box pool; the only failure is OOM.
+/// What a layout pass can return: `error.OutOfMemory` from the box pool and
+/// `error.InvalidTable` from a delimiter table the bundled metrics cannot
+/// satisfy. Neither leaves a usable partial tree — the caller frees the
+/// `BoxList` and discards it.
 pub const Error = std.mem.Allocator.Error || error{InvalidTable};
 
 /// The `data` a \sqrt row node carries (set by the parser): children
@@ -71,10 +79,26 @@ const pmod_row_data: u32 = 4;
 /// arg, ')'] — the parenthesized argument without the "mod" word.
 const pod_row_data: u32 = 5;
 
-/// Lay out the atom tree rooted at `idx` into the box pool.
+/// Lay out the atom tree rooted at `idx` into the box pool, and return the
+/// index of its root box.
 ///
-/// `size_pt` is the current font size; `current_style` is the effective font
-/// style inherited from enclosing `styled` atoms (default `.italic` math).
+/// `idx` must index a node in `ast`, which is borrowed for the call.
+/// `size_pt` is the current font size in points and `style` the current math
+/// style; `current_style` is the effective font style inherited from
+/// enclosing `styled` atoms, `.italic` for ordinary math. Boxes are appended
+/// to `list`, so an index the caller already holds keeps naming its own box.
+///
+/// `fm` is borrowed for the call and may be written through — a wired
+/// `FontMetrics` caches during a lookup — so it must not be used
+/// concurrently from another thread. `ast` is read-only: nothing is
+/// appended to it. The boxes appended to `list` survive the call; the
+/// environment path's transient per-cell, per-row and per-column lists
+/// are allocated from `list.gpa` and released before `layout` returns.
+/// Nothing is read from the file system.
+///
+/// On any error the boxes already appended stay in `list`; the returned
+/// index is not produced, so a caller that needs an all-or-nothing result
+/// discards the pool.
 pub fn layout(
     list: *box.BoxList,
     ast: *const atom.Ast,
@@ -1406,8 +1430,8 @@ fn cellTrailingIc(
 /// close?], each row a `.row` of cell atoms): the matrix family (matrix /
 /// pmatrix / bmatrix / Bmatrix / vmatrix / Vmatrix), cases, aligned and
 /// array. Every geometry constant below was verified against the
-/// XeTeX+unicode-math reference (\showbox at 10pt + per-glyph extraction
-/// at 36pt; see notes/feat-envs.md):
+/// XeTeX+unicode-math reference (\showbox at 10pt plus per-glyph extraction
+/// at 36pt):
 ///   · CELLS lay out at the current style/size. cases forces its SECOND
 ///     column to text style (per the feature spec; TeX's \array sets ALL
 ///     cells in $...$ text style — a nuance that only shows in

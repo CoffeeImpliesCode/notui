@@ -29,7 +29,11 @@
         "bench",
         "examples",
         "README.md",
+        "ANALYZER-TRIAGE.json",
         "PORTING.md",
+        "FAST_COVERAGE.md",
+        "NEXT.md",
+        "ROADMAP.md",
         "vendor",
     },
 }

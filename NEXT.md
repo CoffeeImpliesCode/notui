@@ -25,13 +25,13 @@ SS, needs more than one codepoint.
 Decoder regressions cover Unicode text, reported-field precedence,
 named keys, modifier shortcuts, and noncharacter and scalar boundaries.
 
-## Reading `zbc` reports
+## Reading analyzer reports
 
 `zig-gate` prints the first 30 lines of the zbc report and counts only
 `error(` lines, so a warnings-only run reads as "0 potential issue(s)".
-zbc itself selects the project's own 41 files (vendor trees excluded) and
-reports at most one finding per rule per file. For the full list, run the
-command in `AGENTS.md`.
+zbc selects the project's own non-vendor files — the gate drops vendor
+through `GATE_EXCLUDE` — and reports at most one finding per rule per file.
+For the full list, run the command in `AGENTS.md`.
 
 Its float↔int rules are a token walk over the cast expression, not dataflow:
 a bound that is a file-scope identifier, a unary-minus expression, or a
@@ -40,10 +40,23 @@ value derived from an opaque call is "unproved" however correct it is. Write
 or pass the value through a small helper — as `clampedIndex` does for the
 `coverageRowFast` kernel — rather than restating magic numbers.
 
-`zig-gate` reported one `error(` finding in this run, and it was real:
-`expandTabs` sized its buffer with `line.len + 8`, which wraps when a line
-is within eight bytes of `maxInt(usize)` and would under-allocate for the
-spaces a tab expands to. It is now `line.len +| 8`. The remaining zbc
-output is warnings — chiefly `index-minus-one-without-zero-guard`, the same
+Whether a diagnostic is a defect is a recorded result, not a judgement call.
+[`ANALYZER-TRIAGE.json`](ANALYZER-TRIAGE.json) classifies all 132
+occurrences of the `bb4d44bf013b` tree: 82 false positives, 50 intentional
+test assertions, none a confirmed runtime defect. Read that ledger before
+treating a new analyzer line as a bug, and extend it rather than re-derive
+the site. The classification is source and caller review against documented
+premises; it is not a proof that the code is memory-safe, and nothing is
+suppressed, so the strict gate stays red.
+
+One zbc `error(` finding was real: `expandTabs` sized its buffer with
+`line.len + 8`, which wraps when a line is within eight bytes of `maxInt(usize)`
+and would under-allocate for the spaces a tab expands to. It is now
+`line.len +| 8` (`src/markdown.zig`). The rest of that run's zbc output was
+warnings — chiefly `index-minus-one-without-zero-guard`, the same
 unproved-index walk, on indexes the surrounding code already proves
 non-empty.
+
+There is no completed current `zbc` verdict: the last serial attempt,
+`zbc --jobs=1`, crashed in its binding cache with exit 134. The zbc tables in
+`README.md` are per-run historical numbers, not a standing total.

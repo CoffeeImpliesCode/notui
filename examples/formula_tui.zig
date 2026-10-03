@@ -130,8 +130,10 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // Font context: owns the embedded LM faces (CFF outlines served by
-    // glyphOutline) — "init once, render many".
-    var ctx = try ztex.Context.init(gpa);
+    // glyphOutline) — "init once, render many". The caller's `std.Io` goes
+    // in explicitly: ztex never picks a backend for us, and the provider
+    // behind `init.io` is what `loadFont` and font discovery would use.
+    var ctx = try ztex.Context.init(gpa, io);
     defer ctx.deinit();
 
     // Non-TTY degradation: one plain frame (PPM or ASCII dump), no tty.
@@ -511,17 +513,23 @@ fn msSince(t0: u64) f32 {
 }
 
 /// Render `src` at `size_pt` through the ztex facade, rasterize the draw
-/// list, and transmit the bitmap under `formula_id`. A re-transmit
-/// replaces the previous image and its placement (kitty spec) — the
-/// caller re-places after. `src` must outlive the draw list (the render
-/// aliases it); the rasterizer reads it during this call only.
+/// list with `ctx`'s real font outlines, and transmit the bitmap under
+/// `formula_id`. A re-transmit replaces the previous image and its placement
+/// (kitty spec) — the caller re-places after. `src` must outlive the draw
+/// list (the render aliases it); the rasterizer reads it during this call
+/// only. `ctx` is borrowed and never written.
 ///
-/// Returns `EmptyFormula` for blank layouts (no ink), and the parse/
-/// layout error for invalid LaTeX — callers keep the last good preview.
-/// On a parse error `err_info` (when non-null) is filled with the kind +
-/// offending span (ztex.parse.Info). `stats` receives the parse (ztex
-/// render) and render (rasterize) durations; on a parse error the render
-/// stage keeps its previous value.
+/// Returns `error.EmptyFormula` for a blank layout (no ink) and the
+/// ztex parse or layout error for invalid LaTeX; on any error the last good
+/// preview stays displayed. With `kitty` false the call does nothing and
+/// succeeds, so the caller treats "transmitted" as the real signal.
+///
+/// `err_info` (when non-null) follows the ztex rule: the PARSE stage fills it
+/// on every parse failure it returns, `Info.span` is `null` for a failure
+/// with no position, and a LAYOUT-stage failure leaves it untouched. Pass
+/// `null` when nothing will read it. `stats` receives the parse and rasterize
+/// durations; a parse failure still records the parse time and leaves the
+/// render stage at its previous value.
 fn updatePreview(
     gpa: std.mem.Allocator,
     ctx: *const ztex.Context,
@@ -556,9 +564,14 @@ fn updatePreview(
     }, bmp.data);
 }
 
-/// The ztex parse errors (the lexer/parser kinds that fill `Info`).
-/// `formatErr` reads the Info only for these — other errors (layout,
-/// allocation) leave it untouched.
+/// Positioned ztex parse errors, whose diagnostics are safe to read after `ztex.render`.
+/// Each tag below records a non-null source span.
+///
+/// `error.OutOfMemory` is deliberately NOT here: `ztex.render` returns it
+/// from the layout stage too, and a layout-stage allocation failure leaves
+/// `Info` untouched, so reading it there would report the previous parse's
+/// failure. `formatErr` reads `Info` only under this predicate, which is what
+/// makes passing an uninitialised `Info` safe.
 fn isParseError(err: anyerror) bool {
     return switch (err) {
         error.DanglingEscape,
@@ -604,10 +617,15 @@ fn drawInput(
     return cx - x;
 }
 
-/// Render `err` into `hint` (a one-line band message): the ztex parse
-/// errors show the TeX-style message + 1-based line:col of the offending
-/// span; anything else falls back to the bare error name. `err_span`
-/// receives the offending span (for the red input-line marking).
+/// Render `err` into `hint` (a one-line band message).
+///
+/// A ztex parse error shows the TeX-style message plus the 1-based line:col
+/// of the offending input, and marks `err_span` for the red input-line
+/// highlight. Other failures, including allocation failures from either parsing or
+/// layout, fall back to the bare error name without reading `Info`.
+///
+/// `info` is read only for a positioned parse failure; otherwise it may be uninitialised.
+/// The result borrows `hint_buf`; insufficient space clears `hint`.
 fn formatErr(
     hint: *?[]const u8,
     hint_buf: []u8,
@@ -617,12 +635,13 @@ fn formatErr(
     err_span: *ztex.atom.Span,
 ) void {
     if (isParseError(err)) {
-        err_span.* = info.span;
+        const span = info.span.?;
+        err_span.* = span;
         // 1-based line:col of the span start (formulas are single-line in
         // practice, but the computation is general).
         var line: u32 = 1;
         var col: u32 = 1;
-        const start = @min(info.span.start, src.len);
+        const start = @min(span.start, src.len);
         for (src[0..start]) |b| {
             if (b == '\n') {
                 line += 1;
@@ -642,9 +661,10 @@ fn formatErr(
 }
 
 /// `updatePreview` as a predicate for the live-preview paths: true when a
-/// fresh bitmap is on screen. On any error the last good preview stays
-/// displayed and `hint` gets the error (rendered below the preview at
-/// `hint_row`); on success the hint clears.
+/// fresh bitmap is on screen and `hint` is cleared. On any error the last
+/// good preview stays displayed and `hint` receives the message (rendered
+/// below the preview at `hint_row`); `err_span` keeps its previous value
+/// unless the failure had a source position.
 fn preview(
     gpa: std.mem.Allocator,
     ctx: *const ztex.Context,
@@ -862,8 +882,23 @@ fn drawText(
     if (cx1 <= cx0) return;
     const ncols: usize = @intCast(cx1 - cx0);
     const row_buf = try dl.glyph_arena.allocator().alloc(f32, ncols);
-    // Structurally identical to coverage.QuadCurve (3x [2]f32) — reuse
-    // the transformed array without copying.
+    // Reuse the transformed outline as `coverage.QuadCurve` without
+    // copying: both structs declare the same fixed representation — extern,
+    // three `[x, y]` f32 pairs as `p0`, `p1`, `p2`, no padding — so the two
+    // byte views are the same bytes. That is a declaration on each side,
+    // and this is where it is checked; nothing below costs a copy.
+    comptime {
+        const Curve = @typeInfo(@TypeOf(outline.curves.items)).pointer.child;
+        const drawn = @typeInfo(Curve).@"struct";
+        const swept = @typeInfo(coverage.QuadCurve).@"struct";
+        std.debug.assert(drawn.layout == .@"extern" and swept.layout == .@"extern");
+        std.debug.assert(@sizeOf(Curve) == @sizeOf(coverage.QuadCurve));
+        std.debug.assert(drawn.fields.len == swept.fields.len);
+        for (drawn.fields, swept.fields) |d, s| {
+            std.debug.assert(std.mem.eql(u8, d.name, s.name));
+            std.debug.assert(d.type == s.type);
+        }
+    }
     const cov_curves: []const coverage.QuadCurve =
         std.mem.bytesAsSlice(coverage.QuadCurve, std.mem.sliceAsBytes(outline.curves.items));
 

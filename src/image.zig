@@ -1,41 +1,41 @@
-//! Kitty graphics image protocol: transmit, place, and delete images in
-//! the terminal's image cache via APC sequences (`\x1b_G...\x1b\\`).
+//! The Kitty graphics protocol: transmit, place and delete images through
+//! APC-G sequences (`ESC _` … `ESC \`).
 //!
-//! Wire format (kitty graphics protocol):
-//!   transmit: `\x1b_Ga=t,q=1,f=<fmt>,s=<w>,v=<h>[,i=<id>],m=<m>;<base64>\x1b\\`
-//!     — `a=t` transmits ONLY: nothing is displayed until `place`
-//!       renders it. `q=1` suppresses the OK response. Payload chunked
-//!       across frames: the first frame carries the full parameter set
-//!       with `m=1` while more chunks follow (`m=0` final); continuation
-//!       frames carry only `m=1;`/`m=0;` before the payload.
-//!   place:    CUP first: `\x1b[<row>;<col>H` then
-//!             `\x1b_Ga=p,q=1,i=<id>[,p=<pid>][,c=<cells>,r=<cells>][,z=<z>]\x1b\\`
-//!     — position is the MOVED CURSOR (`c`/`r` are the SPAN in cells);
-//!       `p=` re-places (moves) an existing placement; no `w=`/`h=` —
-//!       source cropping is not supported.
-//!   delete:   `\x1b_Ga=d,q=1\x1b\\` (all) | `\x1b_Ga=d,q=1,i=<id>\x1b\\`
+//! Every writer takes `w: anytype` and works with any
+//! `std.Io.Writer`-compatible sink. Base64 chunks are encoded into a fixed
+//! stack buffer, so a transmit allocates nothing.
 //!
-//! Every writer is `w: anytype` and must be `std.Io.Writer`-compatible.
-//! Base64 chunks are encoded into a fixed stack buffer — no allocation in
-//! the hot path. No zg import — pure ANSI bytes.
+//! An image is sent once with `transmit` and positioned afterwards with
+//! `place`, which moves the cursor rather than carrying coordinates.
+//!
+//! Wire parameters used here:
+//!
+//! - transmit (`a=t`) sends without displaying; `q=1` suppresses the OK
+//!   reply. A payload longer than one frame is chunked: the first frame
+//!   carries the full parameter set with `m=1` while more follow, later
+//!   frames carry only `m=1;` or `m=0;` before their chunk.
+//! - place (`a=p`) is preceded by a CUP to the target cell. `c`/`r` are the
+//!   span in CELLS, not a source size; `w`/`h` cropping is not supported.
+//! - delete (`a=d`) with an id deletes one cached image, without one deletes
+//!   all of them.
 
 const std = @import("std");
 
 /// Kitty graphics protocol surface (`notui.image.kitty`).
 pub const kitty = struct {
-    /// APC introducer (`ESC _`).
+    /// APC introducer, `ESC _`.
     const apc = "\x1b_";
-    /// ST terminator (`ESC \`).
+    /// String terminator, `ESC \`.
     const st = "\x1b\\";
-    /// Base64 chunk size; raw payload chunks are `(size / 4) * 3` bytes
-    /// (zigzag `sendKittyGraphicsPayload` uses the same 4096-byte buffer).
+    /// Base64 characters per frame. It must be a multiple of 4 so that a
+    /// frame of `(chunk_b64 / 4) * 3` raw bytes encodes to exactly
+    /// `chunk_b64` characters and fills the scratch buffer.
     const chunk_b64 = 4096;
 
-    /// Image payload formats (`f=` parameter). Raw pixel data is 24-bit
-    /// RGB (`f=24`) or 32-bit RGBA (`f=32`); PNG bytes use `f=100`.
+    /// The `f=` payload format: raw 24-bit RGB, raw 32-bit RGBA, or PNG.
     pub const Format = enum { rgb, rgba, png };
 
-    /// Display size in cells (`c`/`r` span).
+    /// A display size in cells.
     pub const CellSize = struct {
         width: u32,
         height: u32,
@@ -71,18 +71,35 @@ pub const kitty = struct {
         z_index: ?i32 = null,
     };
 
-    /// Transmit `data` to the Kitty graphics cache. `a=t` transmits
-    /// ONLY — nothing is displayed; the image renders where `place`
-    /// later puts it. `data` is raw pixels for `.rgb`/`.rgba`
-    /// (`width*height*3` / `width*height*4` bytes) or PNG bytes for
-    /// `.png`. The payload is base64-encoded and chunked into APC
-    /// frames of at most 4096 base64 bytes (3072 raw bytes). `q=1`
-    /// suppresses the OK response every frame would otherwise emit.
+    /// Send `data` to the terminal's image cache without displaying it;
+    /// `place` renders it afterwards.
     ///
-    /// Graceful: emits nothing when `width == 0`, `height == 0`, or
-    /// `data.len == 0`.
+    /// `data` is raw pixels for `.rgb` and `.rgba` — `width * height * 3` and
+    /// `width * height * 4` bytes respectively — and PNG bytes for `.png`,
+    /// which this function does not measure. The payload is base64-encoded
+    /// into frames of at most 4096 characters (3072 raw bytes each), and
+    /// `q=1` suppresses the OK reply every frame would otherwise emit.
+    ///
+    /// `error.ImageSizeMismatch` when `data.len` disagrees with the geometry
+    /// the raw formats declare, and `error.DegenerateImage` when `width` or
+    /// `height` is 0: both leave the cache untouched, so a caller that
+    /// transmits the wrong number of bytes never puts a corrupt image where a
+    /// later `place` would find it.
+    ///
+    /// A writer error can leave a partial frame in the cache.
     pub fn transmit(w: anytype, opts: TransmitOptions, data: []const u8) !void {
-        if (opts.width == 0 or opts.height == 0 or data.len == 0) return;
+        if (opts.width == 0 or opts.height == 0) return error.DegenerateImage;
+        if (bytesPerPixel(opts.format)) |bpp| {
+            // The pixel count cannot overflow u64 for two u32 extents, but
+            // scaling it by the channel count can, and a wrapped size would
+            // compare equal to a small payload.
+            const pixels = @as(u64, opts.width) * @as(u64, opts.height);
+            const declared = std.math.mul(u64, pixels, bpp) catch
+                return error.ImageSizeMismatch;
+            if (declared != data.len) return error.ImageSizeMismatch;
+        } else if (data.len == 0) {
+            return error.DegenerateImage;
+        }
 
         const encoder = std.base64.standard.Encoder;
         const raw_chunk_max = (chunk_b64 / 4) * 3;
@@ -118,13 +135,24 @@ pub const kitty = struct {
         }
     }
 
-    /// Place a previously transmitted image (`id`). Position is the
-    /// MOVED CURSOR: CUP to the 1-indexed absolute `row`/`col` cell
-    /// first, then this emits `a=p,q=1` there (`c`/`r` in the APC are
-    /// the SPAN in cells). `p=` re-places an existing placement (moves
-    /// it, no accumulation). `w`/`h` source cropping is not supported.
-    /// `z_index` stacks (negative beneath text).
+    /// Render an image already in the cache at the 1-indexed absolute cell
+    /// `row`, `col`.
+    ///
+    /// Position is the moved cursor: this writes the CUP itself and leaves
+    /// the cursor on the cell it placed at, so a caller that paints after
+    /// this must move the cursor back. `size` is the span in CELLS (`c`/`r`),
+    /// and omitting it asks for the image's native pixel size; `w`/`h` source
+    /// cropping is not supported. Re-using the same (`id`, `placement`) moves
+    /// the image instead of leaving a trail, and a negative `z_index` renders
+    /// it beneath the text.
+    ///
+    /// `error.CellOutOfRange` without output when `row` or `col` is zero:
+    /// this API requires explicit one-based cells. `Region.placeAt` derives them from
+    /// a measured anchor.
+    ///
+    /// A writer error can leave the cursor moved with no placement emitted.
     pub fn place(w: anytype, opts: PlaceOptions) !void {
+        if (opts.row == 0 or opts.col == 0) return error.CellOutOfRange;
         try w.print("\x1b[{d};{d}H", .{ opts.row, opts.col });
         try w.print(apc ++ "Ga=p,q=1,i={d}", .{opts.id});
         if (opts.placement) |p| try w.print(",p={d}", .{p});
@@ -133,9 +161,10 @@ pub const kitty = struct {
         try w.writeAll(st);
     }
 
-    /// Delete images from the Kitty cache. `null` deletes everything
-    /// (`a=d,q=1`); an `id` deletes just that cached image
-    /// (`a=d,q=1,i=<id>`).
+    /// Remove images from the cache: `id` removes that one, and `null`
+    /// removes all of them.
+    ///
+    /// A writer error can leave the delete half-written.
     pub fn delete(w: anytype, id: ?u32) !void {
         try w.writeAll(apc ++ "G");
         if (id) |i| {
@@ -144,6 +173,16 @@ pub const kitty = struct {
             try w.writeAll("a=d,q=1");
         }
         try w.writeAll(st);
+    }
+
+    /// Bytes per pixel for the raw formats, or null for `.png`, whose
+    /// container carries its own geometry.
+    fn bytesPerPixel(f: Format) ?u64 {
+        return switch (f) {
+            .rgb => 3,
+            .rgba => 4,
+            .png => null,
+        };
     }
 
     fn formatCode(f: Format) u8 {
@@ -202,44 +241,87 @@ test "image: transmit with explicit cache id" {
     );
 }
 
-test "image: transmit chunks large payload across m=1/m=0 frames" {
+test "image: transmit chunks a payload larger than one frame" {
     var t: TestWriter = .{};
     t.init();
 
-    // 3073 bytes = exactly one full 3072-byte (4096-base64) chunk plus a
-    // 1-byte tail, forcing two frames: m=1 then m=0. 3072 'A' bytes encode
-    // as "QUFB" x 1024; a trailing 'A' encodes as "QQ==".
-    var data: [3073]u8 = undefined;
+    // 769 RGBA pixels are 3076 bytes: one full 3072-byte (4096-base64) chunk
+    // plus a 4-byte tail, forcing two frames, m=1 then m=0. The
+    // tail must retain all four bytes, including its base64 padding.
+    var data: [769 * 4]u8 = undefined;
     @memset(&data, 'A');
-    try kitty.transmit(&t.w, .{ .format = .rgba, .width = 32, .height = 32 }, &data);
+    try kitty.transmit(&t.w, .{ .format = .rgba, .width = 769, .height = 1 }, &data);
 
     var expected: [8192]u8 = undefined;
     var ew = std.Io.Writer.fixed(&expected);
-    try ew.writeAll("\x1b_Ga=t,q=1,f=32,s=32,v=32,m=1;");
+    try ew.writeAll("\x1b_Ga=t,q=1,f=32,s=769,v=1,m=1;");
     var i: usize = 0;
     while (i < 1024) : (i += 1) try ew.writeAll("QUFB");
-    try ew.writeAll("\x1b\\\x1b_Gm=0;QQ==\x1b\\");
+    try ew.writeAll("\x1b\\\x1b_Gm=0;QUFBQQ==\x1b\\");
 
     try std.testing.expectEqualStrings(ew.buffered(), t.w.buffered());
 }
 
-test "image: transmit is a no-op for degenerate input" {
+test "image: transmit rejects geometry that does not match the payload" {
+    // The terminal would cache a truncated or over-long image and a later
+    // place would render it as-is, so a mismatch has to be reported rather
+    // than transmitted.
     var t: TestWriter = .{};
     t.init();
-    try kitty.transmit(&t.w, .{ .format = .rgba, .width = 0, .height = 2 }, &[_]u8{1});
+    try std.testing.expectError(
+        error.ImageSizeMismatch,
+        kitty.transmit(&t.w, .{ .format = .rgba, .width = 2, .height = 2 }, &[_]u8{1}),
+    );
     try std.testing.expectEqualStrings("", t.w.buffered());
 
     var t2: TestWriter = .{};
     t2.init();
-    try kitty.transmit(&t2.w, .{ .format = .rgba, .width = 2, .height = 0 }, &[_]u8{1});
+    try std.testing.expectError(
+        error.ImageSizeMismatch,
+        kitty.transmit(&t2.w, .{ .format = .rgb, .width = 2, .height = 2 }, &[_]u8{1} ** 16),
+    );
     try std.testing.expectEqualStrings("", t2.w.buffered());
 
+    // A zero extent has no pixels to send, whatever the payload holds.
     var t3: TestWriter = .{};
     t3.init();
-    try kitty.transmit(&t3.w, .{ .format = .rgba, .width = 2, .height = 2 }, "");
+    try std.testing.expectError(
+        error.DegenerateImage,
+        kitty.transmit(&t3.w, .{ .format = .rgba, .width = 0, .height = 2 }, &[_]u8{1}),
+    );
+    try std.testing.expectError(
+        error.ImageSizeMismatch,
+        kitty.transmit(&t3.w, .{ .format = .rgba, .width = 2, .height = 2 }, ""),
+    );
+    try std.testing.expectError(
+        error.DegenerateImage,
+        kitty.transmit(&t3.w, .{ .format = .png, .width = 1, .height = 1 }, ""),
+    );
     try std.testing.expectEqualStrings("", t3.w.buffered());
 }
 
+test "image: transmit does not measure a png payload" {
+    // PNG carries its own geometry, so the declared size is advisory and any
+    // non-empty payload goes through.
+    var t: TestWriter = .{};
+    t.init();
+    try kitty.transmit(&t.w, .{ .format = .png, .width = 7, .height = 9 }, "PNGDATA");
+    try std.testing.expect(std.mem.indexOf(u8, t.w.buffered(), "s=7,v=9") != null);
+}
+
+test "image: place rejects a zero cell" {
+    var t: TestWriter = .{};
+    t.init();
+    try std.testing.expectError(
+        error.CellOutOfRange,
+        kitty.place(&t.w, .{ .id = 1, .col = 0, .row = 2 }),
+    );
+    try std.testing.expectError(
+        error.CellOutOfRange,
+        kitty.place(&t.w, .{ .id = 1, .col = 3, .row = 0 }),
+    );
+    try std.testing.expectEqualStrings("", t.w.buffered());
+}
 test "image: place cached image" {
     var t: TestWriter = .{};
     t.init();

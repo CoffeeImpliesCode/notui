@@ -5,20 +5,33 @@
 //! the draw list's total ascent so all content sits at non-negative y inside
 //! the viewBox. Text is emitted with its baseline at `y` (SVG default
 //! dominant-baseline is alphabetic).
+//!
+//! This module renders and writes; it does not lay out. `render` allocates
+//! the returned bytes from the allocator it is given and touches no I/O;
+//! `writeFile` is the only entry that opens a file, and it does so against
+//! the caller `std.Io`.
+//!
+//! Every attribute value written from a caller-supplied slice is XML-escaped,
+//! so `Options.font_family` and `Options.text_font_family` are data, not
+//! markup: a quote or ampersand in either reaches the output as an entity
+//! and cannot reshape the document.
 
 const std = @import("std");
 const layout = @import("ztex.layout");
 const draw = layout.draw;
 const atom = draw.atom;
 
+/// Frame and font choices for `render` and `writeFile`. The struct is
+/// read-only during the call; `padding` is in points, like every other
+/// number here.
 pub const Options = struct {
-    /// empty margin around the content (pt)
+    /// Extra margin in points; zero retains the renderer's automatic ink margin.
     padding: f32 = 0,
-    /// optional background fill
+    /// `null` emits no background rectangle; a color emits an alpha-bearing fill.
     background: ?draw.Color = null,
-    /// font family for math runs (italic variables, operators, big ops)
+    /// Borrowed math font-family list; defaults to Latin Modern then serif fallbacks.
     font_family: []const u8 = "Latin Modern Math, Latin Modern Roman, DejaVu Serif, serif",
-    /// font family for upright runs (\text, \mathrm, \mathbf, …)
+    /// Borrowed upright font-family list; defaults to Latin Modern Roman then serif fallbacks.
     text_font_family: []const u8 = "Latin Modern Roman, DejaVu Serif, serif",
 };
 
@@ -48,7 +61,13 @@ fn fontSpec(style: atom.CharStyle, opts: *const Options) FontSpec {
     };
 }
 
-/// Serialize a draw list to an SVG string. Caller owns the returned bytes.
+/// Serialize a draw list to an SVG string. Caller owns the returned bytes
+/// and releases them with `gpa`.
+///
+/// Allocates only the result; performs no I/O and reads no global state.
+/// `Text.bytes` are borrowed for the call only, so a synthesized glyph the
+/// draw list owns in its `glyph_arena` must outlive this call, not the
+/// result. `error.OutOfMemory` leaves nothing allocated.
 pub fn render(gpa: std.mem.Allocator, dl: *const draw.DrawList, opts: Options) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(gpa);
@@ -90,11 +109,17 @@ pub fn render(gpa: std.mem.Allocator, dl: *const draw.DrawList, opts: Options) !
                 const fs = fontSpec(t.style, &opts);
                 try buf.print(
                     gpa,
-                    "<text x=\"{d}pt\" y=\"{d}pt\" font-size=\"{d}pt\" font-family=\"{s}\" font-style=\"{s}\"",
-                    .{ t.x + pad, t.y + base, t.size, fs.family, fs.style },
+                    "<text x=\"{d}pt\" y=\"{d}pt\" font-size=\"{d}pt\" font-family=\"",
+                    .{ t.x + pad, t.y + base, t.size },
                 );
+                try escapeAppend(gpa, &buf, fs.family);
+                try buf.appendSlice(gpa, "\" font-style=\"");
+                try escapeAppend(gpa, &buf, fs.style);
+                try buf.append(gpa, '"');
                 if (fs.weight.len > 0) {
-                    try buf.print(gpa, " font-weight=\"{s}\"", .{fs.weight});
+                    try buf.appendSlice(gpa, " font-weight=\"");
+                    try escapeAppend(gpa, &buf, fs.weight);
+                    try buf.append(gpa, '"');
                 }
                 try buf.print(gpa, " fill=\"#{s}\">", .{colorHex(t.color)});
                 try escapeAppend(gpa, &buf, t.bytes);
@@ -122,7 +147,13 @@ pub fn render(gpa: std.mem.Allocator, dl: *const draw.DrawList, opts: Options) !
     return buf.toOwnedSlice(gpa);
 }
 
-/// Write the SVG for a draw list to `path` (created/truncated).
+/// Write the SVG for a draw list to `path`, creating or truncating it.
+///
+/// `io` must stay valid for the duration of the call and is not retained. On
+/// `error.OutOfMemory` no file is opened. File-system failures can leave `path`
+/// absent, empty, partially written, or complete; inspect it before recovery.
+/// `path` is resolved against the process working
+/// directory, and the file the call creates is the caller's to remove.
 pub fn writeFile(gpa: std.mem.Allocator, io: std.Io, path: []const u8, dl: *const draw.DrawList, opts: Options) !void {
     const svg = try render(gpa, dl, opts);
     defer gpa.free(svg);
@@ -146,9 +177,11 @@ fn hexByte(v: u8, out: []u8) void {
     out[1] = hex[v & 0x0f];
 }
 
-/// Parse a color from a name (`white`, `black`, …) or hex (`#RRGGBB[AA]`).
-/// Returns null for `none`/`transparent` or anything unrecognized (no
-/// background).
+/// Parse a color from a name (`white`, `black`, …) or hex (`#RRGGBB[AA]`,
+/// hex digits only, alpha defaulting to opaque). Matching is exact and
+/// case-sensitive. `null` means "no colour": `none`, `transparent`, a hex
+/// string of the wrong length or with a non-hex digit, and any other
+/// unrecognised name.
 pub fn parseColor(s: []const u8) ?draw.Color {
     if (std.mem.eql(u8, s, "none") or std.mem.eql(u8, s, "transparent")) return null;
     if (s.len > 0 and s[0] == '#') return parseHex(s[1..]);
@@ -181,7 +214,8 @@ fn parseHex(s: []const u8) ?draw.Color {
     return c;
 }
 
-/// XML-escape text content: `& < > "`.
+/// XML-escape a text or attribute value: `&`, `<`, `>` and `"`. Every value
+/// this module writes from a caller slice goes through here.
 fn escapeAppend(gpa: std.mem.Allocator, buf: *std.ArrayList(u8), text: []const u8) !void {
     for (text) |c| {
         switch (c) {
@@ -320,4 +354,43 @@ test "svg: parseColor resolves names and hex" {
     try testing.expectEqual(@as(u8, 128), c.g);
     try testing.expectEqual(@as(u8, 0), c.b);
     try testing.expectEqual(@as(u8, 255), c.a);
+}
+
+test "svg: escapes caller font families written as attribute values" {
+    var dl = draw.DrawList.init(testing.allocator);
+    defer dl.deinit();
+    _ = try dl.add(.{ .text = .{
+        .bytes = "x",
+        .x = 0,
+        .y = 0,
+        .size = 10,
+        .style = .italic,
+        .color = .{ .r = 0, .g = 0, .b = 0 },
+        .src_start = 0,
+        .src_end = 1,
+    } });
+    _ = try dl.add(.{ .text = .{
+        .bytes = "h",
+        .x = 0,
+        .y = 0,
+        .size = 10,
+        .style = .roman,
+        .color = .{ .r = 0, .g = 0, .b = 0 },
+        .src_start = 1,
+        .src_end = 2,
+    } });
+    dl.width = 5;
+    dl.height = 8;
+    dl.depth = 2;
+    const svg = try render(testing.allocator, &dl, .{
+        .font_family = "a\" onload=\"evil&",
+        .text_font_family = "b<\"c",
+    });
+    defer testing.allocator.free(svg);
+    // The quote is an entity, so it cannot end the attribute and start a
+    // new one; the raw sequence never reaches the document.
+    const attr = "font-family=\"a&quot; onload=&quot;evil&amp;\"";
+    try testing.expect(std.mem.indexOf(u8, svg, attr) != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "font-family=\"b&lt;&quot;c\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "onload=\"evil") == null);
 }

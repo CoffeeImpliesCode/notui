@@ -1,16 +1,22 @@
 //! ztex.parse.lexer — LaTeX math tokenizer.
 //!
-//! Pre-lexes the whole source into the superflat AST's flat token table
-//! (house pattern, cf. `~/projects/{vain,skript}`). One forward pass over
-//! `ast.src` appends a `Token` per lexical element; whitespace and comments
-//! are skipped. Every token carries its byte span into the source, so later
-//! atoms map back to source text in O(1).
+//! Pre-lexes the whole source into the superflat AST's flat token table. One
+//! forward pass over `ast.src` appends a `Token` per lexical element;
+//! whitespace and comments are skipped. Every token carries its byte span
+//! into the source, so later atoms map back to source text in O(1).
+//!
+//! `lex` appends to a caller-owned `atom.Ast` and never frees it: on error
+//! the tokens emitted before the failure stay in `ast.tokens`, and the
+//! caller decides whether to keep them.
 
 const std = @import("std");
 const atom = @import("ztex.atom");
 const zg = @import("zg");
 const parse_err = @import("error.zig");
 
+/// Everything `lex` can return: `error.OutOfMemory` from appending a token,
+/// plus the two input failures below. Each corresponds to exactly one
+/// `ztex.parse.Kind`, which is what lets `err_info` be filled on every path.
 pub const Error = std.mem.Allocator.Error || error{
     /// a backslash at end of input with nothing after it
     DanglingEscape,
@@ -19,9 +25,25 @@ pub const Error = std.mem.Allocator.Error || error{
 };
 
 /// Pre-lex `ast.src` into `ast.tokens`. Whitespace and comments are skipped.
-/// On a lex error, `err_info` (when non-null) is filled with the kind and
-/// the offending byte span before the error is returned.
+///
+/// `err_info` (when non-null) is filled before EVERY error this returns,
+/// including `error.OutOfMemory`: a lex error records the offending byte
+/// span, and an allocation failure records `Kind.out_of_memory` with a
+/// `null` span. On success the out-param is untouched. On error the tokens
+/// appended before the failure stay in `ast.tokens`.
 pub fn lex(ast: *atom.Ast, err_info: ?*parse_err.Info) Error!void {
+    lexInto(ast, err_info) catch |err| {
+        switch (err) {
+            error.OutOfMemory => if (err_info) |info| {
+                info.* = .{ .kind = .out_of_memory, .span = null };
+            },
+            else => {},
+        }
+        return err;
+    };
+}
+
+fn lexInto(ast: *atom.Ast, err_info: ?*parse_err.Info) Error!void {
     const src = ast.src;
     var pos: usize = 0;
     while (pos < src.len) {
@@ -281,8 +303,8 @@ test "lexer: dangling escape is an error" {
     try testing.expectEqual(@as(usize, 3), a.tokens.items.len);
     // the offending input is the dangling backslash itself
     try testing.expectEqual(parse_err.Kind.dangling_escape, err_info.kind);
-    try testing.expectEqual(@as(u32, 3), err_info.span.start);
-    try testing.expectEqual(@as(u32, 4), err_info.span.end);
+    try testing.expectEqual(@as(u32, 3), err_info.span.?.start);
+    try testing.expectEqual(@as(u32, 4), err_info.span.?.end);
 }
 
 test "lexer: utf-8 codepoint keeps its byte span" {
@@ -299,8 +321,8 @@ test "lexer: invalid utf-8 is an error" {
     var err_info: parse_err.Info = undefined;
     try testing.expectError(error.InvalidUtf8, lex(&a, &err_info));
     try testing.expectEqual(parse_err.Kind.invalid_utf8, err_info.kind);
-    try testing.expectEqual(@as(u32, 0), err_info.span.start);
-    try testing.expectEqual(@as(u32, 1), err_info.span.end);
+    try testing.expectEqual(@as(u32, 0), err_info.span.?.start);
+    try testing.expectEqual(@as(u32, 1), err_info.span.?.end);
 }
 
 test "lexer: scanUntilStructural matches the scalar reference" {

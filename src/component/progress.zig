@@ -1,7 +1,8 @@
-//! Progress: a ratio bar with a styled fill/empty segments, an
+//! Progress: a ratio bar with a styled fill and empty segment, an
 //! optional prefix label, an optional per-cell fill gradient, and an
-//! optional percent suffix (baseui-contract.md §4.4). Static —
-//! `advance` is always false.
+//! optional percent suffix. Static — `advance` is always false and the
+//! app drives `value`, so one `draw` per frame paints the current
+//! ratio.
 
 const std = @import("std");
 const Buffer = @import("../buffer.zig").Buffer;
@@ -9,29 +10,45 @@ const Style = @import("../style.zig").Style;
 const Color = @import("../color.zig").Color;
 const Clock = @import("component.zig").Clock;
 
+/// A ratio meter: `value` against `total`, drawn as a bar of `width`
+/// cells. Nothing here is allocated per frame except the formatted
+/// percent suffix, which lands in the component's own `percent_buf`.
 pub const Progress = struct {
+    /// Current amount; `draw` divides it by `total`. Use `setValue` to
+    /// keep it inside `[0, total]`.
     value: f64 = 0,
+    /// Amount that means a full bar.
     total: f64 = 100,
-    /// Bar length in cells.
+    /// Bar length in cells, clipped to the columns left after the optional label.
     width: u16 = 40,
-    /// Optional prefix "label " before the bar (styled with label_style).
+    /// Optional prefix "label " before the bar (styled with label_style),
+    /// borrowed and never freed here.
     label: ?[]const u8 = null,
+    /// Style for the label and its trailing space.
     label_style: Style = .{},
+    /// Character for a filled cell; borrowed.
     full_char: []const u8 = "█",
+    /// Character for an empty cell; borrowed.
     empty_char: []const u8 = "░",
-    /// Char at the fill edge when the bar is partially filled.
+    /// Char drawn at the fill edge when the bar is not full, borrowed
+    /// like `full_char` and never copied, so it must outlive the buffer
+    /// that shows the cells. `null` draws `full_char` at the edge, which
+    /// is what the default does.
     head_char: ?[]const u8 = null,
+    /// Style for filled cells (and the fill edge).
     full_style: Style = .{ .fg = .{ .ansi = .cyan } },
+    /// Style for empty cells.
     empty_style: Style = .{ .fg = .{ .ansi256 = 245 } },
     /// Styled " 42%" suffix; null => no percent.
     percent_style: ?Style = null,
     /// When both are set, the filled cells get a per-cell gradient
-    /// (interpolateColor over the fill range).
+    /// (interpolateColor over the fill range) that overrides
+    /// `full_style`'s colour.
     gradient_a: ?Color = null,
     gradient_b: ?Color = null,
-    /// Scratch for the percent suffix: `draw` formats into this field
+    /// Storage for the percent suffix: `draw` formats into this field
     /// and the cells borrow it, so the component must not move between
-    /// `draw` and the buffer render (same pattern as Text.scratch).
+    /// `draw` and the render of the buffer that shows those cells.
     percent_buf: [8]u8 = undefined,
 
     /// Progress never animates.
@@ -66,7 +83,7 @@ pub const Progress = struct {
         const filled_all: usize = @intFromFloat(
             std.math.clamp(@floor(ratio * @as(f64, @floatFromInt(self.width))), 0.0, max_cells),
         );
-        const bar_cells: u16 = @min(self.width, avail);
+        const bar_cells: u16 = @min(self.width, avail -| consumed);
         const filled: u16 = @intCast(@min(filled_all, @as(usize, bar_cells)));
         const empty: u16 = bar_cells - filled;
         const bar_x: u16 = x + consumed;
@@ -103,22 +120,26 @@ pub const Progress = struct {
         return consumed;
     }
 
-    /// Set progress value, clamped to [0, total] (zigzag progress.zig:98-101).
+    /// Set the progress value, clamped to `[0, total]`.
     pub fn setValue(self: *Progress, value: f64) void {
         self.value = @max(0, @min(value, self.total));
     }
 
-    /// Set progress as a percentage (0-100).
+    /// Set the value from a percentage of `total` (100 = full). Not
+    /// clamped: a percentage outside 0..100 puts `value` outside
+    /// `[0, total]`, which `draw` clamps when it measures the ratio.
     pub fn setPercent(self: *Progress, pct: f64) void {
         self.value = (pct / 100.0) * self.total;
     }
 
-    /// Increment progress.
+    /// Add `amount` to the value through `setValue`, so the result
+    /// stays inside `[0, total]`.
     pub fn increment(self: *Progress, amount: f64) void {
         self.setValue(self.value + amount);
     }
 
-    /// Set the total.
+    /// Set the amount that means a full bar. Does not re-clamp `value`;
+    /// the next `setValue` or `increment` does.
     pub fn setTotal(self: *Progress, total: f64) void {
         self.total = total;
     }
@@ -287,4 +308,16 @@ test "progress: label truncates at the edge" {
     try std.testing.expectEqual(@as(u16, 6), consumed); // label capped at 6, bar dropped
     try std.testing.expectEqualStrings("a", buf.get(0, 0).grapheme);
     try std.testing.expectEqualStrings("f", buf.get(5, 0).grapheme);
+}
+
+test "progress: label leaves only the remaining columns at the widest buffer edge" {
+    const width = std.math.maxInt(u16);
+    var buf = try Buffer.init(test_alloc, width, 1);
+    defer buf.deinit();
+    var p: Progress = .{ .width = width, .label = "dl", .percent_style = .{} };
+
+    const consumed = try p.draw(&buf, width - 4, 0, .fromNanoseconds(0));
+    try std.testing.expectEqual(@as(u16, 4), consumed);
+    try std.testing.expectEqualStrings("d", buf.get(width - 4, 0).grapheme);
+    try std.testing.expectEqualStrings("░", buf.get(width - 1, 0).grapheme);
 }

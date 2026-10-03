@@ -1,4 +1,15 @@
-//! notui library root.
+//! Inline-first terminal UI toolkit for native Zig 0.16 consumers.
+//!
+//! Register the package's `notui` module, then import this root. Its namespaces expose
+//! drawing primitives, components, the app loop, and explicit testing/inspection helpers.
+//! `app.App(Model)` owns terminal lifecycle; `buffer.Buffer` and `region.Region` let a
+//! caller own its loop and transport. Initialize storage owners, register one `deinit`,
+//! draw borrowed text, and render before releasing those borrows.
+//!
+//! This root does not publish a C ABI or transitively expose dependency import names.
+//! Formula rendering is a separate registered family: `ztex`, `ztex.atom`, `ztex.parse`,
+//! `ztex.layout`, and `ztex.svg`. Pure drawing is transport-independent; terminal,
+//! input, and capture helpers require native POSIX descriptors and a compatible live `Io`.
 
 const std = @import("std");
 
@@ -23,9 +34,7 @@ pub const image = @import("image.zig");
 pub const buffer = @import("buffer.zig");
 pub const region = @import("region.zig");
 pub const input = @import("input.zig");
-// base-ui presentation layer: components compose against any Buffer.
 pub const component = @import("component/root.zig");
-// app-framework layer. app.zig re-exports App/View/Cmd/Context.
 pub const context = @import("context.zig");
 pub const command = @import("command.zig");
 pub const view = @import("view.zig");

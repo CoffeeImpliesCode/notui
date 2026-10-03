@@ -1,25 +1,31 @@
-//! Cell: a grapheme slice, its style, and the wide-glyph continuation
-//! flag. Shape from architecture §5 (slice-based, unlike zigzag
-//! screen.zig's `char: u21`). No zg import.
+//! One buffer cell: a borrowed grapheme slice, its style, and the flag that
+//! marks the continuation half of a wide grapheme.
 
 const std = @import("std");
 const Style = @import("style.zig").Style;
 
-/// A single cell in the buffer grid.
+/// What one grid position paints.
 ///
-/// `grapheme` points into the app's text arena; it is borrowed, never
-/// copied (architecture §3). A wide grapheme occupies two columns: the
-/// lead cell carries the grapheme with `wide = false`; the continuation
-/// cell carries the same style, an empty grapheme, and `wide = true`.
+/// A wide grapheme occupies two columns: the lead cell carries the grapheme
+/// with `wide = false`, and the column after it carries the same `style`, an
+/// empty `grapheme`, and `wide = true`.
 pub const Cell = struct {
-    /// Grapheme text, borrowed from the caller.
+    /// The grapheme to paint, borrowed from whoever drew it and never
+    /// copied. The bytes must stay alive and unchanged for as long as the
+    /// cell is read: a `Buffer` retains the slice, so the caller's text (a
+    /// component's scratch, a model arena) has to outlive the cell.
+    ///
+    /// The default, `" "`, is the blank cell: it paints one space.
     grapheme: []const u8 = " ",
-    /// Cell style.
+    /// The style to paint the grapheme with. Its `hyperlink`, when set, is
+    /// borrowed on the same terms as `grapheme`.
     style: Style = .{},
-    /// True for the continuation cell of a wide grapheme.
+    /// True for the continuation cell of a wide grapheme: it carries no
+    /// grapheme of its own and is skipped when rendering.
     wide: bool = false,
 
-    /// Structural equality: slice eql + style eql + wide flag.
+    /// True when the two cells would paint identically: the same grapheme
+    /// bytes, an equal `style`, and the same `wide` flag.
     pub fn eql(self: Cell, other: Cell) bool {
         return self.wide == other.wide and
             std.mem.eql(u8, self.grapheme, other.grapheme) and

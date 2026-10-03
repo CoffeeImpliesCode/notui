@@ -1,30 +1,49 @@
-//! Coverage rasterization for quadratic bezier outlines.
+//! Scanline coverage rasterization for quadratic bezier outlines.
 //!
-//! Port of nogui `shaders/sweep.frag`: analytic quadratic-bezier
-//! scanline coverage. Each pixel window is 1x1 with its lower-left
-//! corner at (offset.x, offset.y), in Y-up space (FreeType convention).
+//! `coverageRow` sweeps every curve against a row of 1x1 pixel windows with
+//! its lower-left corner at `(x_start + i, y)`, in Y-up space, and returns
+//! each pixel's covered fraction clamped to `[0, 1]`. Signed area fills the
+//! interior to the RIGHT of travel, which in Y-up is a clockwise outer
+//! contour; a PostScript or CFF outline wound counter-clockwise has to be
+//! reversed by the caller first.
 //!
-//! Two correctness fixes over the reference: every curve is split at its
-//! coordinate extrema before sweeping (the single-root intersection is
-//! exact only for monotonic quadratics), and the area term integrates
-//! the quadratic exactly instead of the secant trapezoid, which
-//! under-counts curved edges by their deviation from the chord.
+//! A row of pixels shares one `y` and differs only in `x`, so a row is swept
+//! `lanes`-wide as an `@Vector` of x-offsets, with the per-curve scalars
+//! hoisted and the per-lane conditionals branchless `@select`s. The vector
+//! path produces bit-identical results to the scalar one.
 //!
-//! A row of pixels shares the same y and differs only in x, so the row
-//! is swept in parallel as an `@Vector` of x-offsets: per-curve scalars
-//! (y-bounds, vertical-line test, delta signs) are hoisted and computed
-//! once; per-lane conditionals are branchless `@select`s. The vector
-//! path is bit-identical to the scalar reference (tested).
+//! Both entry points allocate nothing and take no ownership; `out` is
+//! caller-owned and is fully overwritten.
 
 const std = @import("std");
 const testing = std.testing;
 
-/// A quadratic bezier in Y-up space; the shape contract shared with the
-/// font-outline side (B1). Declared here independently — no ztex import.
-pub const QuadCurve = struct {
+/// A quadratic bezier control polygon in Y-up space: the curve starts at
+/// `p0`, is steered by `p1`, and ends at `p2`.
+///
+/// Every field is an `[x, y]` pair in that order, the three sit back to
+/// back in the `p0`, `p1`, `p2` declaration order with no padding between
+/// them, and the struct is `extern`, so that layout is fixed: it is the C
+/// layout of three `[2]f32` pairs. A caller holding those same bytes — a
+/// font outline, or a `3 x [2]f32` array — may read them as
+/// `[]const QuadCurve` with no copy, provided its own declaration is the
+/// same fixed layout; check that at the cast.
+pub const QuadCurve = extern struct {
+    /// Curve start, `[x, y]`.
     p0: [2]f32,
+    /// Steer point, `[x, y]`.
     p1: [2]f32,
+    /// Curve end, `[x, y]`.
     p2: [2]f32,
+};
+
+/// The result of `monotonicize`.
+pub const MonoSplit = struct {
+    /// `pieces[0..n]` holds the split, in travel order and each piece's
+    /// direction preserved; the entries past `n` are undefined.
+    pieces: [4]QuadCurve,
+    /// How many entries of `pieces` are live; 1 to 4.
+    n: u8,
 };
 
 /// SIMD lane count for `coverageRow`.
@@ -134,8 +153,8 @@ inline fn intersectMonotonic(comptime T: type, qa: T, c0: T, c1: T, c2: T, targe
     return sel(T, near_linear, lin, quad);
 }
 
-/// Horizontal check (§8.3 h_check): a >= c -> d; else b <= c -> 1 - d;
-/// else the monotonic root at c.
+/// The horizontal-line case of the sweep: `a >= c` returns `d`, else
+/// `b <= c` returns `1 - d`, else the monotonic root at `c`.
 inline fn hCheck(comptime T: type, qa: T, c0: T, c1: T, c2: T, a: T, b: T, c: f32, d: f32) T {
     const cc = fromF32(T, c);
     const dd = fromF32(T, d);
@@ -188,13 +207,6 @@ fn extremumT(qa: f32, c0: f32, c1: f32) ?f32 {
     return null;
 }
 
-/// Up to 4 monotonic-in-x-and-y pieces of one quadratic (fixed [4] stack
-/// array, no allocation).
-pub const MonoSplit = struct {
-    pieces: [4]QuadCurve,
-    n: u8,
-};
-
 /// Append `piece` to `pieces`, splitting it at its y-extremum first (if
 /// any); returns the new count.
 fn appendMonoPiece(pieces: *[4]QuadCurve, n: u8, piece: QuadCurve) u8 {
@@ -209,10 +221,18 @@ fn appendMonoPiece(pieces: *[4]QuadCurve, n: u8, piece: QuadCurve) u8 {
     return n + 1;
 }
 
-/// Split a quadratic at its x-extremum (if any) and then each piece at
-/// its y-extremum (if any): every returned piece is monotonic in both x
-/// and y, so the single-root intersections in the sweep are exact.
-/// Direction (p0 -> p2) is preserved; at most 4 pieces.
+/// Splits `curve` into pieces that are each monotonic in both x and y, which
+/// is what makes the single-root intersections in the sweep exact.
+///
+/// A curve that turns inside a pixel window is split at each interior
+/// coordinate extremum, so the result is one piece when `curve` is already
+/// monotonic and at most 4 otherwise. Direction (`p0` to `p2`) is preserved
+/// and consecutive pieces share their split point exactly, so the pieces
+/// together trace the original curve.
+///
+/// A turn shallower than the sweep's precision is not split, so a piece can
+/// keep an extremum whose coordinate deviates from its chord by a fraction
+/// too small to affect the result.
 pub fn monotonicize(curve: QuadCurve) MonoSplit {
     var result: MonoSplit = undefined;
     result.n = 0;
@@ -438,15 +458,19 @@ fn scanlineSweepVec(
 
 // ── public row API ───────────────────────────────
 
-/// Sum the sweep over every curve for a row of pixels at
-/// [x_start, x_start + out.len) x [y, y + 1), clamped to [0, 1].
-/// Every curve is swept as monotonic pieces (a curve turning inside a
-/// pixel window breaks the single-root intersections). Signed area
-/// fills the interior to the RIGHT of travel (CW in Y-up); callers
-/// feeding PostScript/CFF outlines (outer CCW) reverse contours first.
-/// Curves disjoint from the y-window are skipped once for the whole row;
-/// the rest are swept in `lanes`-wide vectors (the tail uses a partial
-/// vector). out.len >= 1.
+/// Sweep `curves` into one row of pixel coverage.
+///
+/// `out[i]` is the covered fraction of the window with its lower-left corner
+/// at `(x_start + i, y)`, summed over every curve and clamped to `[0, 1]`.
+/// Every entry of `out` is overwritten, and an empty `out` is a no-op, so a
+/// caller may pass any length including 0. `curves` is read-only and not
+/// retained.
+///
+/// Every curve is swept as `monotonicize` pieces, because a curve that turns
+/// inside a pixel window breaks the single-root intersections the sweep
+/// relies on. Curves whose control hull misses the row's y-window are skipped
+/// once for the whole row; the rest are swept `lanes` pixels at a time, the
+/// last chunk partially filled.
 pub fn coverageRow(curves: []const QuadCurve, y: f32, x_start: f32, out: []f32) void {
     @memset(out, 0);
     for (curves) |c| {
@@ -550,14 +574,13 @@ inline fn addPiece(diff: []f32, out: []f32, piece: QuadCurve, y: f32, x_start: f
     // Step. Pixel i's window is [x_start + i, x_start + i + 1); the sweep
     // returns dir * span exactly when x_start + i >= extent_max, i.e.
     // i >= i_step. @ceil partitions exactly — the sweep's `<=` includes
-    // the touch, so the extent_max-integer pixel is stepped too (its
-    // correction range stops at i_step - 1, keeping it on dir * span).
-    // NOTE: FAST_COVERAGE.md's literal formulas (floor(extent_max) -
-    // x_start + 1 with corrections through ceil(extent_max)) double-count
-    // non-integer extents: the pixel at ceil(extent_max) would get BOTH
-    // the step and a correction whose sweep value is dir * span. The
-    // ceil(i_step) scheme with corrections capped at i_step - 1 is
-    // equivalent at integer boundaries and exact for fractional x_start.
+    // the touch, so the extent_max-integer pixel is stepped too.
+    //
+    // The corrections are capped at i_step - 1 rather than run through
+    // ceil(extent_max): a pixel at ceil(extent_max) would then take BOTH the
+    // step and a correction that computes the same dir * span, double-counting
+    // every non-integer extent. Capping keeps the integer boundaries exact
+    // and the fractional x_start values correct.
     const i_step = @ceil(extent_max - x_start);
     // coverageRowFast falls back above diff_cap, so out.len is small
     // enough for the f32 conversion to be exact.
@@ -609,42 +632,40 @@ inline fn addPiece(diff: []f32, out: []f32, piece: QuadCurve, y: f32, x_start: f
     }
 }
 
-/// Same contract as `coverageRow` — per-pixel coverage of [y, y + 1) for
-/// the pixels [x_start, x_start + out.len), clamped to [0, 1] — via the
-/// fast row-intersection scheme: a monotonic piece's contribution to a
-/// row is a STEP (zero left of its x-extent, `sign(dy) × y-span` right
-/// of it) and only the extent pixels need the analytic sweep. The sweep's
-/// entirely-left branch returns exactly sign(dy) × y-span = dir * span,
-/// so the diff/prefix-sum of steps reproduces it; `scanlineSweepVec`
-/// supplies the exact values for the (usually 1–2) extent pixels. Each
-/// piece's own step sits at i_step, past its corrected pixels, so there
-/// is no double count; multiple pieces are additive.
+/// `coverageRow` through a faster row-intersection scheme, with the same
+/// result up to floating-point accumulation order.
 ///
-/// Monotonic pieces are batch-hit-tested as `lanes`-wide (y_lo, y_hi)
-/// vectors from a fixed stack array; more than `batch_cap` pieces fall
-/// back to a scalar loop with identical math, and rows wider than
-/// `diff_cap` fall back to `coverageRow`. Zero allocation throughout.
+/// A monotonic piece contributes a STEP to a row — zero left of its x-extent
+/// and `sign(dy) × y-span` right of it — and only the one or two pixels its
+/// extent overlaps need the analytic sweep. The sweep's entirely-left branch
+/// is exactly that step, so the difference array's prefix sum reproduces it,
+/// and `scanlineSweepVec` supplies the extent pixels. Each piece's step sits
+/// past its own corrected pixels, so nothing is counted twice, and pieces
+/// add.
+///
+/// Pieces are hit-tested against the row's y-window in `lanes`-wide vectors;
+/// more than `batch_cap / 4` curves (32) take a scalar loop with the same
+/// math, and a row wider than `diff_cap` falls back to `coverageRow`
+/// outright. Like `coverageRow` this overwrites every entry of `out`,
+/// accepts an empty `out`, allocates nothing and retains nothing.
 pub fn coverageRowFast(curves: []const QuadCurve, y: f32, x_start: f32, out: []f32) void {
-    // Runtime-safety checks off for this kernel ONLY. ReleaseSafe emits a
-    // panic block (bounds check + integerPartOutOfBounds edge) at every
-    // checked cast/slice; inlined into the giant addPiece →
-    // scanlineSweepVec(4) body, those cold blocks distort the backend's
-    // optimization so badly the fast path runs ~6× slower than the sweep
-    // (measured: 6.0µs vs 1.1µs per row on the lambda fixture). With
-    // checks on, coverageRowFast LOSES to coverageRow at ReleaseSafe;
-    // without them it wins (0.99µs vs 1.1µs). Every index here is
-    // guarded by an adjacent explicit comparison — the checks are
-    // unreachable by construction:
-    //   - out.len ≤ diff_cap (this branch); out.len + 1 cannot wrap.
-    //   - batch[n_pieces]: n_pieces ≤ curves.len * 4 ≤ batch_cap, by the
-    //     `curves.len > batch_cap / 4` fallback above (division, so the
-    //     threshold itself cannot overflow).
-    //   - mono.pieces[0..n]: n ≤ 4, the monotonicize contract.
-    //   - diff[i_step_i] and the correction pixel bounds come out of
-    //     clampedIndex; the float compares in addPiece narrow them into
-    //     its clamp range first.
-    // The row-level API contract (out.len range, nothing else) is
-    // preserved; all library code outside this function keeps its checks.
+    // Runtime checks are off for this kernel alone. The panic blocks a
+    // checked cast or slice would leave inlined code distort optimization
+    // enough to cost more than the scheme saves, and every index below is
+    // unreachable by construction because an adjacent explicit comparison
+    // already excludes it:
+    //   - diff has out.len + 1 entries: the branch above rejects
+    //     out.len > diff_cap, so the addition cannot wrap;
+    //   - batch[n_pieces]: n_pieces <= curves.len * 4 <= batch_cap, because
+    //     the fallback below compares against batch_cap / 4 by division,
+    //     so the threshold itself cannot overflow;
+    //   - mono.pieces[0..n]: monotonicize yields at most 4;
+    //   - diff[i_step_i] and the correction pixel range: clampedIndex clamps
+    //     before the cast, and the float comparisons in addPiece narrow the
+    //     value into its clamp range first.
+    //
+    // The published contract — any `out.len`, no allocation — is unaffected;
+    // every other function in the package keeps its checks.
     @setRuntimeSafety(false);
     if (out.len > diff_cap) {
         coverageRow(curves, y, x_start, out);
@@ -782,6 +803,18 @@ fn randCurve(state: *u32, kind: u32) QuadCurve {
             .p2 = .{ x2, y2 },
         },
     };
+}
+
+test "coverageRow and coverageRowFast accept an empty row" {
+    // The published contract is "any `out.len`", so a caller with no pixels
+    // to write gets a no-op rather than a panic or a partial write.
+    const curves = [_]QuadCurve{
+        .{ .p0 = .{ 0, 0 }, .p1 = .{ 0, 0.5 }, .p2 = .{ 0, 1 } },
+        .{ .p0 = .{ 0, 1 }, .p1 = .{ 0.5, 1 }, .p2 = .{ 1, 1 } },
+    };
+    var empty: [0]f32 = .{};
+    coverageRow(&curves, 0.5, 0, &empty);
+    coverageRowFast(&curves, 0.5, 0, &empty);
 }
 
 test "unit square outline row" {
@@ -1311,6 +1344,22 @@ test "fast boundary: out.len == 1" {
 
 test "coverageRowFast == coverageRow on the lambda glyph" {
     const fixture = @import("lambda_fixture.zig");
+    // The cast below reads the fixture's bytes as `QuadCurve`. That is only
+    // the same data while both declarations are the same fixed layout, so
+    // state that here: extern, three `[2]f32` fields named and ordered
+    // `p0`, `p1`, `p2`, one total size. A declaration that changes any of
+    // it stops the compile instead of silently reinterpreting the bytes.
+    comptime {
+        const declared = @typeInfo(fixture.QuadCurve).@"struct";
+        const here = @typeInfo(QuadCurve).@"struct";
+        std.debug.assert(declared.layout == .@"extern" and here.layout == .@"extern");
+        std.debug.assert(@sizeOf(fixture.QuadCurve) == @sizeOf(QuadCurve));
+        std.debug.assert(declared.fields.len == here.fields.len);
+        for (declared.fields, here.fields) |d, h| {
+            std.debug.assert(std.mem.eql(u8, d.name, h.name));
+            std.debug.assert(d.type == h.type);
+        }
+    }
     const src: []const QuadCurve = std.mem.bytesAsSlice(
         QuadCurve,
         std.mem.sliceAsBytes(&fixture.curves),

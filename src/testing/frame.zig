@@ -37,12 +37,16 @@
 //! Both pipes are non-blocking and neither side assumes a pipe capacity:
 //! the output sink drains its read end whenever the write end fills (so a
 //! frame larger than the kernel's capacity is captured whole), `feed`
-//! refuses to block (`error.InputFull`), and `Session.run` feeds scripted
-//! input in chunks it decodes between. Nothing here can hang.
+//! refuses to block (`error.InputFull`), and `Session.run` feeds scripted input in chunks
+//! it decodes between. Model callbacks and caller I/O providers can still block.
 //!
 //! Frame path allocation: the pipes are fds, and the capture buffer plus
 //! the frame index are the harness's own — `Session.init` pre-reserves
 //! both, so up to 64 frames / 4 KiB of output allocates nothing per frame.
+//!
+//! Reach through `@import("notui").frame_testing`. Initialize the harness or session,
+//! register one `deinit`, then capture or run scripted frames. Native POSIX pipes and
+//! fd-based reads require a compatible live `Io`; this is not a portable simulated backend.
 
 const std = @import("std");
 const posix = std.posix;
@@ -82,9 +86,8 @@ pub const Error = std.mem.Allocator.Error ||
         NotRecording,
         /// A generated golden name did not fit its formatting buffer.
         NameTooLong,
-        /// `feed` was handed more bytes than the input pipe had room for.
-        /// The harness never blocks; drain the input side (render a frame)
-        /// and feed the rest.
+        /// The pipe could not accept all input. An unspecified prefix may have been written;
+        /// abort the harness rather than guessing a retry offset.
         InputFull,
     };
 
@@ -95,7 +98,9 @@ pub const Error = std.mem.Allocator.Error ||
 /// conservative budget; a 200x60 band already emits ~12 KiB). This sink
 /// owns a NON-BLOCKING write end instead: whenever the pipe is full it
 /// drains the read end into the capture and keeps writing, so a frame of
-/// any size is captured whole and nothing can deadlock.
+/// any size is captured without a blocking pipe write. The harness, not this view, owns
+/// the descriptors, allocator, I/O provider, and capture list. Keep them live and stable.
+/// Fields are read-only except through the harness; copies alias the same capture.
 const Sink = struct {
     io: std.Io,
     /// Write end (non-blocking).
@@ -226,7 +231,13 @@ const Sink = struct {
 
 /// The two-pipe capture rig. Construct it, then either drive it by hand
 /// (`feed`, `writer`, `outputBytes`) or hand it to a `Session`.
+/// One owner closes the pipes and disposes capture storage through the stored `gpa`.
+/// Keep `gpa` and `io` live until then. Copies are not independent owners; after the
+/// first writer call, keep its address fixed until disposal. Use serially without reentry.
+/// Reachable fields are read-only ownership state, not independently disposable handles.
 pub const Harness = struct {
+    /// Filesystem recording policy. Defaults create missing directories but preserve
+    /// existing files; overwrite must be selected explicitly for deliberate regeneration.
     pub const RecordOptions = struct {
         /// Rewrite existing golden files. When false (the default) an
         /// existing golden fails with `error.GoldenExists`.
@@ -262,6 +273,7 @@ pub const Harness = struct {
 
     /// Create both pipes, non-blocking (`O_NONBLOCK`) and close-on-exec.
     /// Neither side may block, so nothing here can deadlock on a full pipe.
+    /// Failure closes every successfully opened descriptor; no partially initialized owner escapes.
     pub fn init(gpa: std.mem.Allocator, io: std.Io) Error!Harness {
         const flags: posix.O = .{ .NONBLOCK = true, .CLOEXEC = true };
         const in_fds = try std.Io.Threaded.pipe2(flags);
@@ -279,6 +291,7 @@ pub const Harness = struct {
     }
 
     /// Close the pipes, the golden directory, and the capture.
+    /// Invalidates all capture, writer, and input views. Repeated disposal is invalid.
     pub fn deinit(self: *Harness) void {
         if (self.record_dir) |d| d.close(self.io);
         self.captured.deinit(self.gpa);
@@ -294,9 +307,8 @@ pub const Harness = struct {
     /// Bounded, never blocking: the pipe write end is non-blocking, so a
     /// feed larger than the pipe's free space is refused with
     /// `error.InputFull` instead of stalling. A refused feed may have
-    /// written a prefix, so drain the input side (render a frame, or read
-    /// it) and feed the rest; `Session.run` does all of this for a
-    /// scripted step of any size.
+    /// written an unspecified prefix; do not retry the whole input or guess its suffix.
+    /// Abort this harness on failure. Use `Session.run` for chunked scripted input.
     pub fn feed(self: *Harness, bytes: []const u8) Error!void {
         if (bytes.len == 0) return;
         self.in_w.writeStreamingAll(self.io, bytes) catch |err| switch (err) {
@@ -309,6 +321,7 @@ pub const Harness = struct {
     /// hand-wired loop. Non-owning: never `Tty.deinit` it (the harness owns
     /// the fd). `/dev/tty` is never opened and no signal handler is
     /// installed, so this is headless.
+    /// The view and any Reader using it must not outlive the harness.
     pub fn inputTty(self: *Harness) Tty {
         return .{ .io = self.io, .fd = self.in_r };
     }
@@ -346,8 +359,8 @@ pub const Harness = struct {
         return self.captured.items;
     }
 
-    /// An owned copy of `outputBytes`, for a caller that must hold the
-    /// stream across further frames. Caller frees.
+    /// An independent copy of the captured stream; free with this harness's stored `gpa`.
+    /// Capture may grow before an error; no result allocation escapes on failure.
     pub fn takeOutput(self: *Harness) Error![]u8 {
         try self.flush();
         return self.gpa.dupe(u8, self.captured.items);
@@ -367,6 +380,8 @@ pub const Harness = struct {
     /// Enter record mode: `recordFrame` writes `<path>/frame-NNNN.escape`.
     /// Re-opening resets the frame index, so re-recording an existing
     /// golden fails with `error.GoldenExists` unless `overwrite` is set.
+    /// Synchronous filesystem work may block or return `error.Canceled`. An error leaves
+    /// recording disabled; a directory may have been created. `path` is not retained.
     pub fn recordToDir(self: *Harness, path: []const u8, opts: RecordOptions) Error!void {
         if (self.record_dir) |d| d.close(self.io);
         self.record_dir = null;
@@ -386,6 +401,7 @@ pub const Harness = struct {
     /// Write one frame's bytes to `<dir>/frame-NNNN.escape` and advance the
     /// index. Refuses to clobber an existing golden unless the recorder was
     /// opened with `overwrite`.
+    /// Advances the index even if recording fails; the attempted file may contain a prefix.
     pub fn recordFrame(self: *Harness, bytes: []const u8) Error!void {
         var name_buf: [48]u8 = undefined;
         const name = std.fmt.bufPrint(
@@ -399,6 +415,9 @@ pub const Harness = struct {
 
     /// Write `bytes` to `<dir>/<name>`; `error.GoldenExists` when the file
     /// is already there and `overwrite` is off.
+    /// `name` is relative to the recording directory and follows native path rules.
+    /// Synchronous I/O may block or return `error.Canceled`; other write errors can leave
+    /// a created/truncated file containing a prefix. Neither `name` nor `bytes` is retained.
     pub fn recordNamed(self: *Harness, name: []const u8, bytes: []const u8) Error!void {
         const dir = self.record_dir orelse return error.NotRecording;
         var file = dir.createFile(self.io, name, .{
@@ -414,6 +433,8 @@ pub const Harness = struct {
 
     /// Read a recorded golden back, for a test that compares a live frame
     /// against it. Caller owns the result.
+    /// Free with the supplied `gpa`. Reads at most 1 MiB; filesystem errors and
+    /// `error.Canceled` return no owned result. `name` is borrowed only during this call.
     pub fn readGolden(
         self: *Harness,
         gpa: std.mem.Allocator,
@@ -430,6 +451,7 @@ pub const Harness = struct {
 };
 
 /// One scripted step: raw input bytes, then a number of frames.
+/// Input is borrowed only during `run`; the default performs one frame with no new input.
 pub const Step = struct {
     /// Raw terminal input bytes fed before the step's frames.
     input: []const u8 = "",
@@ -454,11 +476,18 @@ const cpr_query = "\x1b[6n";
 /// Self-referential (the lazily built sink and `Reader` point into the
 /// session), so a session must not be copied or moved after its first
 /// `frame`. Build it in place: `var session = try Session.init(...)`.
+/// Initialization releases all partial owners on failure. Keep the stored allocator and
+/// I/O provider live until one `deinit`; copies share ownership and cannot be disposed twice.
+/// Use on one thread without model/writer reentry. State fields are read-only; drawing
+/// into `region.cur` is allowed through the model callback. Returned capture views expire
+/// on capture mutation or disposal; frame indices survive append growth.
 pub const Session = struct {
     /// Input bytes per `feed` inside `run`. Small enough to fit any pipe
     /// capacity, so a scripted step of any size is fed in bounded pieces.
     const feed_chunk = 1024;
 
+    /// Native capture geometry. Defaults assume an 80-column, three-row interactive band.
+    /// Initial `region.height >= 1` is a caller precondition in all optimization modes.
     pub const Options = struct {
         /// Terminal columns the band is captured at — the width the golden
         /// bytes are written against.
@@ -505,6 +534,7 @@ pub const Session = struct {
     /// Create the harness, the region (sized to `opts`), and the frame
     /// index. The capture and the index are pre-reserved, so a session
     /// allocates nothing per frame until it outgrows 64 frames or 4 KiB.
+    /// The height precondition is debug-asserted, not returned release-mode validation.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, opts: Options) Error!Session {
         std.debug.assert(opts.region.height >= 1);
         var harness = try Harness.init(gpa, io);
@@ -529,6 +559,7 @@ pub const Session = struct {
     }
 
     /// Tear down the frames, the region, the pipes, and the capture.
+    /// Invalidates all model buffer and capture views; repeated disposal is invalid.
     pub fn deinit(self: *Session) void {
         self.frames.deinit(self.gpa);
         self.region.deinit();
@@ -544,6 +575,10 @@ pub const Session = struct {
     /// `model` is duck-typed and must expose:
     ///   `pub fn onEvent(self: *Model, ev: Event) !void`
     ///   `pub fn draw(self: *Model, buf: *Buffer) !void`
+    /// Callbacks run synchronously on this thread and may not reenter the session.
+    /// `ev`'s slices expire at the next reader call; copy them before returning if retained.
+    /// `buf` is a call-borrowed grid; its drawn strings must live until rendering finishes.
+    /// Errors propagate without undoing model updates, consumed input, or captured prefixes.
     pub fn frame(self: *Session, model: anytype) ![]const u8 {
         try self.pump(model);
         try model.draw(&self.region.cur);
@@ -553,6 +588,8 @@ pub const Session = struct {
     }
 
     /// Run a scripted list of steps and return the whole captured stream.
+    /// Borrows `steps` and input only during the call; the result borrows the capture.
+    /// Uses `frame`'s callback and failure contract. Earlier steps remain applied on error.
     pub fn run(self: *Session, model: anytype, steps: []const Step) ![]const u8 {
         for (steps) |step| {
             try self.feedInput(step.input, model);
@@ -578,6 +615,7 @@ pub const Session = struct {
     /// The bytes frame `index` (0-based) emitted, or null when out of
     /// range. Index-based because a later frame can grow the capture and
     /// move earlier bytes.
+    /// The returned slice expires on capture mutation or session disposal.
     pub fn frameBytes(self: *const Session, index: usize) ?[]const u8 {
         if (index >= self.frames.items.len) return null;
         const f = self.frames.items[index];
@@ -690,7 +728,7 @@ const testing = std.testing;
 fn occurrences(haystack: []const u8, needle: []const u8) usize {
     var found: usize = 0;
     var at: usize = 0;
-    while (std.mem.indexOfPos(u8, haystack, at, needle)) |hit| {
+    while (std.mem.findPos(u8, haystack, at, needle)) |hit| {
         found += 1;
         at = hit + needle.len;
     }

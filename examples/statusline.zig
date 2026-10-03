@@ -134,7 +134,6 @@ fn runInteractive(
     var region = try Region.init(gpa, .{
         .height = region_height,
         .sync_output = caps.sync_output,
-        .width_policy = caps.widthPolicy(),
         .terminal_reflow = terminal_reflow,
     });
     defer region.deinit();

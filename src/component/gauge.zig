@@ -1,9 +1,9 @@
 //! Gauge: a fractional block-bar meter with thresholds and an optional
-//! label + percent suffix (baseui-improvements.md §2.2). The fill is
-//! `width` cells of eighth-block steps (`blocks`), so partial fills
-//! render as smooth fractional cells instead of integer char cells.
-//! Thresholds recolor the fill; a per-cell gradient overrides them.
-//! Static — `advance` is always false; the app drives `value`.
+//! label plus percent suffix. The fill is `width` cells of eighth-block
+//! steps (`blocks`), so a partial fill renders as a fractional cell
+//! instead of a whole one. Thresholds recolour the fill; a per-cell
+//! gradient overrides them. Static — `advance` is always false and the
+//! app drives `value`.
 
 const std = @import("std");
 const Buffer = @import("../buffer.zig").Buffer;
@@ -12,29 +12,55 @@ const Color = @import("../color.zig").Color;
 const Width = @import("../width.zig");
 const Clock = @import("component.zig").Clock;
 
+/// A value meter drawn as a fractional bar between `min` and `max`.
+/// `draw` allocates nothing: the block characters are comptime
+/// constants and the percent suffix is formatted into the component's
+/// own `percent_buf`.
 pub const Gauge = struct {
+    /// Current reading; `ratio` maps it into 0..1 between `min` and
+    /// `max`. Use `setValue` to keep it inside `[min, max]`.
     value: f64 = 0,
+    /// Reading that fills an empty bar.
     min: f64 = 0,
+    /// Reading that fills a full bar.
     max: f64 = 100,
-    /// Bar length in cells.
+    /// Bar length in cells; the draw clips to `buf.width - x`.
     width: u16 = 40,
-    /// Optional prefix "label " before the bar (styled with label_style).
+    /// Optional prefix "label " before the bar (styled with label_style),
+    /// borrowed and never freed here.
     label: ?[]const u8 = null,
+    /// Style for the label and its trailing space.
     label_style: Style = .{},
-    /// Draw a " 42%" suffix after the bar.
+    /// Draw the " 42%" suffix after the bar.
     show_percent: bool = true,
-    percent_style: ?Style = null, // null => default Style
+    /// Style for the suffix; null uses the default style.
+    percent_style: ?Style = null,
+    /// Style for filled cells when neither thresholds nor a gradient
+    /// recolour them.
     full_style: Style = .{ .fg = .{ .ansi = .green } },
+    /// Style for empty cells.
     empty_style: Style = .{ .fg = .{ .ansi256 = 245 } },
-    /// Thresholds: the LAST with value <= self.value wins.
+    /// Thresholds, BORROWED; the LAST entry with `value <= self.value`
+    /// supplies the fill colour.
     thresholds: []const Threshold = &.{},
-    /// When both set, per-cell fill gradient (overrides threshold fg).
+    /// When both are set, the filled cells get a per-cell gradient
+    /// between these two colours, overriding both the threshold colour
+    /// and `full_style`.
     gradient_a: ?Color = null,
     gradient_b: ?Color = null,
-    /// Scratch for the percent suffix (cells borrow it), like Progress.
+    /// Storage for the percent suffix: `draw` formats into this field
+    /// and the cells borrow it, so the component must not move between
+    /// `draw` and the render of the buffer that shows those cells.
     percent_buf: [8]u8 = undefined,
 
-    pub const Threshold = struct { value: f64, color: Color };
+    /// A fill-colour switch point: readings at or above `value` paint
+    /// the filled cells `color` (unless a gradient overrides it).
+    pub const Threshold = struct {
+        /// Lower bound of the band, compared against `Gauge.value`.
+        value: f64,
+        /// Fill colour for that band.
+        color: Color,
+    };
 
     /// Fractional block fill chars, least to most filled: index i is
     /// (i+1)/8 of a full cell.
@@ -126,17 +152,19 @@ pub const Gauge = struct {
         return consumed;
     }
 
-    /// Set the value, clamped to [min, max].
+    /// Set the reading, clamped to `[min, max]`.
     pub fn setValue(self: *Gauge, value: f64) void {
         self.value = @max(self.min, @min(value, self.max));
     }
 
-    /// Set the minimum.
+    /// Set the reading that fills an empty bar. Does not re-clamp
+    /// `value`; the next `setValue` does.
     pub fn setMin(self: *Gauge, min: f64) void {
         self.min = min;
     }
 
-    /// Set the maximum.
+    /// Set the reading that fills a full bar. Does not re-clamp
+    /// `value`; the next `setValue` does.
     pub fn setMax(self: *Gauge, max: f64) void {
         self.max = max;
     }

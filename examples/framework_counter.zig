@@ -26,11 +26,13 @@ const component = notui.component;
 /// `init` once, `update` per message, and `view` per rendered frame.
 pub const Model = struct {
     pub const Msg = union(enum) { tick, inc, dec, quit };
+    pub const DrawError = std.mem.Allocator.Error || error{NoSpaceLeft};
 
     count: i64 = 0,
     busy: bool = false,
     spinner: component.Spinner = .{ .label = "working" },
     scratch: std.ArrayList(u8) = .empty, // Text truncation scratch (borrow model)
+    count_text: [96]u8 = undefined,
 
     /// Elm init: the framework (`start`) builds the model via this call
     /// and runs the returned Cmd through the same path as queued msgs —
@@ -38,7 +40,13 @@ pub const Model = struct {
     /// the spinner animates with no input.
     pub fn init(allocator: std.mem.Allocator) !struct { model: Model, cmd: Cmd(Msg) } {
         _ = allocator;
-        return .{ .model = .{}, .cmd = .{ .every = .{ .interval_ms = 200 } } };
+        return .{ .model = .{}, .cmd = .{ .every = .{ .interval_ms = 200, .msg = .tick } } };
+    }
+
+    /// Release the model-owned text scratch once, after the framework stops rendering.
+    pub fn deinit(self: *Model, gpa: std.mem.Allocator) void {
+        self.scratch.deinit(gpa);
+        self.* = undefined;
     }
 
     /// The message reducer. `inc`/`dec` edit the counter; `quit` stops
@@ -53,7 +61,7 @@ pub const Model = struct {
             .tick => {
                 self.busy = !self.busy; // demo toggle; the spinner animates
                 if (self.busy) ctx.render_requested = true;
-                return .{ .every = .{ .interval_ms = 200 } }; // keep spinning
+                return .{ .every = .{ .interval_ms = 200, .msg = .tick } };
             },
         }
         return .none;
@@ -80,9 +88,11 @@ pub const Model = struct {
             .style = .{ .fg = .{ .ansi = .cyan } },
             .scratch = &model.scratch, // model-owned, gpa-backed (borrow model)
         };
-        count_txt.text = std.fmt.allocPrint(ctx.frame_arena, "count: {d}   [i]nc [d]ec [q]uit", .{
-            model.count,
-        }) catch return;
+        count_txt.text = try std.fmt.bufPrint(
+            &model.count_text,
+            "count: {d}   [i]nc [d]ec [q]uit",
+            .{model.count},
+        );
         _ = try count_txt.draw(ctx.allocator, buf, 0, 0, now); // Text row
         _ = try model.spinner.draw(buf, 0, 1, now); // Spinner row
         var bar: component.StatusBar = .{

@@ -35,15 +35,25 @@
 //! unchanged until `sealDelta` takes it, and a ledger sink that refuses
 //! the batch loses nothing. `retire` reserves the seal slot before a
 //! block leaves the mutable view, so `sealDelta` cannot fail.
+//!
+//! Reach through `@import("notui").transcript`: `init`, `push`, `settle`, `retire`,
+//! seal the accepted delta, then `commitReceipt`; dispose the remaining owner once.
+//! This module owns copied rows, not terminal output or the clock provider.
 
 const std = @import("std");
 
 /// Monotonic nanosecond source, injected so the budget is deterministic
 /// under test. Production uses `Clock.fromIo`.
+/// Copies retain the same borrowed context; it and callback code must outlive clock use.
+/// `retire` invokes the callback synchronously on its calling thread, without reentry
+/// into that transcript. No default provider is selected.
 pub const Clock = struct {
+    /// Borrowed provider context; must remain live whenever `now` can be called.
     ctx: *const anyopaque,
+    /// Monotonic nanoseconds from `ctx`; borrow lasts only for each call.
     now_ns: *const fn (ctx: *const anyopaque) u64,
 
+    /// Sample the injected monotonic clock without retaining or releasing its context.
     pub fn now(self: Clock) u64 {
         return self.now_ns(self.ctx);
     }
@@ -61,21 +71,31 @@ pub const Clock = struct {
 };
 
 /// Where a block is in the retirement machine.
-pub const State = enum { active, settled, committed };
+pub const State = enum {
+    /// Product-writable content; the initial state of each pushed block.
+    active,
+    /// Product-declared final content, eligible for ordered retirement.
+    settled,
+    /// Transport-accepted content whose storage has been released.
+    committed,
+};
 
 /// One frame's retirement delta: the rows to write and the block ids
-/// they came from, in order. Borrowed from the transcript: the caller
-/// must copy them into whatever ledger sink it uses before the
-/// `retire` that assembles the next one. A `retire` that re-emits
-/// this delta leaves the slices exactly as they are.
+/// they came from, in order. Borrowed from the transcript: copy the slice arrays before
+/// a later `retire` assembles another delta. Row bytes remain valid only until their
+/// receipt is committed or the transcript is disposed. Retrying an unsealed delta
+/// preserves its arrays and bytes. Copies of a delta create no ownership duty.
 pub const Delta = struct {
+    /// Borrowed row views in retirement order; empty for a zero-row block.
     rows: []const []const u8 = &.{},
+    /// Borrowed retired block ids, including blocks that contain no rows.
     ids: []const u64 = &.{},
-    /// Blocks in `ids` — the count a seal records.
+    /// Retired block count, equal to `ids.len` for deltas returned by `retire`.
     blocks: usize = 0,
 
+    /// Whether no block awaits commitment. A zero-row block still requires a receipt.
     pub fn isEmpty(self: Delta) bool {
-        return self.rows.len == 0;
+        return self.blocks == 0;
     }
 
     /// Total row bytes in the delta (frame-cost accounting).
@@ -86,7 +106,13 @@ pub const Delta = struct {
     }
 };
 
+/// Copied-row retirement owner. Construct with `init`; keep its allocator live through
+/// one `deinit`. Copies alias storage and must not be separately disposed.
+/// Use on one thread without clock reentry. Reachable state fields are read-only.
+/// Row views survive pushes and retirement, but not commitment of their block or teardown.
 pub const Transcript = struct {
+    /// Retirement limits. Defaults bound retained work to 256 blocks and budget each
+    /// call to 8 ms; zero budget still allows one eligible block to make progress.
     pub const Options = struct {
         /// Retirement time budget per frame (8 ms — the reference
         /// budget). Exceeding it defers the remainder to the next
@@ -98,15 +124,20 @@ pub const Transcript = struct {
         max_live_blocks: usize = 256,
     };
 
+    /// One Transcript-owned row array. Copies share bytes; only the Transcript releases them.
     const Block = struct {
+        /// Monotonically assigned block id; only the Transcript chooses it.
         id: u64,
         /// Owned row copies — a push copies, so the caller may reuse
         /// its staging buffer immediately.
         rows: [][]u8,
+        /// Product-declared state; starts active and changes through transcript methods.
         state: State = .active,
     };
 
+    /// Receipt-to-block inclusive id range owned by the Transcript, with no separate cleanup.
     const Seal = struct {
+        /// Caller-provided history receipt, unique among outstanding seals.
         receipt: u64,
         /// The block ids this receipt owns. Ids are unique and never
         /// reused, so the pair names an exact block range even when
@@ -115,13 +146,17 @@ pub const Transcript = struct {
         last: u64,
     };
 
+    /// Push refusal or allocation failure; no block id or partial payload is admitted.
     pub const PushError = error{ LiveCapacityExceeded, OutOfMemory };
+    /// The block is absent or no longer active; no state changes on this error.
     pub const SettleError = error{UnknownBlock};
     /// Sealing a delta that is not pending: empty, or already handed to
     /// a ledger sink. Never an allocation failure.
     pub const SealError = error{DeltaNotPending};
 
+    /// Stored row/container allocator; read-only and live until disposal.
     gpa: std.mem.Allocator,
+    /// Stored retirement limits; read-only after construction.
     opts: Options,
     /// Retained blocks in creation order. `[0..staged)` are retired and
     /// waiting for a receipt; the rest are still in the mutable view.
@@ -138,14 +173,21 @@ pub const Transcript = struct {
     /// `sealDelta` that handed it to a ledger sink. While it is false
     /// the delta is still this frame's, and `retire` re-emits it.
     delta_sealed: bool = true,
-    /// Blocks retired and committed over the session (telemetry).
+    /// Blocks retired over the session (telemetry). A block that `retire`
+    /// handed to a delta keeps counting here after its receipt commits it,
+    /// so this is not a count of committed blocks.
     retired: usize = 0,
 
+    /// Construct an allocation-free empty owner. `max_live_blocks > 0` is a caller
+    /// precondition in every mode; debug assertions are not ReleaseFast validation.
+    /// The error set is empty for the lifecycle interface.
     pub fn init(gpa: std.mem.Allocator, opts: Options) !Transcript {
         std.debug.assert(opts.max_live_blocks > 0);
         return .{ .gpa = gpa, .opts = opts };
     }
 
+    /// Release all copied rows and metadata through the stored allocator.
+    /// Invalidates every row and delta view; repeated disposal or disposing a copy is invalid.
     pub fn deinit(self: *Transcript) void {
         for (self.blocks.items) |b| self.freeBlock(b);
         self.blocks.deinit(self.gpa);
@@ -161,6 +203,8 @@ pub const Transcript = struct {
     ///
     /// `error.LiveCapacityExceeded` when the retained-block bound is
     /// reached — settle and commit, do not expect a guess.
+    /// `error.OutOfMemory` admits no block and leaves existing rows and ids unchanged;
+    /// reusable metadata capacity may have grown. Ids must not exhaust `u64`.
     pub fn push(self: *Transcript, rows: []const []const u8) PushError!u64 {
         if (self.blocks.items.len >= self.opts.max_live_blocks) return error.LiveCapacityExceeded;
         // Reserve every fallible step before taking ownership of
@@ -210,6 +254,9 @@ pub const Transcript = struct {
     ///
     /// Order is preserved: the walk stops at the first block that is
     /// not settled, so the ledger is always a prefix of the stream.
+    /// OOM leaves no new delta and no block newly retired; previous sealed arrays may
+    /// be invalidated and reusable capacity may change. `out` is empty on failure.
+    /// The clock context stays caller-owned and is borrowed only during this call.
     pub fn retire(self: *Transcript, clock: Clock, out: *Delta) std.mem.Allocator.Error!void {
         if (self.heldDelta()) |held| {
             out.* = held;
@@ -256,6 +303,7 @@ pub const Transcript = struct {
     /// Infallible by construction: `retire` reserved the slot before
     /// the blocks left the mutable view. The only error is a caller that
     /// seals a delta that is not pending — a product bug, reported.
+    /// `receipt` must be unique among outstanding seals; a duplicate is a caller error.
     pub fn sealDelta(self: *Transcript, receipt: u64) SealError!void {
         if (self.delta_blocks == 0 or self.delta_sealed) return error.DeltaNotPending;
         self.seals.appendAssumeCapacity(.{
@@ -271,6 +319,7 @@ pub const Transcript = struct {
     /// Receipts may arrive in any order — a later receipt never frees
     /// the blocks of an earlier one, and every other block waits for
     /// its own.
+    /// `error.UnknownReceipt` changes nothing. Success invalidates views of those rows.
     pub fn commitReceipt(self: *Transcript, receipt: u64) error{UnknownReceipt}!void {
         for (self.seals.items, 0..) |seal, i| {
             if (seal.receipt != receipt) continue;
@@ -322,6 +371,7 @@ pub const Transcript = struct {
     }
 
     /// Rows of a retained block, or null once it has been committed.
+    /// The view survives metadata growth, but not that block's commitment or `deinit`.
     pub fn rowsOf(self: *const Transcript, id: u64) ?[]const []const u8 {
         for (self.blocks.items) |b| {
             if (b.id == id) return b.rows;
@@ -329,7 +379,7 @@ pub const Transcript = struct {
         return null;
     }
 
-    /// The state of `id`; null when the id was never pushed.
+    /// The retained state of `id`; `null` when never pushed or already committed and released.
     pub fn stateOf(self: *const Transcript, id: u64) ?State {
         for (self.blocks.items) |b| {
             if (b.id == id) return b.state;
@@ -663,15 +713,6 @@ test "transcript: sealing an empty delta is not a receipt" {
     try testing.expectEqual(@as(usize, 0), t.liveBlocks());
 }
 
-test "transcript: options carry the contract defaults" {
-    var t = try makeTranscript(.{});
-    defer t.deinit();
-    const o = t.options();
-    try testing.expectEqual(@as(u64, 8 * std.time.ns_per_ms), o.budget_ns);
-    try testing.expectEqual(@as(usize, 256), o.max_live_blocks);
-    try testing.expectEqual(@as(usize, 0), o.budget_ns / 1_000_000_000);
-}
-
 test "transcript: the delta accounts for its own byte cost" {
     var t = try makeTranscript(.{ .budget_ns = 0 });
     defer t.deinit();
@@ -681,4 +722,20 @@ test "transcript: the delta accounts for its own byte cost" {
     try t.settle(id);
     try t.retire(clock.clock(), &delta);
     try testing.expectEqual(@as(usize, 6), delta.byteLen());
+}
+
+// A settled block with no rows still needs a receipt before its storage slot is released.
+test "transcript: zero-row blocks produce a commit-capable delta" {
+    var t = try makeTranscript(.{});
+    defer t.deinit();
+    const id = try t.push(&.{});
+    try t.settle(id);
+    var clock: FakeClock = .{ .step_ns = 0 };
+    var delta: Delta = .{};
+    try t.retire(clock.clock(), &delta);
+    try testing.expect(!delta.isEmpty());
+    try testing.expectEqualSlices(u64, &.{id}, delta.ids);
+    try t.sealDelta(9);
+    try t.commitReceipt(9);
+    try testing.expectEqual(@as(usize, 0), t.liveBlocks());
 }

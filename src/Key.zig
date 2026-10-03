@@ -1,3 +1,13 @@
+//! One decoded key press or release: the codepoint, the modifiers, and the
+//! text the terminal produced for it.
+//!
+//! `Key` owns nothing. `Key.text` is a borrow — of the parser's input for a
+//! ground-state key, or of the parser's scratch buffer for a CSI or kitty
+//! sequence — so a `Key` that outlives the next `Parser.parse` has a
+//! dangling `text`. Copy the slice before queueing an event elsewhere.
+//!
+//! Keybindings match against this type with `matches` and `matchShortcut`.
+
 const std = @import("std");
 const testing = std.testing;
 
@@ -5,7 +15,9 @@ const width = @import("width.zig");
 
 const Key = @This();
 
-/// Modifier Keys for a Key Match Event.
+/// Modifier keys held while a key was pressed, in the kitty protocol's bit
+/// order. `caps_lock` and `num_lock` never decide a match: every routine
+/// here strips them from both sides.
 pub const Modifiers = packed struct(u8) {
     shift: bool = false,
     alt: bool = false,
@@ -16,6 +28,7 @@ pub const Modifiers = packed struct(u8) {
     caps_lock: bool = false,
     num_lock: bool = false,
 
+    /// Bit-for-bit equality, so the two lock bits count like any other.
     pub fn eql(self: Modifiers, other: Modifiers) bool {
         const a: u8 = @bitCast(self);
         const b: u8 = @bitCast(other);
@@ -23,7 +36,9 @@ pub const Modifiers = packed struct(u8) {
     }
 };
 
-/// Flags for the Kitty Protocol.
+/// The enhancement flags a kitty-protocol push (CSI `>` flags `u`) enables.
+/// A field is set when the terminal should report that class of extra
+/// detail; a clear field asks the terminal to stop sending it.
 pub const KittyFlags = packed struct(u5) {
     disambiguate: bool = true,
     report_events: bool = false,
@@ -32,46 +47,64 @@ pub const KittyFlags = packed struct(u5) {
     report_text: bool = true,
 };
 
-/// the unicode codepoint of the key event.
+/// The Unicode codepoint the key produced. For a key the terminal sent as a
+/// CSI or kitty sequence this is the protocol's "unicode-key-code", which for
+/// a multi-codepoint grapheme is `multicodepoint` and for a named key is that
+/// key's private-use codepoint.
 codepoint: u21,
 
-/// the text generated from the key event. The underlying slice has a limited
-/// lifetime. Vaxis maintains an internal ring buffer to temporarily store text.
-/// If the application needs these values longer than the lifetime of the event
-/// it must copy the data.
+/// The text the terminal produced for this key, or `null` when it reported
+/// none (a function key, a bare modifier, or a key the terminal sent only as
+/// a codepoint).
+///
+/// This slice is a borrow with a short lifetime, and which storage it points
+/// at depends on how the key was decoded:
+///
+/// - A ground-state key's text points into the `input` slice the caller
+///   passed to `Parser.parse`, so it lives as long as those bytes do.
+/// - A CSI or kitty-sequence key's text points at the `Parser`'s own scratch
+///   buffer and is overwritten by the next `parse` on that parser.
+///
+/// Through `input.Reader` both are bounded by the next `next` or
+/// `nextTimeout` call, which repaints the same storage. A consumer that keeps
+/// a `Key` past that point — queueing it for another thread, for instance —
+/// must copy the slice first, or both this read and any later one race the
+/// overwrite.
 text: ?[]const u8 = null,
 
-/// the shifted codepoint of this key event. This will only be present if the
-/// Shift modifier was used to generate the event
+/// The codepoint this key produced with Shift applied, when the terminal
+/// reported one. Set even when `mods.shift` is absent, so a terminal that
+/// swallows the modifier can still be matched through `matches`.
 shifted_codepoint: ?u21 = null,
 
-/// the key that would have been pressed on a standard keyboard layout. This is
-/// useful for shortcut matching
+/// The codepoint a standard keyboard layout would produce for this key, which
+/// is what a shortcut is declared against. `matchShortcut` matches on it.
 base_layout_codepoint: ?u21 = null,
 
+/// The modifiers the terminal reported with this key.
 mods: Modifiers = .{},
 
-// matches follows a loose matching algorithm for key matches.
-// 1. If the codepoint and modifiers are exact matches, after removing caps_lock
-//    and num_lock
-// 2. If the utf8 encoding of the codepoint matches the text, after removing
-//    num_lock
-// 3. If there is a shifted codepoint and it matches after removing the shift
-//    modifier from self, after removing caps_lock and num_lock
+/// True when this key matches `cp` with `mods`, under any of three rules:
+///
+/// 1. the codepoint and modifiers are equal, ignoring `caps_lock` and
+///    `num_lock` on both sides;
+/// 2. `text` equals the UTF-8 of `cp`, ignoring `shift`, `caps_lock` and
+///    `num_lock` on both sides and upper-casing `cp` when the caller asked
+///    for shift or caps lock — this is what lets a terminal that reports
+///    text but drops the shift modifier still match a `shift` binding;
+/// 3. `shifted_codepoint` equals `cp` and the modifiers agree once `shift`
+///    is dropped from this key and the locks are stripped from both sides.
+///
+/// Rules are tried in order and the first match wins, so a binding that
+/// matches more loosely still resolves when a stricter rule applies.
 pub fn matches(self: Key, cp: u21, mods: Modifiers) bool {
-    // rule 1
     if (self.matchExact(cp, mods)) return true;
-
-    // rule 2
     if (self.matchText(cp, mods)) return true;
-
-    // rule 3
     if (self.matchShiftedCodepoint(cp, mods)) return true;
-
     return false;
 }
 
-/// matches against any of the provided codepoints.
+/// True when `self` matches any of `cps` with `mods`; see `matches`.
 pub fn matchesAny(self: Key, cps: []const u21, mods: Modifiers) bool {
     for (cps) |cp| {
         if (self.matches(cp, mods)) return true;
@@ -79,16 +112,23 @@ pub fn matchesAny(self: Key, cps: []const u21, mods: Modifiers) bool {
     return false;
 }
 
-/// matches base layout codes, useful for shortcut matching when an alternate key
-/// layout is used
+/// True when `cp` is this key's base-layout codepoint and `mods` equals
+/// `self.mods` exactly, including both lock bits.
+///
+/// This is what a shortcut is declared against: on an alternate layout the
+/// codepoint differs from the printed character, so matching on
+/// `base_layout_codepoint` matches the physical key instead.
 pub fn matchShortcut(self: Key, cp: u21, mods: Modifiers) bool {
     if (self.base_layout_codepoint == null) return false;
     return cp == self.base_layout_codepoint.? and std.meta.eql(self.mods, mods);
 }
 
-/// matches keys that aren't upper case versions when shifted. For example, shift
-/// + semicolon produces a colon. The key can be matched against shift +
-/// semicolon or just colon...or shift + ctrl + ; or just ctrl + :
+/// True when `cp` is this key's `shifted_codepoint` and the modifiers agree
+/// once `shift` is dropped from this key and `caps_lock` and `num_lock` are
+/// stripped from both sides.
+///
+/// Shift-semicolon produces ':' on a US layout, so the same key matches
+/// `shift` + `;` and plain `:`.
 pub fn matchShiftedCodepoint(self: Key, cp: u21, mods: Modifiers) bool {
     if (self.shifted_codepoint == null) return false;
     if (!self.mods.shift) return false;
@@ -99,17 +139,13 @@ pub fn matchShiftedCodepoint(self: Key, cp: u21, mods: Modifiers) bool {
     var tgt_mods = mods;
     tgt_mods.caps_lock = false;
     tgt_mods.num_lock = false;
-    return cp == self.shifted_codepoint.? and std.meta.eql(self_mods, mods);
+    return cp == self.shifted_codepoint.? and std.meta.eql(self_mods, tgt_mods);
 }
 
-/// matches when the utf8 encoding of the codepoint and relevant mods matches the
-/// text of the key. This function will consume Shift and Caps Lock when matching.
-///
-/// Lifetime: `Key.text`, when set, points into the parser's per-event scratch
-/// buffer and is only valid until the next event is decoded. Callers that
-/// retain a `Key` past that point — for example, queueing events to another
-/// thread — MUST copy the slice before doing so; otherwise both this routine
-/// and any direct read of `text` race with the parser overwriting its buffer.
+/// True when `text` equals the UTF-8 of `cp` and the modifiers agree, with
+/// `shift`, `caps_lock` and `num_lock` stripped from both sides and `cp`
+/// upper-cased when the caller asked for shift or caps lock. False when
+/// this key reported no text.
 pub fn matchText(self: Key, cp: u21, mods: Modifiers) bool {
     const text = self.text orelse return false;
     if (text.len == 0) return false;
@@ -120,9 +156,6 @@ pub fn matchText(self: Key, cp: u21, mods: Modifiers) bool {
     self_mods.caps_lock = false;
     var arg_mods = mods;
 
-    // Uppercase our codepoint through the zg seam: full Unicode simple
-    // casing, not ASCII-only. Full mappings that expand (ß → SS) have
-    // no single-codepoint form and come back unchanged.
     const upper_cp: u21 = if (mods.shift or mods.caps_lock)
         width.toUpper(cp)
     else
@@ -137,8 +170,8 @@ pub fn matchText(self: Key, cp: u21, mods: Modifiers) bool {
     return std.mem.eql(u8, text, buf[0..n]) and std.meta.eql(self_mods, arg_mods);
 }
 
-// The key must exactly match the codepoint and modifiers. caps_lock and
-// num_lock are removed before matching
+/// True when `codepoint` equals `cp` and the modifiers are equal, ignoring
+/// `caps_lock` and `num_lock` on both sides.
 pub fn matchExact(self: Key, cp: u21, mods: Modifiers) bool {
     var self_mods = self.mods;
     self_mods.caps_lock = false;
@@ -149,7 +182,8 @@ pub fn matchExact(self: Key, cp: u21, mods: Modifiers) bool {
     return self.codepoint == cp and std.meta.eql(self_mods, tgt_mods);
 }
 
-/// True if the key is a single modifier (ie: left_shift)
+/// True when this key is one of the left or right modifier keys on its own,
+/// which a text-editing consumer ignores rather than inserting.
 pub fn isModifier(self: Key) bool {
     return self.codepoint == left_shift or
         self.codepoint == left_alt or
@@ -165,7 +199,8 @@ pub fn isModifier(self: Key) bool {
         self.codepoint == right_meta;
 }
 
-// a few special keys that we encode as their actual ascii value
+/// Keys a terminal sends as their ASCII control code rather than as a
+/// private-use codepoint.
 pub const ctrl_c: u21 = 0x03;
 pub const tab: u21 = 0x09;
 pub const enter: u21 = 0x0D;
@@ -177,8 +212,8 @@ pub const backspace: u21 = 0x7F;
 /// single codepoint. The value is the maximum unicode codepoint + 1
 pub const multicodepoint: u21 = 1_114_112 + 1;
 
-// kitty encodes these keys directly in the private use area. We reuse those
-// mappings
+/// The keys the kitty keyboard protocol encodes in the Unicode private use
+/// area, from `insert` (57348) through `iso_level_5_shift` (57454).
 pub const insert: u21 = 57348;
 pub const delete: u21 = 57349;
 pub const left: u21 = 57350;
@@ -287,6 +322,9 @@ pub const right_meta: u21 = 57452;
 pub const iso_level_3_shift: u21 = 57453;
 pub const iso_level_5_shift: u21 = 57454;
 
+/// Key names to their codepoints, for a configuration that spells bindings
+/// as `{"f5", .f5}`. Every name is a `Key` constant except the punctuation
+/// entries, which carry their ASCII value.
 pub const name_map = blk: {
     @setEvalBranchQuota(2000);
     break :blk std.StaticStringMap(u21).initComptime(.{
@@ -460,6 +498,26 @@ test "matches 'shift+;'" {
         .mods = .{},
     };
     try testing.expect(colon.matches(':', .{}));
+}
+
+test "matchShiftedCodepoint ignores lock state on both sides" {
+    // Rule 3 strips caps_lock/num_lock from the caller's modifiers too, so a
+    // binding declared with a lock modifier set still fires. Comparing
+    // against the unmodified argument would silently break every such
+    // binding while the two unshifted rules kept working.
+    const key: Key = .{
+        .codepoint = ';',
+        .shifted_codepoint = ':',
+        .mods = .{ .shift = true, .caps_lock = true },
+    };
+    try testing.expect(key.matchShiftedCodepoint(':', .{}));
+    try testing.expect(key.matchShiftedCodepoint(':', .{ .caps_lock = true }));
+    try testing.expect(key.matchShiftedCodepoint(':', .{ .num_lock = true }));
+    try testing.expect(key.matches(':', .{ .caps_lock = true }));
+
+    // A key that never carried shift has no shifted codepoint to match.
+    const unshifted: Key = .{ .codepoint = ';', .shifted_codepoint = ':' };
+    try testing.expect(!unshifted.matchShiftedCodepoint(':', .{}));
 }
 
 test "matches shift+non-ASCII reported as text only" {

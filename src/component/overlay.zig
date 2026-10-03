@@ -1,4 +1,4 @@
-//! overlay.zig — picker and overlay primitives (roadmap D4).
+//! overlay.zig — picker and overlay primitives.
 //!
 //! Three standalone components drawn INTO a caller-owned `Buffer`:
 //! `Select` (a vertical list with a moving highlight and its own
@@ -303,18 +303,26 @@ const end_keys = [_]u21{ Key.end, Key.kp_end };
 /// shows the title and nothing else). A space too small for a border
 /// shows the title bare. A zero-sized buffer draws nothing.
 pub const Modal = struct {
+    /// Title row, BORROWED; drawn first inside the box and elided when
+    /// the box has no room for it.
     title: []const u8 = "",
     /// Body text; '\n' starts a new row inside the box.
     body: []const u8 = "",
+    /// Footer row, BORROWED; shown only when a row is left over after
+    /// the title and the body's first rows.
     footer: []const u8 = "",
-    /// Preferred outer size, clamped down to what the buffer has.
+    /// Preferred outer width and height in cells, each clamped down to
+    /// what the buffer has.
     width: u16 = 40,
     height: u16 = 10,
     /// Style for the body text, and for the title when the box has no
     /// room for a border.
     style: Style = .{},
+    /// Style for the title row.
     title_style: Style = .{ .attrs = .{ .bold = true } },
+    /// Style for the footer row.
     footer_style: Style = .{},
+    /// Style for the box outline.
     border_style: Style = .{},
 
     /// A modal never animates; `advance` is always false.
@@ -442,7 +450,9 @@ pub const Popover = struct {
     height: u16 = 0,
     /// Content lines, borrowed.
     lines: []const []const u8 = &.{},
+    /// Style for the content text.
     style: Style = .{},
+    /// Style for the box outline.
     border_style: Style = .{},
 
     /// A popover never animates; `advance` is always false.

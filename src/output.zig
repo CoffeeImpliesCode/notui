@@ -21,16 +21,28 @@
 //! (never a zero-progress short write, which would spin `writeAll`),
 //! sets `frameOverflowed`, and the caller reports
 //! `error.FrameTooLarge` after `abortFrame` has rolled the staged bytes
-//! back. The queue — and every piece of frame state behind it — is
-//! exactly what it was before the frame started.
+//! back. Pending bytes retain their original order; compaction can change offsets
+//! and telemetry can change. The queue cannot roll back caller-owned frame state.
 //!
 //! Copy discipline: the only compaction is the one at `beginFrame`
 //! (slide pending bytes to the front when the free tail is smaller than
 //! half the live bytes). Drains never copy.
+//!
+//! Reach through `@import("notui").output`: `init`, `compose`, `beginFrame`,
+//! write, then `commitFrame` or `abortFrame`; drain committed bytes and dispose once.
+//! The queue owns staging, not a terminal or a transport. Drain failure retains the
+//! unaccepted suffix; the underlying I/O provider may map cancellation to `WriteFailed`.
 
 const std = @import("std");
 
+/// Fixed-allocation staging owner. Construct with `init` and keep `gpa` live until
+/// exactly one `deinit`. Copies alias storage and are not independent owners.
+/// Keep its address stable while a writer is borrowed. Use serially without reentry.
+/// Reachable state fields are read-only; mutate output only through the frame protocol.
 pub const OutputQueue = struct {
+    /// Bounds for a single-threaded producer. Defaults split a 256 KiB allocation evenly
+    /// between queued output and new-frame headroom; larger worst-case frames need more.
+    /// `capacity > 1` and `watermark < capacity` are caller preconditions in every mode.
     pub const Options = struct {
         /// Hard bound on staged bytes: pending output plus the frame
         /// being composed. Allocated once, never resized.
@@ -40,6 +52,7 @@ pub const OutputQueue = struct {
         /// also the headroom guarantee: a frame that starts below the
         /// watermark always has `capacity - watermark` bytes of room
         /// after `beginFrame`.
+        /// Zero is valid and disables composition.
         watermark: usize = 128 * 1024,
     };
 
@@ -48,8 +61,10 @@ pub const OutputQueue = struct {
     pub const Backpressure = error{OutputBackpressure};
     /// The frame exceeded the declared capacity. Nothing was staged.
     pub const Overflow = error{FrameTooLarge};
+    /// The writer or transport refused a write; an accepted prefix may already be external.
     pub const WriteError = error{WriteFailed};
 
+    /// Stored allocation identity; keep it live until disposal and do not replace it.
     gpa: std.mem.Allocator,
     /// The whole session's output budget, in one allocation.
     buf: []u8,
@@ -71,6 +86,8 @@ pub const OutputQueue = struct {
     /// `init` (the same rule as `Tty`).
     w: std.Io.Writer = undefined,
 
+    /// Allocate the fixed byte budget. The options preconditions are debug-asserted,
+    /// not returned validation in ReleaseFast/ReleaseSmall. OOM releases all partial work.
     pub fn init(gpa: std.mem.Allocator, opts: Options) !OutputQueue {
         std.debug.assert(opts.capacity > 1);
         std.debug.assert(opts.watermark < opts.capacity);
@@ -91,6 +108,8 @@ pub const OutputQueue = struct {
         };
     }
 
+    /// Release staging through `gpa`; pending bytes are discarded, not drained.
+    /// Invalidates the writer and all views. Repeated disposal or disposing a copy is invalid.
     pub fn deinit(self: *OutputQueue) void {
         self.gpa.free(self.buf);
         self.* = undefined;
@@ -99,6 +118,7 @@ pub const OutputQueue = struct {
     /// Start staging a frame. The staging writer is valid until
     /// `commitFrame`/`abortFrame`; bytes written to it land at the
     /// queue's tail, behind whatever is still pending.
+    /// No frame may already be active. Do not drain or begin another frame before finishing.
     pub fn beginFrame(self: *OutputQueue) void {
         // The one compaction point. Slide the live bytes to the front
         // when the free tail has shrunk below half of what is pending;
@@ -117,15 +137,15 @@ pub const OutputQueue = struct {
     }
 
     /// Publish the staged frame as pending output.
+    /// Requires one active, nonoverflowed frame. Invalidates the active staging borrow.
     pub fn commitFrame(self: *OutputQueue) void {
         self.end += self.w.end;
         self.w.end = 0;
         self.peak_pending = @max(self.peak_pending, self.pending());
     }
 
-    /// Drop the staged frame: pending bytes, overflow flag and every
-    /// other piece of queue state are exactly what they were before
-    /// `beginFrame`.
+    /// Discard the active frame, preserving the ordered committed byte stream.
+    /// Internal offsets may differ after `beginFrame` compaction. Ends the writer borrow.
     pub fn abortFrame(self: *OutputQueue) void {
         self.w.end = 0;
         self.end = self.frame_start;
@@ -174,6 +194,9 @@ pub const OutputQueue = struct {
     /// leaves the remainder pending, in order, and the next drain
     /// continues with it. A fully drained queue compacts to the start
     /// of the buffer.
+    /// The sink runs synchronously on the calling thread and may not reenter the queue.
+    /// It borrows bytes only for the call and must return at most their length; error must
+    /// mean no unreported acceptance in that attempt. Earlier successful drains stay accepted.
     pub fn drain(self: *OutputQueue, sink: anytype) WriteError!usize {
         if (self.start == self.end) return 0;
         const taken = try sink.tryWrite(self.buf[self.start..self.end]);
@@ -194,6 +217,8 @@ pub const OutputQueue = struct {
     /// A writer that accepts nothing is a failed write, not a reason to
     /// spin: `error.WriteFailed` leaves the bytes pending so the caller
     /// can decide, and the loop always makes progress or fails.
+    /// Underlying writer calls may block. A failure leaves earlier accepted bytes external
+    /// and the rest queued; flushing the writer is a separate caller duty.
     pub fn drainAll(self: *OutputQueue, w: *std.Io.Writer) WriteError!void {
         while (self.start != self.end) {
             const taken = try w.write(self.buf[self.start..self.end]);
@@ -259,16 +284,23 @@ pub const OutputQueue = struct {
 /// bytes, or 0 when the transport would block. Short writes and
 /// would-block are the same contract — the caller keeps the remainder
 /// queued. Only `error.WriteFailed` is a real failure.
+/// Borrows `ctx` and any resources it references for every use of this handle or its copies.
+/// No disposal is performed by this adapter. Thread safety is the sink's contract.
 pub const Transport = struct {
     ctx: *anyopaque,
+    /// One synchronous attempt on the calling thread. `bytes` is live only during the call;
+    /// do not retain it or reenter the caller's queue. Return `0..bytes.len`; an error means
+    /// no unreported acceptance in this attempt. There is no default implementation.
     try_write: *const fn (ctx: *anyopaque, bytes: []const u8) OutputQueue.WriteError!usize,
 
+    /// Invoke the sink without retaining `bytes`; `try_write` states acceptance and reentry.
     pub fn tryWrite(self: Transport, bytes: []const u8) OutputQueue.WriteError!usize {
         return self.try_write(self.ctx, bytes);
     }
 
     /// Wrap any `sink: *T` exposing
     /// `tryWrite([]const u8) error{WriteFailed}!usize`.
+    /// Retains the sink pointer; its address and resources must outlive this adapter's uses.
     pub fn from(sink: anytype) Transport {
         const T = std.meta.Child(@TypeOf(sink));
         return .{
@@ -288,6 +320,8 @@ pub const Transport = struct {
 /// is `error.WriteFailed`. The descriptor must have been opened
 /// `O_NONBLOCK` — a blocking descriptor would block the loop, which is
 /// exactly what this queue exists to prevent.
+/// `io` and `fd` are borrowed only for the call. Cancellation and non-WouldBlock I/O
+/// failures become `error.WriteFailed`; no capability or descriptor is released here.
 pub fn tryWriteFd(io: std.Io, fd: std.Io.File, bytes: []const u8) OutputQueue.WriteError!usize {
     return std.Io.File.writeStreaming(fd, io, "", &.{bytes}, 1) catch |err| switch (err) {
         error.WouldBlock => 0,

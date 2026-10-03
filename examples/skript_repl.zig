@@ -240,6 +240,8 @@ pub fn main(init: std.process.Init) !void {
     // is arena-owned (replaced wholesale on every recompute — the arena
     // never frees, matching the session-lifetime slice pattern) and
     // selected starts at 0 each time the popup opens.
+    var suggestion_scratch: std.ArrayList(u8) = .empty;
+    defer suggestion_scratch.deinit(aa);
     var sugg: ?notui.component.Suggestions = null;
     // An Escape dismissal holds until the next edit of the line: idle
     // ticks, redraws, resizes and pure cursor moves leave it set, so a
@@ -404,7 +406,12 @@ pub fn main(init: std.process.Init) !void {
                         var s = if (sugg) |s0|
                             s0
                         else
-                            notui.component.Suggestions{ .candidates = cands, .selected = 0, .max_rows = max_rows };
+                            notui.component.Suggestions{
+                                .candidates = cands,
+                                .selected = 0,
+                                .max_rows = max_rows,
+                                .scratch = &suggestion_scratch,
+                            };
                         s.candidates = cands;
                         if (s.selected >= cands.len) s.selected = 0; // recompute shrank the list
                         sugg = s;
@@ -434,7 +441,13 @@ pub fn main(init: std.process.Init) !void {
         const now = std.Io.Timestamp.now(io, .awake);
         try pollSlot(aa, &region, &slot, &worker, &eval_start, &last_eval_ms, now);
 
-        try drawBand(aa, &region, line.items, cursor, sugg, &spinner, worker != null, now, last_eval_ms);
+        // The formatted status belongs to this frame's caller scope, through render.
+        var status_buf: [48]u8 = undefined;
+        const status: ?[]const u8 = if (last_eval_ms) |ms|
+            try std.fmt.bufPrint(&status_buf, "done in {d}ms", .{ms})
+        else
+            null;
+        try drawBand(aa, &region, line.items, cursor, sugg, &spinner, worker != null, now, status);
         try region.render(w);
         try w.flush();
     }
@@ -1260,7 +1273,7 @@ fn drawBand(
     spinner: *notui.component.Spinner,
     busy: bool,
     now: std.Io.Timestamp,
-    last_eval_ms: ?u64,
+    status: ?[]const u8,
 ) !void {
     region.cur.clear();
     // Only the ACTIVE continuation line renders (§4.3); the pending
@@ -1320,10 +1333,8 @@ fn drawBand(
 
     if (busy) {
         _ = try spinner.draw(&region.cur, 0, y, now);
-    } else if (last_eval_ms) |ms| {
-        var buf: [48]u8 = undefined;
-        const done = std.fmt.bufPrint(&buf, "done in {d}ms", .{ms}) catch idle_status;
-        _ = try region.cur.draw(.{}, done, 0, y);
+    } else if (status) |label| {
+        _ = try region.cur.draw(.{}, label, 0, y);
     } else {
         _ = try region.cur.draw(.{}, if (multiline) cont_status else idle_status, 0, y);
     }
@@ -1830,7 +1841,11 @@ test "repl completion: accepting mid-line keeps the text after the cursor" {
     defer line.deinit(std.testing.allocator);
     try line.appendSlice(std.testing.allocator, "(f) ba z-qux");
     var cursor: usize = 6; // right after `ba`, with ` z-qux` behind it
-    const s: notui.component.Suggestions = .{ .candidates = &.{ "bar", "baz" } };
+    var scratch: std.ArrayList(u8) = .empty;
+    const s: notui.component.Suggestions = .{
+        .candidates = &.{ "bar", "baz" },
+        .scratch = &scratch,
+    };
 
     try acceptSuggestion(std.testing.allocator, &line, &cursor, s);
 
@@ -1851,7 +1866,11 @@ test "repl completion: a refused accept leaves the query and the cursor intact" 
     // realloc, and a DebugAllocator remap can absorb a small growth.
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     failing.resize_fail_index = 0;
-    const s: notui.component.Suggestions = .{ .candidates = &.{ "bar", "baz" } };
+    var scratch: std.ArrayList(u8) = .empty;
+    const s: notui.component.Suggestions = .{
+        .candidates = &.{ "bar", "baz" },
+        .scratch = &scratch,
+    };
 
     try std.testing.expectError(
         error.OutOfMemory,

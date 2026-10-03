@@ -1,5 +1,9 @@
+//! Package graph for six native Zig modules, the toolkit executable, and usage examples.
+//! `check` compiles consumer/test paths; `test` executes toolkit, REPL, and formula tests.
+//! `docs` emits each registered root under `docs/<module>`. Examples are not library roots.
 const std = @import("std");
 
+/// Register the consumer modules and named build, check, test, example, and docs steps.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -28,12 +32,8 @@ pub fn build(b: *std.Build) void {
     });
 
     // ── vendored ztex (vendor/ztex) ──────────────────────
-    // A vendored snapshot of upstream ztex, wired exactly like its own
-    // build.zig (modules ztex.atom / ztex.parse / ztex.layout /
-    // ztex.svg / ztex facade). Changes live here locally — the upstream
-    // checkout is owned by other work and must not be touched. The
-    // formula example consumes the facade + its `font` re-export
-    // (outline extraction added in vendor/ztex/src/font.zig).
+    // Vendored formula modules are supported consumer routes. Their implementation lives
+    // in this package; the terminal rasterizer remains an example, not a seventh module.
     const ztex_atom = b.addModule("ztex.atom", .{
         .root_source_file = b.path("vendor/ztex/src/atom.zig"),
         .target = target,
@@ -291,6 +291,17 @@ pub fn build(b: *std.Build) void {
     const test_repl_step = b.step("test-repl", "Run REPL behavior regressions");
     test_repl_step.dependOn(&run_repl_tests.step);
 
+    const formula_tests = b.addTest(.{ .root_module = ztex });
+    const run_formula_tests = b.addRunArtifact(formula_tests);
+    test_step.dependOn(&run_formula_tests.step);
+    const test_formula_step = b.step("test-formula", "Run formula contract regressions");
+    test_formula_step.dependOn(&run_formula_tests.step);
+
+    const check_step = b.step("check", "Compile toolkit, REPL, and formula consumer paths");
+    check_step.dependOn(&unit_tests.step);
+    check_step.dependOn(&repl_tests.step);
+    check_step.dependOn(&formula_tests.step);
+
     // ── bench ──────────────────────────
     // The render-pipeline benchmark (ROADMAP F2): frame time p50/p99,
     // bytes per frame and allocations per frame for the static, streaming
@@ -300,8 +311,8 @@ pub fn build(b: *std.Build) void {
     // still wins. The whole compilation must be optimized, so the bench
     // gets its own `notui` module instance and its own zg dependency
     // instance, both at `bench_optimize`, wired exactly like `mod` below
-    // (zg / DisplayWidth / Graphemes). The bench artifact is not
-    // installed: `zig build bench` alone compiles it.
+    // (zg / DisplayWidth / Graphemes). The bench step runs the artifact
+    // but does not install it.
     const bench_optimize: std.builtin.OptimizeMode = blk: {
         if (b.user_input_options.contains("optimize")) break :blk optimize;
         if (b.release_mode != .off) break :blk optimize;
@@ -333,11 +344,21 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Run the render-pipeline benchmark");
     bench_step.dependOn(&run_bench.step);
 
-    const install_docs = b.addInstallDirectory(.{
-        .source_dir = exe.getEmittedDocs(),
-        .install_dir = .prefix,
-        .install_subdir = "docs",
-    });
-    const docs_step = b.step("docs", "Generate documentation");
-    docs_step.dependOn(&install_docs.step);
+    const docs_step = b.step("docs", "Generate documentation for every registered module");
+    inline for (.{
+        .{ "notui", mod },
+        .{ "ztex", ztex },
+        .{ "ztex.atom", ztex_atom },
+        .{ "ztex.parse", ztex_parse },
+        .{ "ztex.layout", ztex_layout },
+        .{ "ztex.svg", ztex_svg },
+    }) |entry| {
+        const library = b.addLibrary(.{ .name = entry[0], .root_module = entry[1] });
+        const install_docs = b.addInstallDirectory(.{
+            .source_dir = library.getEmittedDocs(),
+            .install_dir = .prefix,
+            .install_subdir = "docs/" ++ entry[0],
+        });
+        docs_step.dependOn(&install_docs.step);
+    }
 }

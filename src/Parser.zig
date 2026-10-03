@@ -1,3 +1,15 @@
+//! Terminal input decoder: turns raw bytes into one `Event` at a time.
+//!
+//! `Parser` holds only the scratch buffer a CSI or kitty key sequence decodes
+//! its `Key.text` into, so one instance serves a whole session and allocates
+//! nothing itself. A `null` `paste_allocator` disables OSC 52 paste events:
+//! the sequence is still consumed, and no paste is produced.
+//!
+//! Malformed or unsupported control sequences are consumed without an event
+//! rather than reported as failures; the only errors are invalid UTF-8 in a
+//! ground-state key and a failed paste allocation. Ordinary input decodes to
+//! its event, and `ESC` followed by a byte that is not a sequence introducer
+//! decodes as an `alt` key press, not as a consumed sequence.
 const std = @import("std");
 const testing = std.testing;
 const Color = @import("color.zig").Color;
@@ -11,10 +23,16 @@ const log = std.log.scoped(.notui_parser);
 
 const Parser = @This();
 
-/// The return type of our parse method. Contains an Event and the number of
-/// bytes read from the buffer.
+/// What one `parse` call produced: the event, if any, and how many bytes of
+/// the input it consumed.
+///
+/// `n` is 0 exactly when the input does not yet hold a complete event — the
+/// caller keeps the bytes and calls again. `event` is null with `n` above 0
+/// when the bytes were a complete sequence that carries no event, which is
+/// how unknown and unsupported sequences are consumed.
 pub const Result = struct {
     event: ?Event,
+    /// Bytes consumed; always at most `input.len`.
     n: usize,
 };
 
@@ -27,20 +45,37 @@ const mouse_bits = struct {
     const leave: u16 = 0b100000000;
 };
 
-// a buffer to temporarily store text in. We need this to encode
-// text-as-codepoints
+/// Scratch the CSI and kitty decoders build `Key.text` in. A `Key` decoded
+/// by `parse` borrows this buffer, so the text is only valid until the next
+/// `parse` call on the same `Parser`.
 buf: [128]u8 = undefined,
 
-/// Parse the first event from the input buffer. If a completion event is not
-/// present, Result.event will be null and Result.n will be 0
+/// Decode the first event in `input`, consuming exactly the bytes that event
+/// occupies.
 ///
-/// If an unknown event is found, Result.event will be null and Result.n will be
-/// greater than 0
+/// `input` may hold several events and a trailing partial sequence; `Result.n`
+/// says how much was consumed and the caller parses the rest. Empty input
+/// consumes nothing. A complete control sequence that carries no event (an
+/// unknown control sequence, a bracketed-paste delimiter, an unsupported
+/// terminal reply) is consumed and reported as a null event, and the bytes
+/// after it still parse. `ESC` followed by a byte that is not a sequence
+/// introducer is not a sequence: it decodes as an `alt`+codepoint `key_press`
+/// that consumes those two bytes.
 ///
-/// A null paste_allocator disables OSC 52 clipboard paste events. Complete
-/// sequences are consumed without an event; other event parsing is unchanged.
+/// A returned `Event.paste` is allocated with `paste_allocator`, and the
+/// caller owns and frees it with that same allocator. Passing `null` disables
+/// paste events: a complete OSC 52 sequence is still consumed, and the bytes
+/// after it still parse.
+///
+/// Returns `error.InvalidUTF8` when the first ground-state bytes are not a
+/// valid UTF-8 sequence, and an allocator error when a paste cannot be
+/// decoded. In both cases nothing is consumed. Every other input decodes to
+/// an event -- an ordinary key, a mouse report, a capability or cursor reply
+/// -- unless it is an incomplete control sequence, which consumes nothing, or
+/// a complete but unsupported or malformed one, which is consumed without an
+/// event.
 pub fn parse(self: *Parser, input: []const u8, paste_allocator: ?std.mem.Allocator) !Result {
-    std.debug.assert(input.len > 0);
+    if (input.len == 0) return .{ .event = null, .n = 0 };
 
     // We gate this for len > 1 so we can detect singular escape key presses
     if (input[0] == 0x1b and input.len > 1) {
@@ -67,10 +102,9 @@ pub fn parse(self: *Parser, input: []const u8, paste_allocator: ?std.mem.Allocat
     } else return parseGround(input);
 }
 
-/// Parse ground state
+/// Decode one ground-state key. `input` is non-empty; `parse` only reaches
+/// here when `input[0]` is not an escape introducer, or is a lone `ESC`.
 inline fn parseGround(input: []const u8) !Result {
-    std.debug.assert(input.len > 0);
-
     const b = input[0];
     var n: usize = 1;
     // ground state generates keypresses when parsing input. We
@@ -87,18 +121,11 @@ inline fn parseGround(input: []const u8) !Result {
         0x0B...0x0C,
         0x0E...0x1A,
         => .{ .codepoint = b + 0x60, .mods = .{ .ctrl = true } },
-        0x1B => escape: {
-            std.debug.assert(input.len == 1); // parseGround expects len == 1 with 0x1b
-            break :escape .{
-                .codepoint = Key.escape,
-            };
-        },
+        0x1B => .{ .codepoint = Key.escape },
         0x7F => .{ .codepoint = Key.backspace },
         else => blk: {
-            // uucode→zg swap: validate the first codepoint with std.unicode
-            // (Utf8View preserves the InvalidUTF8 behavior) and get the first
-            // grapheme's byte span from the width seam (zg Graphemes lives
-            // only behind src/width.zig).
+            // The first codepoint is validated here, and the byte length of
+            // the whole grapheme comes from the width seam.
             var view = std.unicode.Utf8View.init(input) catch return error.InvalidUTF8;
             var cp_iter = view.iterator();
             // return null if we don't have a valid codepoint
@@ -189,9 +216,8 @@ inline fn parseApc(input: []const u8) Result {
     const sequence = input[0 .. end + 1 + 1];
 
     // The kitty graphics query reply (APC G i=9931;OK ST) is part of the
-    // capability surface and decodes as an Event.cap. All other APC
-    // payloads (image chunks, transmit-data) are consumed without an
-    // event (dropped tag: not in §5).
+    // capability surface and decodes as an Event.cap. Image chunks and
+    // transmit data carry no event and are consumed.
     if (parseKittyGraphicsProbeReply(sequence)) {
         return .{
             .event = .{ .cap = .kitty_graphics },
@@ -205,9 +231,8 @@ inline fn parseApc(input: []const u8) Result {
 }
 
 /// True when `sequence` (ESC _ G … ST) is the kitty graphics probe reply:
-/// params contain the probe id as a whole comma-delimited field and the
-/// payload begins with "OK" (optionally followed by ";ENV_…"). Mirrors
-/// zigzag parseKittyGraphicsProbeResponse.
+/// the probe id appears as a whole comma-delimited field and the payload
+/// begins with "OK", optionally followed by ";ENV_…".
 fn parseKittyGraphicsProbeReply(sequence: []const u8) bool {
     if (sequence.len < 6) return false;
     if (sequence[0] != 0x1b or sequence[1] != '_' or sequence[2] != 'G') return false;
@@ -296,19 +321,17 @@ inline fn parseOsc(input: []const u8, paste_allocator: ?std.mem.Allocator) !Resu
                 semicolon_idx + 1,
                 ';',
             ) orelse return null_event;
-            // the palette index is validated but not carried in the §5 Report
+            // The palette index is validated but `Color.Report` carries only
+            // the colour, so the index itself is dropped.
             const ps_idx = std.fmt.parseUnsigned(
                 u8,
                 input[semicolon_idx + 1 .. color_idx_delim],
                 10,
             ) catch return null_event;
             _ = ps_idx;
-            const color_spec = if (bel_terminated)
-                input[color_idx_delim + 1 .. sequence.len - 1]
-            else
-                input[color_idx_delim + 1 .. sequence.len - 2];
-
-            const color = try Color.rgbFromSpec(color_spec);
+            const color_spec = oscField(input, color_idx_delim, sequence.len, bel_terminated) orelse
+                return null_event;
+            const color = Color.rgbFromSpec(color_spec) catch return null_event;
             const event: Color.Report = .{
                 .kind = .osc4,
                 .value = .{ color.rgb.r, color.rgb.g, color.rgb.b },
@@ -322,12 +345,9 @@ inline fn parseOsc(input: []const u8, paste_allocator: ?std.mem.Allocator) !Resu
         11,
         12,
         => {
-            const color_spec = if (bel_terminated)
-                input[semicolon_idx + 1 .. sequence.len - 1]
-            else
-                input[semicolon_idx + 1 .. sequence.len - 2];
-
-            const color = try Color.rgbFromSpec(color_spec);
+            const color_spec = oscField(input, semicolon_idx, sequence.len, bel_terminated) orelse
+                return null_event;
+            const color = Color.rgbFromSpec(color_spec) catch return null_event;
             const event: Color.Report = .{
                 .kind = switch (ps) {
                     10 => .osc10,
@@ -343,16 +363,23 @@ inline fn parseOsc(input: []const u8, paste_allocator: ?std.mem.Allocator) !Resu
             };
         },
         52 => {
-            if (input[semicolon_idx + 1] != 'c') return null_event;
+            if (input[semicolon_idx + 1] != 'c' or
+                semicolon_idx + 2 >= sequence.len or input[semicolon_idx + 2] != ';')
+                return null_event;
             const gpa = paste_allocator orelse return null_event;
-            const payload = if (bel_terminated)
-                input[semicolon_idx + 3 .. sequence.len - 1]
-            else
-                input[semicolon_idx + 3 .. sequence.len - 2];
+            // `OSC 52 ; c ; <base64>`: the payload begins two bytes after
+            // the parameter separator and runs to the terminator. A sequence
+            // that ends before the payload does is complete, and carries no
+            // paste.
+            const payload = oscField(input, semicolon_idx + 2, sequence.len, bel_terminated) orelse
+                return null_event;
             const decoder = std.base64.standard.Decoder;
-            const text = try gpa.alloc(u8, try decoder.calcSizeForSlice(payload));
-            errdefer gpa.free(text);
-            try decoder.decode(text, payload);
+            const size = decoder.calcSizeForSlice(payload) catch return null_event;
+            const text = try gpa.alloc(u8, size);
+            decoder.decode(text, payload) catch {
+                gpa.free(text);
+                return null_event;
+            };
             log.debug("decoded paste: {s}", .{text});
             return .{
                 .event = .{ .paste = text },
@@ -361,6 +388,21 @@ inline fn parseOsc(input: []const u8, paste_allocator: ?std.mem.Allocator) !Resu
         },
         else => return null_event,
     }
+}
+
+/// The payload of one OSC sequence: `input[start + 1 .. end)`, where `end`
+/// is the last byte before the `BEL` or the `ST`. `null` when the sequence
+/// ends at or before `start`, so no slice is ever taken out of order.
+fn oscField(
+    input: []const u8,
+    start: usize,
+    sequence_len: usize,
+    bel_terminated: bool,
+) ?[]const u8 {
+    const end = if (bel_terminated) sequence_len - 1 else sequence_len - 2;
+    const from = start + 1;
+    if (from > end) return null;
+    return input[from..end];
 }
 
 /// Allow scalar text except controls, noncharacters, and private-use keys.
@@ -519,8 +561,7 @@ inline fn parseCsi(input: []const u8, text_buf: []u8) Result {
                     23 => Key.f11,
                     24 => Key.f12,
                     // bracketed paste delimiters are consumed without an
-                    // event: the pasted bytes arrive as ordinary ground-state
-                    // keys (dropped tags per §5)
+                    // The pasted bytes arrive as ordinary ground-state keys.
                     200,
                     201,
                     => return null_event,
@@ -566,15 +607,13 @@ inline fn parseCsi(input: []const u8, text_buf: []u8) Result {
         'O' => return .{ .event = .focus_out, .n = sequence.len },
         'M', 'm' => return parseMouse(sequence, input),
         'c' => {
-            // Primary DA (CSI ? Pm c) — consumed without an event: caps.zig
-            // splits the DA1 reply params itself (dropped tag: not in §5)
+            // Primary DA: `caps` reads the DA1 reply params itself, so the
+            // sequence carries no event here.
             return null_event;
         },
         'n' => {
-            // Device Status Report
-            // CSI Ps n / CSI ? Ps n — the §5 surface only decodes CPR
-            // (final 'R'); other DSR replies (e.g. color scheme 997) are
-            // consumed without an event (dropped tag)
+            // Device Status Report. Only the cursor position reply (final
+            // 'R') decodes here; every other DSR reply is consumed.
             return null_event;
         },
         't' => {
@@ -700,10 +739,21 @@ inline fn parseCsi(input: []const u8, text_buf: []u8) Result {
             return .{ .event = event, .n = sequence.len };
         },
         'y' => {
-            // DECRPM (CSI ? Ps ; Pm $ y)
-            const delim_idx = std.mem.indexOfScalarPos(u8, input, 3, ';') orelse return null_event;
-            const ps = std.fmt.parseUnsigned(u16, input[3..delim_idx], 10) catch return null_event;
-            const pm = std.fmt.parseUnsigned(u8, input[delim_idx + 1 .. sequence.len - 2], 10) catch return null_event;
+            // DECRPM (CSI ? Ps ; Pm $ y). The `?` private prefix and the `$`
+            // trailer delimit the reply parameters, so every slice below stays
+            // inside this sequence: a reply that is not that shape is consumed
+            // as a null event and the bytes after it still parse.
+            if (sequence.len < 5) return null_event;
+            if (sequence[2] != '?' or sequence[sequence.len - 2] != '$') return null_event;
+            const params = sequence[3 .. sequence.len - 2];
+            const delim_idx = std.mem.indexOfScalar(u8, params, ';') orelse return null_event;
+            const ps_buf = params[0..delim_idx];
+            // `delim_idx` is a `;` inside `params`, so this tail slice is always
+            // ordered and holds the whole of `Pm`; an extra `;` is not a
+            // decimal number and fails the parse.
+            const pm_buf = params[delim_idx + 1 ..];
+            const ps = std.fmt.parseUnsigned(u16, ps_buf, 10) catch return null_event;
+            const pm = std.fmt.parseUnsigned(u8, pm_buf, 10) catch return null_event;
             switch (ps) {
                 // Focus events
                 1004 => switch (pm) {
@@ -730,14 +780,13 @@ inline fn parseCsi(input: []const u8, text_buf: []u8) Result {
                     0, 4 => return null_event,
                     else => return .{ .event = .{ .cap = .unicode_core }, .n = sequence.len },
                 },
-                // Color scheme reporting (dropped tag: not in §5)
+                // Color scheme reporting is consumed without an event.
                 2031 => return null_event,
                 else => return null_event,
             }
         },
         'q' => {
-            // kitty multi cursor cap (CSI > 1;2;3;29;30;40;100;101 q) —
-            // consumed without an event (dropped tag: not in §5)
+            // The kitty multi cursor reply is consumed without an event.
             return null_event;
         },
         else => return null_event,
@@ -789,8 +838,7 @@ inline fn parseMouse(input: []const u8, full_input: []const u8) Result {
     } else {
         return null_event;
     }
-
-    // mouse leave events are consumed without an event (dropped tag per §5)
+    // A mouse-leave report carries no button or position and is consumed.
     if (button_mask & mouse_bits.leave > 0)
         return .{ .event = null, .n = if (xterm) 6 else input.len };
 
@@ -1084,6 +1132,78 @@ test "parse: incomplete osc52 paste consumes nothing until terminated" {
 
     try testing.expect(result.event == null);
     try testing.expectEqual(25, result.n);
+}
+
+test "parse: empty input consumes nothing and is not an error" {
+    var parser: Parser = .{};
+    const result = try parser.parse("", testing.allocator);
+    try testing.expectEqual(@as(usize, 0), result.n);
+    try testing.expect(result.event == null);
+}
+
+test "parse: a truncated osc52 payload is consumed without an event" {
+    // `ESC ] 52 ; c` with a terminator but no payload separator is a
+    // complete sequence carrying nothing; it must not slice backwards
+    // through the parameter, and it must not eat the key after it.
+    for ([_][]const u8{ "\x1b]52;c\x1b\\", "\x1b]52;c\x07", "\x1b]52;cX\x07" }) |sequence| {
+        var input_buf: [32]u8 = undefined;
+        const input = try std.fmt.bufPrint(&input_buf, "{s}A", .{sequence});
+        var parser: Parser = .{};
+        const result = try parser.parse(input, testing.allocator);
+
+        try testing.expect(result.event == null);
+        try testing.expectEqual(sequence.len, result.n);
+
+        const rest = try parser.parse(input[result.n..], testing.allocator);
+        try testing.expectEqual(@as(usize, 1), rest.n);
+        try testing.expectEqual(@as(u21, 'A'), rest.event.?.key_press.codepoint);
+    }
+}
+
+test "parse: an empty clipboard reply carries an empty paste" {
+    var parser: Parser = .{};
+    const sequence = "\x1b]52;c;\x07";
+    const result = try parser.parse(sequence, testing.allocator);
+    const text = result.event.?.paste;
+    defer testing.allocator.free(text);
+    try testing.expectEqualStrings("", text);
+    try testing.expectEqual(sequence.len, result.n);
+}
+
+test "parse: an undecodable osc52 payload is consumed without an event" {
+    // Base64 that does not decode is not an error for the caller: the
+    // sequence is complete, so it is consumed and produces no paste.
+    for ([_][]const u8{ "\x1b]52;c;!!!!\x1b\\", "\x1b]52;c;QQ\x1b\\" }) |input| {
+        var parser: Parser = .{};
+        const result = try parser.parse(input, testing.allocator);
+        try testing.expect(result.event == null);
+        try testing.expectEqual(input.len, result.n);
+    }
+}
+
+test "parse: a malformed osc colour reply is consumed without an event" {
+    // The reply is syntactically complete but its colour spec is not, so
+    // there is no report to emit — and the next key still parses.
+    const cases = [_][]const u8{
+        "\x1b]11;rgb:ffzz/0000/0000\x1b\\",
+        "\x1b]11;rgb:00/00/00\x1b\\",
+        "\x1b]11;rgbi:0000/0000/0000/ffff\x1b\\",
+        "\x1b]11;rgb:aaaa/bbbb/cccc/dddd\x1b\\",
+        "\x1b]4;7;rgb:ffzz/0000/0000\x1b\\",
+    };
+    for (cases) |sequence| {
+        var input_buf: [48]u8 = undefined;
+        const input = try std.fmt.bufPrint(&input_buf, "{s}A", .{sequence});
+        var parser: Parser = .{};
+        const result = try parser.parse(input, testing.allocator);
+
+        try testing.expect(result.event == null);
+        try testing.expectEqual(sequence.len, result.n);
+
+        const rest = try parser.parse(input[result.n..], testing.allocator);
+        try testing.expectEqual(@as(usize, 1), rest.n);
+        try testing.expectEqual(@as(u21, 'A'), rest.event.?.key_press.codepoint);
+    }
 }
 
 test "parse: focus_in" {
@@ -1987,19 +2107,17 @@ test "fuzz: parser never panics on arbitrary input" {
             "\x1b]52;c;aGVsbG8=\x1b\\",
             "\x1b[5;10R",
             "\x1b[?1016;1$y",
+            "\x1b[?u",
             "🙂",
             "👩‍🚀",
         },
     });
 }
 
-/// Public so other modules (e.g. a standalone fuzz driver) can reuse it.
+/// The invariant check `std.testing.fuzz` runs over the corpus below.
 pub fn testFuzz(_: void, smith: *std.testing.Smith) !void {
     var buf: [64]u8 = undefined;
     const len = smith.slice(&buf);
-    // parse asserts non-empty input; the empty string is the runner's
-    // default smoke input and must be skipped.
-    if (len == 0) return;
 
     var parser: Parser = .{};
     const input = buf[0..len];
@@ -2021,7 +2139,10 @@ pub fn testFuzz(_: void, smith: *std.testing.Smith) !void {
         switch (ev) {
             // per-event-kind minimal sequence lengths
             .mouse => try testing.expect(result.n >= 6),
-            .cpr, .cap => try testing.expect(result.n >= 5),
+            // A CPR is `CSI row;col R`; the shortest capability reply is the
+            // four-byte kitty keyboard answer `CSI ? u`.
+            .cpr => try testing.expect(result.n >= 5),
+            .cap => try testing.expect(result.n >= 4),
             .focus_in, .focus_out, .key_release, .winsize, .paste => try testing.expect(result.n >= 3),
             else => {},
         }
@@ -2033,4 +2154,59 @@ pub fn testFuzz(_: void, smith: *std.testing.Smith) !void {
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "parser: malformed DECRPM consumes only its prefix without an event" {
+    const cases = [_]struct { bytes: []const u8, consumed: usize }{
+        .{ .bytes = "\x1b[10;y", .consumed = 6 },
+        .{ .bytes = "\x1b[100;y", .consumed = 7 },
+        .{ .bytes = "\x1b[y2027;1$y", .consumed = 3 },
+    };
+    for (cases) |case| {
+        var parser: Parser = .{};
+        const result = try parser.parse(case.bytes, null);
+        try testing.expect(result.event == null);
+        try testing.expectEqual(case.consumed, result.n);
+        if (result.n < case.bytes.len) {
+            const tail = try parser.parse(case.bytes[result.n..], null);
+            try testing.expectEqual(@as(u21, '2'), tail.event.?.key_press.codepoint);
+            try testing.expectEqual(@as(usize, 1), tail.n);
+        }
+    }
+}
+
+test "parser: DECRPM reply parameters are bounded by the '?' prefix and '$' trailer" {
+    const cases = [_]struct {
+        bytes: []const u8,
+        event: ?Event,
+        consumed: usize,
+        tail: ?u21,
+    }{
+        // A valid reply stops at its `$ y` trailer and leaves the next key.
+        .{ .bytes = "\x1b[?2027;1$ya", .event = .{ .cap = .unicode_core }, .consumed = 11, .tail = 'a' },
+        // No `$` trailer, so the trailing `2` is not read as `Pm`.
+        .{ .bytes = "\x1b[?2027;2yx", .event = null, .consumed = 10, .tail = 'x' },
+        // No `?` private prefix, so the digits are not reply parameters.
+        .{ .bytes = "\x1b[2027;2$y", .event = null, .consumed = 10, .tail = null },
+        // Neither parameter between the prefix and the trailer.
+        .{ .bytes = "\x1b[?$ya", .event = null, .consumed = 5, .tail = 'a' },
+    };
+    for (cases) |case| {
+        var parser: Parser = .{};
+        const result = try parser.parse(case.bytes, null);
+        try testing.expectEqual(case.consumed, result.n);
+        try testing.expectEqual(case.event, result.event);
+        if (case.tail) |cp| {
+            const rest = case.bytes[case.consumed..];
+            const tail = try parser.parse(rest, null);
+            try testing.expectEqual(rest.len, tail.n);
+            const tail_event = tail.event orelse return error.TailKeyMissing;
+            try testing.expect(std.meta.activeTag(tail_event) == .key_press);
+            try testing.expectEqual(cp, tail_event.key_press.codepoint);
+        } else {
+            // No tail case: the sequence is the whole input, so `consumed`
+            // states its true length.
+            try testing.expectEqual(case.bytes.len, result.n);
+        }
+    }
 }

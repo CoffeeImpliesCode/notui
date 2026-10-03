@@ -1,6 +1,16 @@
-//! Debug server: a read-only frame snapshot over TCP so a bench or an external
-//! tool can inspect a live loop without a pty. Protocol: send a line whose first
-//! word is GET, read one JSON line back; `publish` is O(1), allocation-free.
+//! A read-only frame snapshot over TCP, so a bench or an external tool can
+//! inspect a live loop without a pty.
+//!
+//! The protocol is one line: send a line whose first word is `GET`, read one
+//! JSON line back. `publish` copies the newest frame into a fixed ring in
+//! constant time and allocates nothing, so it is safe to call from the loop
+//! thread while a background task answers clients.
+//!
+//! Every operation takes the `std.Io` it needs rather than holding one: `start`
+//! binds and spawns on the `io` it is given, and `stop` cancels and joins the
+//! serving task on the `io` it is given. That `io` must stay valid until `stop`
+//! returns. Cancelling elsewhere does not reach this endpoint: `stop` is the
+//! only way to end serving, and it is safe to call more than once.
 
 const std = @import("std");
 const Io = std.Io;
@@ -64,6 +74,7 @@ pub fn writeSnapshotLine(w: *Io.Writer, snap: Snapshot) Io.Writer.Error!void {
 /// `pub` and the type is part of this module's API: a caller writing
 /// JSON gets the same escaping as the snapshot line.
 pub const JsonString = struct {
+    /// The bytes to quote, borrowed for the duration of the `format` call.
     text: []const u8,
 
     pub fn format(self: JsonString, w: *Io.Writer) Io.Writer.Error!void {
@@ -115,18 +126,33 @@ pub const Server = struct {
     /// Binding, listening, or spawning the serving task failed.
     pub const StartError = net.IpAddress.ListenError || Io.ConcurrentError || error{AlreadyStarted};
 
+    /// The allocator the ring was taken from; stored, never released here.
     gpa: std.mem.Allocator,
+    /// The parsed address `start` binds. Kept so a restart rebinds the same
+    /// endpoint, port 0 included.
     address: net.IpAddress,
+    /// The bound listener while serving; null before `start` and after `stop`.
     listener: ?net.Server = null,
+    /// The group running the serving task. `stop` cancels and joins it.
     task: Io.Group = .init,
     /// Set by `stop` before it cancels the task. A cancelation point inside
     /// the in-flight read or write reports a plain client error, so the task
     /// consults this flag to tell "stop" from "the client left".
     stopping: std.atomic.Value(bool) = .init(false),
+    /// Guards the ring and its counters. Held for one bounded struct copy, so
+    /// `publish` stays allocation-free; it is not a general-purpose lock and
+    /// must not be taken by anything else.
     mutex: SpinLock = .{},
+    /// The frame ring, allocated by `init` and freed by `deinit`. Every
+    /// element is a fixed-size value, so publishing copies and never
+    /// allocates.
     ring: []Snapshot,
+    /// Index in `ring` of the oldest retained frame.
     start_index: usize = 0,
+    /// How many slots `ring` holds frames in, at most `ring_capacity`.
     retained: usize = 0,
+    /// How many frames have been published since `init`, including the ones
+    /// the ring has already dropped.
     published: u64 = 0,
 
     /// Parse `address` (`"127.0.0.1:0"` for an ephemeral loopback port) and
@@ -138,8 +164,9 @@ pub const Server = struct {
         return .{ .gpa = gpa, .address = try net.IpAddress.parseLiteral(address), .ring = ring };
     }
 
-    /// Free the ring. `stop` must have run first: the serving task borrows
-    /// `self`, and this asserts the task is gone.
+    /// Free the ring. `stop` must have joined the serving task first.
+    /// Debug and ReleaseSafe assert that precondition; ReleaseFast and ReleaseSmall
+    /// do not validate it. The server is unusable afterward; disposal is exactly once.
     pub fn deinit(self: *Server) void {
         std.debug.assert(self.listener == null);
         self.gpa.free(self.ring);
@@ -348,6 +375,10 @@ pub const Driver = struct {
     /// fail (an App's headless render, say) records the failure in `ctx` and
     /// returns a snapshot describing it: `run` only ever stops on
     /// `error.Canceled` or a watchdog trip.
+    /// The callback runs synchronously on the calling thread before publication.
+    /// Keep `ctx` and anything it references live through `run`. It must not reenter
+    /// this driver or dispose its server. `Server.publish` remains safe, but any
+    /// callback publication is an additional snapshot, not the driver's one frame.
     pub fn run(self: *Driver, io: Io, ctx: anytype, frame: anytype) RunError!void {
         while (self.frames == 0 or self.count < self.frames) {
             // The loop is alive: a frame begins.
@@ -371,7 +402,8 @@ pub const Driver = struct {
         }
     }
 
-    /// Frames published by the last `run`: one `server.publish` per frame.
+    /// Frames published by this driver since initialization, across `run` calls:
+    /// one driver `server.publish` per frame; callback publications are not counted.
     pub fn frameCount(self: *const Driver) u64 {
         return self.count;
     }

@@ -5,13 +5,21 @@
 //! consecutive runs (p2[i] == p0[i + 1]); winding is the CFF CCW
 //! convention.
 //!
-//! Structurally identical to coverage.QuadCurve (3 × [2]f32) — tests
-//! reuse the array via a bytesAsSlice cast, exactly like
-//! examples/formula_tui.zig drawText does for live outlines.
+//! The local `QuadCurve` is `extern` and declares the same fields as
+//! `coverage.QuadCurve`, in the same order and of the same types, so the
+//! two hold identical bytes: tests reuse the array through a `bytesAsSlice`
+//! cast, the same reinterpretation `examples/formula_tui.zig` `drawText`
+//! performs on live outlines, and `src/coverage.zig` checks that layout at
+//! compile time.
 
-pub const QuadCurve = struct {
+/// Byte-compatible with `coverage.QuadCurve`: `extern`, the three fields in
+/// `p0`, `p1`, `p2` order, no padding between them.
+pub const QuadCurve = extern struct {
+    /// Curve start, `[x, y]`.
     p0: [2]f32,
+    /// Steer point, `[x, y]`.
     p1: [2]f32,
+    /// Curve end, `[x, y]`.
     p2: [2]f32,
 };
 

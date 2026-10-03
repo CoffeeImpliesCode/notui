@@ -26,13 +26,19 @@
 //! fragmented or unterminated one leaks nothing.
 //!
 //! Allocation is explicit: `Renderer` owns one arena built on the
-//! allocator passed to `init`; `render` allocates only there. Every
-//! slice in a returned `Block` borrows that arena and stays valid until
-//! the next `render` call or `deinit`.
+//! allocator passed to `init`, and `render` allocates only there.
+//! Every slice in a returned `Block` stays valid until the next
+//! `render` or `deinit`, which release the arena bytes behind it.
+//! Some slices are static instead, and the renderer never frees
+//! those. A `Highlighter` replacement follows the same deadline: it
+//! comes from the arena the hook is given or from static storage,
+//! and the renderer copies none of it.
+//! `Span.style.hyperlink` is borrowed, not copied, so the caller or
+//! the hook keeps that storage alive while it uses the block.
 //!
 //! Width and grapheme knowledge come from `width.zig` only
-//! (`strWidth`, `graphemeWidth`, `firstGraphemeLen`); this file must not
-//! import zg (plan §0 grep-gate).
+//! (`strWidth`, `graphemeWidth`, `firstGraphemeLen`); this file imports
+//! no terminal library directly.
 
 const std = @import("std");
 const Color = @import("color.zig").Color;
@@ -42,11 +48,22 @@ const Width = @import("width.zig");
 /// Errors this module can produce: arena allocation failure only.
 pub const Error = error{OutOfMemory};
 
-/// One styled run of text. `text` borrows the renderer arena. `url` is
-/// set only on link text; it is metadata, never followed or fetched.
+/// One styled run of text. `text` and `url` are arena bytes, static
+/// bytes, or a `Highlighter` replacement, as `Highlighter` states.
+/// `url` is set only on link text, and it is metadata the caller may
+/// resolve itself. Nothing here follows, opens or fetches a link.
 pub const Span = struct {
+    /// The run's text: arena bytes, static bytes, or a
+    /// `Highlighter` replacement under the `Highlighter` rule.
     text: []const u8,
+    /// Style this run is drawn with, already merged with the theme
+    /// styles in `Options`. `style.hyperlink` is borrowed, never
+    /// copied, so the caller or the hook keeps that storage alive
+    /// while it uses the block. This module frees no hyperlink
+    /// storage of its own. A hyperlink allocated from the arena the
+    /// hook was given follows that arena's reset and deinit rule.
     style: Style = .{},
+    /// Link target for a link's text, else null. Held as `text` is.
     url: ?[]const u8 = null,
 };
 
@@ -56,9 +73,12 @@ pub const Kind = enum { paragraph, heading, list_item, code, blank };
 /// One rendered row. A wrapped source construct yields several `Line`s
 /// that share `kind`, `indent` and `lang`.
 pub const Line = struct {
-    /// Styled runs, left to right. Mutable so a `Highlighter` can restyle
-    /// a code row in place; the bytes still borrow the arena.
+    /// Styled runs, left to right. Mutable, so a `Highlighter` can
+    /// restyle a code row in place or replace the slice outright. A
+    /// replacement follows the `Highlighter` rule. Bytes the renderer
+    /// wrote keep the ownership `Span.text` states.
     spans: []Span,
+    /// Block role of this row; see `Kind`.
     kind: Kind = .paragraph,
     /// ATX level 1..6 when `kind == .heading`, else 0.
     level: u8 = 0,
@@ -67,19 +87,52 @@ pub const Line = struct {
     indent: u8 = 0,
     /// True when the item came from an ordered (`1.` / `1)`) marker.
     ordered: bool = false,
-    /// Fence info string when `kind == .code`, else "".
+    /// Fence info string when `kind == .code`, else "". Held as
+    /// `Span.text` is.
     lang: []const u8 = "",
 };
 
-/// A rendered document: lines top to bottom.
+/// A rendered document.
 pub const Block = struct {
+    /// Rows top to bottom. The array is arena storage, even where a
+    /// `Highlighter` rewrote rows in place, and it stays valid until
+    /// the next `render` or `deinit`. The bytes a row names follow the
+    /// ownership `Span.text` states.
     lines: []const Line,
 };
 
-/// Called once per complete fenced code block after its lines are
-/// rendered, with the fence's info string (`lang`). The hook may restyle
-/// or replace any `lines[i].spans`; `arena` backs new text. An
-/// unterminated (malformed) fence still calls it when it produced lines.
+/// Called once per complete fenced code block, synchronously inside
+/// `render`, after that block's rows have been rendered. `arena` is
+/// the renderer's arena allocator and is valid for this call only, so
+/// the hook must not retain it. `ctx` is `Options.highlighter_ctx`
+/// unchanged, `lang` is the fence info string, and `lines` holds this
+/// block's rendered rows. Both stay valid until the next `render` or
+/// `deinit`. The hook may restyle `lines[i].spans` in place or
+/// replace the slices outright.
+///
+/// A replacement — a span container, `Span.text`, `Span.url`,
+/// `Line.lang` — comes from `arena` or from static storage, and stays
+/// valid until the next `render` or `deinit`. The hook does not own
+/// `arena`. The renderer does not copy replacements. It releases
+/// arena-backed replacements on reset or disposal, but never frees
+/// static storage. Do not return stack-backed slices. Bytes the
+/// renderer produced keep the ownership `Span.text` states, however
+/// the hook restyles them. A `style.hyperlink` the hook writes is
+/// borrowed under the `Span.style` rule.
+///
+/// The call runs on the thread that called `render`, before that call
+/// returns, with no other hook running. A hook must not call back into
+/// the same `Renderer`, because its next `render` resets the arena
+/// the rows borrow.
+///
+/// An error from the hook propagates out of `render`, and no `Block`
+/// is returned. The arena keeps the partial render and the hook's own
+/// allocations until the next `render` or `deinit`. The escape
+/// machine stays where the document left it, and only the next
+/// `render` resets it. A fence that produced rows calls the hook, a
+/// malformed fence included. A fence that produced no rows — an empty
+/// block, or a malformed fence with no body — does not call it at
+/// all.
 pub const Highlighter = *const fn (
     arena: std.mem.Allocator,
     ctx: ?*anyopaque,
@@ -104,7 +157,11 @@ pub const Options = struct {
     marker: Style = .{},
     /// Merged under link text.
     link: Style = .{ .attrs = .{ .underline = true } },
+    /// Hook run over each fenced code block; null leaves the rows as
+    /// rendered. See `Highlighter` for its contract.
     highlighter: ?Highlighter = null,
+    /// Caller-owned pointer handed back to the hook unchanged; the
+    /// renderer never dereferences it and keeps no copy.
     highlighter_ctx: ?*anyopaque = null,
 };
 
@@ -144,8 +201,13 @@ fn isForbidden(cp: u21) bool {
 /// sequence split over two chunks is consumed as one. Input that ends
 /// inside a sequence fails closed: the machine stays armed and the
 /// remainder of a later chunk is consumed instead of leaking. Invalid
-/// UTF-8 is dropped everywhere, identically in every entry point.
+/// UTF-8 is dropped everywhere, identically in every entry point; for
+/// `accept` it is the caller's decoder, which rejects a bad sequence
+/// before a codepoint exists.
 pub const Sanitizer = struct {
+    /// Where the machine stands after the last codepoint; persists
+    /// across calls so a sequence split over two chunks is consumed as
+    /// one. Default (ground) is the ready-to-use state.
     state: State = .ground,
 
     const State = enum { ground, escape, csi, string, string_esc, osc, osc_esc };
@@ -180,15 +242,22 @@ pub const Sanitizer = struct {
         return n;
     }
 
-    /// Strip `src`, returning a slice the caller owns (free with the
-    /// same allocator). Invalid UTF-8 bytes are dropped.
+    /// Strip `src`, returning a slice the caller owns and frees with the
+    /// same `allocator`. Invalid UTF-8 bytes are dropped.
+    ///
+    /// Escape state carries over from any earlier call, so a sequence
+    /// split across two calls is consumed as one. The returned slice's
+    /// length is always the length of the allocation behind it: the
+    /// filter only removes bytes, so the result is the source shrunk to
+    /// the bytes that survived. `error.OutOfMemory` releases partial output and restores
+    /// the prior escape state, so retrying a chunk neither loses text nor consumes it twice.
     pub fn sanitize(self: *Sanitizer, allocator: std.mem.Allocator, src: []const u8) Error![]u8 {
         const buf = try allocator.alloc(u8, src.len);
         errdefer allocator.free(buf);
+        const state_before = self.state;
+        errdefer self.state = state_before;
         const n = self.copy(buf, src);
-        // Handing back the exact length needs no second copy when it
-        // fails; the over-long buffer is still ours and still valid.
-        return allocator.realloc(buf, n) catch buf[0..n];
+        return allocator.realloc(buf, n);
     }
 
     /// Feed one decoded codepoint and report whether it survives.
@@ -199,6 +268,13 @@ pub const Sanitizer = struct {
     /// this returns false for. Returns true only for tab, newline and
     /// non-control scalars; every escape-sequence byte and every other
     /// control is consumed.
+    ///
+    /// `cp` must be a Unicode scalar value: at most `0x10FFFF` and
+    /// outside `0xD800`..=`0xDFFF`. Nothing here checks that range, so
+    /// a non-scalar passes exactly as an ordinary non-control codepoint
+    /// would. `acceptCluster`, `copy` and `sanitize` decode through
+    /// `std.unicode`, which never supplies one; a caller that decodes
+    /// codepoints itself owes this check.
     pub fn accept(self: *Sanitizer, cp: u21) bool {
         // Tab and newline are structure: they pass in every state, so a
         // line break never hides from the filter. Every other scalar
@@ -218,8 +294,8 @@ pub const Sanitizer = struct {
     /// advances, dropped cluster or not: that is what makes an escape
     /// sequence spanning several clusters (ESC, '[', parameters, final
     /// byte) consume as one, exactly as the copying form does. Invalid
-    /// UTF-8 is dropped and leaves the machine untouched, matching
-    /// `sanitize`.
+    /// UTF-8 rejects the cluster without advancing over that invalid sequence.
+    /// A valid prefix has already advanced the state, as in `sanitize`.
     pub fn acceptCluster(self: *Sanitizer, gc: []const u8) bool {
         var keep = true;
         var i: usize = 0;
@@ -327,11 +403,13 @@ fn encodeInto(buf: *[4]u8, cp: u21) usize {
     return std.unicode.utf8Encode(cp, buf) catch 0;
 }
 
-/// One-shot whole-buffer filter: `Sanitizer` with fresh state over the
-/// whole of `src`, scanned into one buffer the caller owns. Nothing is
-/// split, copied per line, or regrown. Tab and newline are structure,
-/// so the result keeps the source's line shape even where a sequence
-/// runs across a break. Use `Sanitizer` directly to filter a stream.
+/// One-shot whole-buffer filter: a fresh `Sanitizer` over the whole of
+/// `src`, scanned into one buffer the caller owns and frees with the
+/// same `allocator`. Nothing is split, copied per line, or regrown, and
+/// the returned slice's length always matches its allocation. Tab and
+/// newline are structure, so the result keeps the source's line shape
+/// even where a sequence runs across a break. Use `Sanitizer` directly
+/// to filter a stream.
 pub fn sanitize(allocator: std.mem.Allocator, src: []const u8) Error![]u8 {
     var s: Sanitizer = .{};
     return s.sanitize(allocator, src);
@@ -361,30 +439,50 @@ const Item = struct {
     raw: []const u8 = "",
 };
 
-/// Markdown renderer. `render` interprets `src`, sanitises it, and lays
-/// out styled rows into one arena owned by this struct: there is no
-/// other allocation site in the module.
+/// Markdown renderer: `render` interprets `src`, sanitises it, and lays
+/// out styled rows into one arena owned by this struct — the only
+/// allocation site in the module.
+///
+/// The next `render` resets that arena and releases every byte it
+/// handed out, so a caller consumes a block before it renders again.
+/// Static slices and a `Highlighter` replacement stay readable at
+/// least that long. Because the arena hands out pointers into itself,
+/// a `Renderer` must not be copied after `init`. Hold it by pointer or
+/// move it.
+///
+/// `Span.style.hyperlink` is borrowed storage, not a copy. See
+/// `Span.style`.
 pub const Renderer = struct {
+    /// Backing store for every arena byte this renderer produces, and
+    /// for whatever a `Highlighter` allocates from the allocator
+    /// `render` passes it.
     arena: std.heap.ArenaAllocator,
+    /// Escape machine for the document being parsed; `render` resets it
+    /// per document, so one renderer can render many sources in turn.
     sanitizer: Sanitizer = .{},
 
-    /// Create a renderer whose arena is backed by `gpa`. Nothing is
-    /// allocated until the first `render`.
+    /// Create a renderer whose arena is backed by `gpa`, which the
+    /// arena keeps until `deinit`. Nothing is allocated before the
+    /// first `render`.
     pub fn init(gpa: std.mem.Allocator) Renderer {
         return .{ .arena = std.heap.ArenaAllocator.init(gpa) };
     }
 
-    /// Free the arena and every slice it handed out; the renderer must
-    /// not be used afterwards.
+    /// Free the arena and every slice it handed out, including what a
+    /// `Highlighter` allocated from it. The caller must not use the
+    /// renderer afterwards.
     pub fn deinit(self: *Renderer) void {
         self.arena.deinit();
         self.* = undefined;
     }
 
-    /// Render `src`. The document is filtered once into this renderer's
-    /// arena and every slice below borrows that copy, never the
-    /// caller's source. All result slices stay valid until the next
-    /// `render` call or `deinit`.
+    /// Render `src`. Renderer-produced text uses the sanitized copy of
+    /// the source or a static literal, never `src` itself, and its
+    /// containers come from this renderer's arena. A `Highlighter`
+    /// replacement comes from the arena the hook is given or from
+    /// static storage. Every result stays valid until the next
+    /// `render` or `deinit`, which release the arena bytes. See
+    /// `Span.style` for `style.hyperlink`.
     pub fn render(self: *Renderer, src: []const u8, opts: Options) Error!Block {
         _ = self.arena.reset(.retain_capacity);
         const arena = self.arena.allocator();
@@ -422,9 +520,9 @@ pub const Renderer = struct {
 
     /// Filter `src` into the arena as one sanitised document, then
     /// group its lines into block items: headings, fences, list items,
-    /// paragraphs, blank separators. Every slice an `Item` borrows
-    /// lives in that one arena copy, so nothing points at the caller's
-    /// source; a line is copied again only where it really changes.
+    /// paragraphs, blank separators. Every slice an `Item` names lives
+    /// in that one arena copy, so nothing points at the caller's
+    /// source. A line is copied again only where it really changes.
     fn structure(
         self: *Renderer,
         arena: std.mem.Allocator,
@@ -901,7 +999,7 @@ fn flush(
 
 /// Append a span, folding it into the previous one when the style
 /// matches and the text is contiguous in memory (a free merge: the
-/// combined slice is still borrowed, never copied).
+/// combined slice names the same bytes, never a copy).
 fn appendSpan(
     arena: std.mem.Allocator,
     out: *std.ArrayList(Span),
@@ -1032,8 +1130,8 @@ fn isBlank(line: []const u8) bool {
 }
 
 /// Expand hard tabs to spaces at `tab_width` stops, measuring each
-/// grapheme through the width seam. Lines without tabs are returned
-/// borrowed.
+/// grapheme through the width seam. A line without tabs comes back
+/// unchanged.
 fn expandTabs(arena: std.mem.Allocator, line: []const u8, tab_width: usize) Error![]const u8 {
     if (std.mem.indexOfScalar(u8, line, '\t') == null) return line;
 
@@ -1136,6 +1234,23 @@ test "sanitize: state carries across chunks" {
     const second = try s.sanitize(test_alloc, "1m after");
     defer test_alloc.free(second);
     try std.testing.expectEqualStrings(" after", second);
+}
+
+test "sanitize: a failed shrink frees the whole source allocation" {
+    const src = "\x1b[31mab\x1b[0m"; // 11 bytes in, 2 kept: the shrink is real
+    var failing = std.testing.FailingAllocator.init(test_alloc, .{
+        // The source buffer allocates, but neither route out of the
+        // shrink is available: no in-place remap, no allocate-copy.
+        .fail_index = 1,
+        .resize_fail_index = 0,
+    });
+    var s: Sanitizer = .{};
+    try std.testing.expectError(error.OutOfMemory, s.sanitize(failing.allocator(), src));
+    // Exactly one disposal, of every byte the filter allocated. A
+    // caller handed a short prefix instead would have been given a
+    // length the allocator never allocated, and the rest would leak.
+    try std.testing.expectEqual(@as(usize, 1), failing.deallocations);
+    try std.testing.expectEqual(src.len, failing.freed_bytes);
 }
 
 test "sanitize: accept is a per-codepoint, allocation-free verdict" {
@@ -1503,6 +1618,34 @@ test "markdown: highlighter hook receives the fence info string" {
     try std.testing.expectEqual(Color{ .ansi = .green }, block.lines[0].spans[0].style.fg.?);
 }
 
+test "markdown: text a highlighter allocates stays readable after render" {
+    // The hook writes into the arena `render` passed it, so the bytes it
+    // produces belong to the returned block exactly like the rendered
+    // ones do — the caller reads them until the next render or deinit.
+    const Hook = struct {
+        fn run(
+            arena: std.mem.Allocator,
+            ctx: ?*anyopaque,
+            lang: []const u8,
+            lines: []Line,
+        ) Error!void {
+            _ = ctx;
+            const upper = try arena.dupe(u8, lang);
+            for (upper) |*c| c.* = std.ascii.toUpper(c.*);
+            for (lines) |*line| {
+                line.spans = try arena.dupe(Span, line.spans);
+                for (line.spans) |*span| span.text = upper;
+            }
+        }
+    };
+
+    var r = Renderer.init(test_alloc);
+    defer r.deinit();
+    const block = try r.render("```zig\nconst x = 1;\n```\n", .{ .highlighter = Hook.run });
+    try std.testing.expectEqual(@as(usize, 1), block.lines.len);
+    try std.testing.expectEqualStrings("ZIG", block.lines[0].spans[0].text);
+}
+
 test "markdown: adjacent fences stay two blocks" {
     const Hook = struct {
         const Self = @This();
@@ -1608,4 +1751,23 @@ test "markdown: allocation failure surfaces as OutOfMemory" {
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "sanitize: failed shrinking preserves escape state for a retry" {
+    var failing = std.testing.FailingAllocator.init(test_alloc, .{
+        .fail_index = 1,
+        .resize_fail_index = 0,
+    });
+    var sanitizer: Sanitizer = .{};
+    const source = "A\x1b[";
+    try std.testing.expectError(
+        error.OutOfMemory,
+        sanitizer.sanitize(failing.allocator(), source),
+    );
+    const retried = try sanitizer.sanitize(test_alloc, source);
+    defer test_alloc.free(retried);
+    try std.testing.expectEqualStrings("A", retried);
+    const tail = try sanitizer.sanitize(test_alloc, "31mB");
+    defer test_alloc.free(tail);
+    try std.testing.expectEqualStrings("B", tail);
 }

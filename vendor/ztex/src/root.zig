@@ -3,25 +3,62 @@
 //! Facade over two independently usable modules:
 //! - `ztex.parse` — LaTeX source → superflat atom tree
 //! - `ztex.layout` — atom tree + font metrics → box tree → draw list
+//!
+//! `ztex.svg` serializes a draw list to SVG, and `ztex.context` adds the
+//! font-backed pipeline. The two pipelines differ in where glyph metrics
+//! come from and in what they need from the caller:
+//!
+//! - `render` below and `ztex.layout.render` measure from the bundled static
+//!   Latin-Modern-Math tables. They read no font file and need no `std.Io`.
+//! - `Context` measures from real font faces and needs the caller's `std.Io`
+//!   at `Context.init`, though `render` itself performs no I/O.
+//!
+//! Every entry point returns a value the caller owns. A `DrawList` borrows
+//! the formula bytes for its `text` primitives, so the source must outlive
+//! it; `draw.DrawList.deinit` releases the list and the synthetic glyphs it
+//! owns.
 
 const std = @import("std");
 
+/// `ztex.atom`: the superflat AST node types and the `Node.data` codecs.
 pub const atom = @import("ztex.atom");
+
+/// `ztex.parse`: lexer + recursive-descent parser.
 pub const parse = @import("ztex.parse");
+
+/// `ztex.layout`: metrics, box pool, layout pass, draw list.
 pub const layout = @import("ztex.layout");
+
+/// `ztex.layout.draw`: the draw model, re-exported at the top level.
 pub const draw = layout.draw;
+
+/// `ztex.svg`: draw list → SVG bytes or file.
 pub const svg = @import("ztex.svg");
+
+/// `ztex.context`: the `Context` type, re-exported at the top level.
 pub const context = @import("context.zig");
 
 /// Font-backed rendering context: owns a FontContext and a FontMetrics
 /// wired to it — "initialize once, render many" (see context.zig).
 pub const Context = context.Context;
 
-/// Full pipeline: LaTeX source → draw list (SVG-style primitives).
+/// Full pipeline: LaTeX source → draw list (SVG-style primitives), measured
+/// from the bundled static metric tables.
 ///
-/// The returned `DrawList`'s `text` primitives alias `src`, so `src` must
-/// outlive the draw list. `size_pt` is the base font size in points. On a
-/// parse error, `err_info` (when non-null) is filled with the kind + span.
+/// The returned `DrawList`'s `text` primitives alias `src`, or the draw
+/// list's own glyph arena for a synthesized glyph such as `\sum`; `src` must
+/// outlive the draw list, and the caller releases the draw list with `deinit`.
+/// `size_pt` is the base font size in points.
+///
+/// `err_info` (when non-null) is filled exactly as `ztex.parse.parse` fills
+/// it — including `error.OutOfMemory` — and is untouched on success. A
+/// layout-stage failure shares `error.OutOfMemory` with the parse stage and
+/// leaves the out-param untouched, so a caller that also handles allocation
+/// failure must not read it there. On any error nothing is returned and the
+/// intermediate atom tree and box pool are released.
+///
+/// Allocates through `gpa` only; it reads no font file, touches no `std.Io`,
+/// and reaches for no process-global state.
 pub fn render(
     gpa: std.mem.Allocator,
     src: []const u8,

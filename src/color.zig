@@ -1,23 +1,28 @@
-//! Color types for terminal styling.
+//! Terminal colours: the 16 ANSI names, the 256-colour palette, 24-bit RGB,
+//! and the XParseColor `rgb:` form terminal replies use.
 //!
-//! Supports ANSI 16, 256, and TrueColor (24-bit) colors, plus terminal
-//! color-profile detection helpers. Adapted from zigzag
-//! `style/color.zig` and libvaxis `Cell.zig` (Report, rgbFromSpec) for the
-//! notui §5 surface. No zg import.
+//! Nothing here writes bytes; `emit` turns a `Style` into SGR and
+//! `ColorProfile` says how far the terminal's palette reaches. No zg import.
 
 const std = @import("std");
 
-/// Color representation supporting multiple color modes.
+/// One terminal colour, in whichever form the caller has it.
+///
+/// The tags are alternatives, not layers: `.rgb` is the only tag that
+/// carries more precision than the terminal can be assumed to have, and
+/// `emit.writeStyleProfile` is what narrows it to a `ColorProfile`. A
+/// `Color` owns nothing and copies freely.
 pub const Color = union(enum) {
-    /// Basic ANSI colors (0-15).
+    /// One of the 16 `AnsiColor` entries.
     ansi: AnsiColor,
-    /// 256-color palette (0-255).
+    /// 256-colour palette index, 0-255.
     ansi256: u8,
-    /// True color (24-bit RGB).
+    /// 24-bit colour; the widest this package represents.
     rgb: Rgb,
-    /// Terminal default color (emit nothing).
+    /// "Whatever the terminal uses for unset"; writes no colour bytes.
     default,
 
+    /// 8 bits per channel.
     pub const Rgb = struct {
         r: u8,
         g: u8,
@@ -86,13 +91,15 @@ pub const Color = union(enum) {
         };
     }
 
-    /// Create a color from RGB values.
+    /// `.rgb` with the three channel values.
     pub fn fromRgb(r: u8, g: u8, b: u8) Color {
         return .{ .rgb = .{ .r = r, .g = g, .b = b } };
     }
 
-    /// Create a color from a hex string (e.g. `"#FF5733"` or `"FF5733"`).
-    /// Returns `.default` on malformed input.
+    /// `.rgb` parsed from `"#RRGGBB"` or `"RRGGBB"`, or `.default` when `str`
+    /// is not six hex digits after an optional leading `'#'`. `.default`
+    /// is also the value a well-formed "terminal default" request parses to,
+    /// so a caller that must tell the two apart checks `str` itself.
     pub fn hex(str: []const u8) Color {
         const s = if (str.len > 0 and str[0] == '#') str[1..] else str;
 
@@ -105,53 +112,53 @@ pub const Color = union(enum) {
         return .{ .rgb = .{ .r = r, .g = g, .b = b } };
     }
 
-    /// Create a color from the 256-color palette.
+    /// `.ansi256` with palette index `n`; 0-15 select an `AnsiColor`.
     pub fn color256(n: u8) Color {
         return .{ .ansi256 = n };
     }
 
-    /// Create a grayscale color (0-23, where 0 is dark and 23 is light).
-    /// Levels above 23 clamp to the lightest gray.
+    /// `.ansi256` grayscale ramp entry for `level`, where 0 is the darkest
+    /// and 23 the lightest. A `level` above 23 clamps to the lightest.
     pub fn gray(level: u8) Color {
         if (level > 23) return .{ .ansi256 = 255 };
         return .{ .ansi256 = 232 + level };
     }
 
-    /// Parse an XParseColor-style rgb specification into a `Color.rgb`.
+    /// Parse an XParseColor spec of the form `rgb:RRRR/GGGG/BBBB`, the form
+    /// an OSC 4/10/11/12 reply carries, into `.rgb`.
     ///
-    /// The spec is of the form `rgb:RRRR/GGGG/BBBB` (16 bits per channel,
-    /// as sent by OSC 11 responses). Each channel is downshifted to 8 bits
-    /// by taking the high byte; malformed specs return
-    /// `error.InvalidColorSpec`.
+    /// Each channel is four hex digits (16 bits) and is downshifted to its
+    /// high byte. The whole spec must be consumed: a wrong prefix, a missing
+    /// or extra channel, a channel that is not exactly four hex digits, or
+    /// anything after the third channel is `error.InvalidColorSpec`.
+    /// Other prefixes, including `rgbi:`, are unsupported.
     pub fn rgbFromSpec(spec: []const u8) !Color {
-        var iter = std.mem.splitScalar(u8, spec, ':');
-        const prefix = iter.next() orelse return error.InvalidColorSpec;
+        var fields = std.mem.splitScalar(u8, spec, ':');
+        const prefix = fields.next() orelse return error.InvalidColorSpec;
         if (!std.mem.eql(u8, "rgb", prefix)) return error.InvalidColorSpec;
+        const body = fields.next() orelse return error.InvalidColorSpec;
+        if (fields.next() != null) return error.InvalidColorSpec;
 
-        const spec_str = iter.next() orelse return error.InvalidColorSpec;
+        var channels = std.mem.splitScalar(u8, body, '/');
+        var rgb: Color.Rgb = undefined;
+        inline for ([_]*u8{ &rgb.r, &rgb.g, &rgb.b }) |ch| {
+            const raw = channels.next() orelse return error.InvalidColorSpec;
+            if (raw.len != 4) return error.InvalidColorSpec;
+            // All four digits are parsed, so a non-hex low byte ("ffzz") is
+            // rejected instead of being dropped by the downshift.
+            const v = std.fmt.parseUnsigned(u16, raw, 16) catch return error.InvalidColorSpec;
+            ch.* = @truncate(v >> 8);
+        }
+        if (channels.next() != null) return error.InvalidColorSpec;
 
-        var spec_iter = std.mem.splitScalar(u8, spec_str, '/');
-
-        const r_raw = spec_iter.next() orelse return error.InvalidColorSpec;
-        if (r_raw.len != 4) return error.InvalidColorSpec;
-
-        const g_raw = spec_iter.next() orelse return error.InvalidColorSpec;
-        if (g_raw.len != 4) return error.InvalidColorSpec;
-
-        const b_raw = spec_iter.next() orelse return error.InvalidColorSpec;
-        if (b_raw.len != 4) return error.InvalidColorSpec;
-
-        const r = std.fmt.parseUnsigned(u8, r_raw[0..2], 16) catch return error.InvalidColorSpec;
-        const g = std.fmt.parseUnsigned(u8, g_raw[0..2], 16) catch return error.InvalidColorSpec;
-        const b = std.fmt.parseUnsigned(u8, b_raw[0..2], 16) catch return error.InvalidColorSpec;
-
-        return .{ .rgb = .{ .r = r, .g = g, .b = b } };
+        return .{ .rgb = rgb };
     }
 
-    /// Interpolate between `self` and `b` with an RGB lerp; `t` is
-    /// clamped to 0..1. Falls back to `self` when either end is not
-    /// rgb-convertible (baseui-contract.md §5; direct port of zigzag
-    /// `interpolateColor`, progress.zig:255-266).
+    /// `.rgb` lerp from `self` to `b` at `t`, with `t` clamped to 0..1.
+    ///
+    /// Both ends are converted to RGB first, so an `.ansi` or `.ansi256`
+    /// end interpolates from its converted value. `.default` is not
+    /// convertible, and an end that is `.default` yields `self` unchanged.
     pub fn interpolate(self: Color, b: Color, t: f64) Color {
         const ar = toRgb(self) orelse return self;
         const br = toRgb(b) orelse return self;
@@ -163,8 +170,9 @@ pub const Color = union(enum) {
         } };
     }
 
-    /// A comptime ramp of `steps` colors from `self` to `end` (1..=8
-    /// steps) for static palettes.
+    /// A comptime ramp of `steps` colours from `self` to `end`, evenly
+    /// spaced with `self` first and `end` last. `steps` must be 1..=8;
+    /// anything else is a compile error.
     pub fn gradient(self: Color, comptime steps: usize, end: Color) [steps]Color {
         if (steps == 0) @compileError("gradient: steps must be >= 1");
         if (steps > 8) @compileError("gradient: steps must be <= 8");
@@ -177,7 +185,9 @@ pub const Color = union(enum) {
     }
 };
 
-/// Basic ANSI colors (0-15).
+/// The 16 ANSI colours, in SGR order: `.black`..`.white` are 0-7 and the
+/// `bright_` variants are 8-15. The enum's integer value is the index a
+/// `.ansi256` colour carries.
 pub const AnsiColor = enum(u8) {
     black = 0,
     red = 1,
@@ -208,8 +218,8 @@ pub const AnsiColor = enum(u8) {
         return if (base < 8) 40 + base else 100 + base - 8;
     }
 
-    /// Approximate RGB for this color (the 16-color palette's
-    /// conventional values).
+    /// The conventional RGB rendering of this colour, used when an
+    /// `.ansi` colour has to be interpolated or downsampled numerically.
     pub fn toRgb(self: AnsiColor) Color.Rgb {
         return switch (self) {
             .black => .{ .r = 0, .g = 0, .b = 0 },
@@ -232,10 +242,9 @@ pub const AnsiColor = enum(u8) {
     }
 };
 
-/// Convert a 256-color index to RGB.
-///
-/// Indexes 0-15 map through the ANSI palette, 16-231 through the 6x6x6
-/// color cube, 232-255 through the grayscale ramp.
+/// The RGB the 256-colour palette entry `n` renders as: 0-15 through the
+/// `AnsiColor` palette, 16-231 through the 6x6x6 cube, 232-255 through the
+/// grayscale ramp (8, 18, ..., 238).
 pub fn ansi256ToRgb(n: u8) Color.Rgb {
     if (n < 16) {
         // Standard colors
@@ -258,8 +267,8 @@ pub fn ansi256ToRgb(n: u8) Color.Rgb {
     }
 }
 
-/// Downsample RGB to the nearest 256-color index (the inverse of
-/// `ansi256ToRgb`): nearest 6x6x6 cube entry or grayscale ramp entry.
+/// The 256-colour palette index nearest to the RGB triple: the nearest
+/// 6x6x6 cube entry or grayscale ramp entry by squared distance.
 pub fn rgbToAnsi256(r: u8, g: u8, b: u8) u8 {
     const ri = nearestCubeLevel(r);
     const gi = nearestCubeLevel(g);
@@ -282,7 +291,8 @@ pub fn rgbToAnsi256(r: u8, g: u8, b: u8) u8 {
     return best_idx;
 }
 
-/// Downsample RGB to the nearest of the 16 ANSI colors.
+/// The nearest of the 16 `AnsiColor`s by squared RGB distance; ties resolve
+/// to the lower index.
 pub fn rgbToAnsi(r: u8, g: u8, b: u8) AnsiColor {
     var best: AnsiColor = .black;
     var best_dist: u32 = std.math.maxInt(u32);
@@ -320,28 +330,36 @@ fn sqDist(a: u8, b: u8, c: u8, x: u8, y: u8, z: u8) u32 {
     return r2 + g2 + b2;
 }
 
-/// Color profile representing terminal color capabilities.
+/// How far the terminal's own palette reaches. Every profile renders at
+/// least the 16 ANSI colours, so the profile only decides what an `.rgb`
+/// colour is downsampled to when it is written.
 pub const ColorProfile = enum {
-    /// 16-color (ANSI) only.
+    /// The 16 `AnsiColor` entries; an `.rgb` colour maps to the nearest one.
     ansi,
-    /// 256-color palette.
+    /// The 256-colour palette; an `.rgb` colour maps to the nearest index.
     ansi256,
-    /// 24-bit true color.
+    /// 24-bit colour, written through unchanged.
     truecolor,
 
-    /// Check if this profile supports true color.
+    /// True only for `.truecolor`, the one profile that emits `38;2` / `48;2`.
     pub fn supportsTrueColor(self: ColorProfile) bool {
         return self == .truecolor;
     }
 
-    /// Check if this profile supports the 256-color palette.
+    /// True when the terminal has the 256-colour palette, so an `.ansi256`
+    /// index needs no downsampling and an `.rgb` colour may use `38;5;N`.
     pub fn supports256(self: ColorProfile) bool {
         return self == .truecolor or self == .ansi256;
     }
 
-    /// Check if this profile supports any color.
+    /// Always true: `.ansi` already renders the 16 ANSI colours, and every
+    /// other profile renders those too. It answers "can this terminal show
+    /// any colour at all", which is a question about the terminal rather
+    /// than about which palette it holds; use `supports256` or
+    /// `supportsTrueColor` for that.
     pub fn supportsColor(self: ColorProfile) bool {
-        return self != .ansi;
+        _ = self;
+        return true;
     }
 };
 
@@ -411,13 +429,14 @@ test "color: color256 and gray helpers" {
     try std.testing.expectEqual(Color{ .ansi256 = 237 }, Color.gray(5));
 }
 
-test "color: rgbFromSpec vectors" {
+test "color: rgbFromSpec accepts the complete 4-digit channel form" {
     const c = try Color.rgbFromSpec("rgb:aaaa/bbbb/cccc");
     try std.testing.expectEqual(@as(u8, 0xAA), c.rgb.r);
     try std.testing.expectEqual(@as(u8, 0xBB), c.rgb.g);
     try std.testing.expectEqual(@as(u8, 0xCC), c.rgb.b);
 
-    // 16-bit channels downshift to their high byte.
+    // Each 16-bit channel downshifts to its high byte; the low byte must
+    // still be hex for the spec to be complete.
     const downshifted = try Color.rgbFromSpec("rgb:ff00/0f00/00ff");
     try std.testing.expectEqual(@as(u8, 0xFF), downshifted.rgb.r);
     try std.testing.expectEqual(@as(u8, 0x0F), downshifted.rgb.g);
@@ -426,11 +445,37 @@ test "color: rgbFromSpec vectors" {
     const zeros = try Color.rgbFromSpec("rgb:0000/0000/0000");
     try std.testing.expectEqual(@as(u8, 0), zeros.rgb.r);
 
-    try std.testing.expectError(error.InvalidColorSpec, Color.rgbFromSpec("xyz:aaaa/bbbb/cccc"));
-    try std.testing.expectError(error.InvalidColorSpec, Color.rgbFromSpec("rgb:aaaa/bbbb"));
-    try std.testing.expectError(error.InvalidColorSpec, Color.rgbFromSpec("rgb:aa/bb/cc"));
-    try std.testing.expectError(error.InvalidColorSpec, Color.rgbFromSpec("rgb:zzzz/bbbb/cccc"));
-    try std.testing.expectError(error.InvalidColorSpec, Color.rgbFromSpec(""));
+    // Uppercase hex is the same spec.
+    const upper = try Color.rgbFromSpec("rgb:FFFF/0000/8080");
+    try std.testing.expectEqual(@as(u8, 0xFF), upper.rgb.r);
+    try std.testing.expectEqual(@as(u8, 0x80), upper.rgb.b);
+}
+
+test "color: rgbFromSpec rejects a spec it does not fully consume" {
+    // Each of these has to be rejected rather than parsed as a prefix:
+    // a terminal that answers with a malformed spec must not be reported
+    // as if it had answered correctly.
+    const malformed = [_][]const u8{
+        "", // empty
+        "rgb", // no channels
+        "rgb:", // empty body
+        "xyz:aaaa/bbbb/cccc", // wrong prefix
+        "RGBA:aaaa/bbbb/cccc", // wrong prefix
+        "rgbi:aaaa/bbbb/cccc/aaaa", // alpha form: no field to carry it
+        "rgb:aaaa/bbbb", // missing a channel
+        "rgb:aa/bb/cc", // channels are 16 bits
+        "rgb:aaaaa/bbbb/cccc", // wrong channel length
+        "rgb:zzzz/bbbb/cccc", // non-hex high byte
+        "rgb:ffzz/bbbb/cccc", // non-hex low byte, dropped by the downshift
+        "rgb:aaaa/bbbb/cccc/dddd", // extra channel
+        "rgb:aaaa/bbbb/cccc/", // empty trailing channel
+        "rgb:aaaa/bbbb/cccc:1", // trailing parameter
+        " rgb:aaaa/bbbb/cccc", // leading space
+        "rgb:aaaa/bbbb/cccc ", // trailing space
+    };
+    for (malformed) |spec| {
+        try std.testing.expectError(error.InvalidColorSpec, Color.rgbFromSpec(spec));
+    }
 }
 
 test "color: ansi256ToRgb cube corners" {
@@ -489,9 +534,11 @@ test "color: ColorProfile support matrix" {
     try std.testing.expect(ColorProfile.ansi256.supports256());
     try std.testing.expect(ColorProfile.truecolor.supports256());
 
-    try std.testing.expect(!ColorProfile.ansi.supportsColor());
-    try std.testing.expect(ColorProfile.ansi256.supportsColor());
-    try std.testing.expect(ColorProfile.truecolor.supportsColor());
+    // Every profile renders colour: `.ansi` is the 16-colour palette, not
+    // a monochrome terminal.
+    for ([_]ColorProfile{ .ansi, .ansi256, .truecolor }) |p| {
+        try std.testing.expect(p.supportsColor());
+    }
 }
 
 test "color: interpolate clamps t to 0..1" {
@@ -506,7 +553,7 @@ test "color: interpolate clamps t to 0..1" {
 test "color: interpolate midpoint lerps each channel" {
     const red: Color = .{ .rgb = .{ .r = 255, .g = 0, .b = 0 } };
     const blue: Color = .{ .rgb = .{ .r = 0, .g = 0, .b = 255 } };
-    // 255 * 0.5 + 0 * 0.5 = 127.5 -> 127 (truncating cast, like zigzag).
+    // 255 * 0.5 + 0 * 0.5 = 127.5, truncated to 127.
     try std.testing.expect(Color.eql(
         .{ .rgb = .{ .r = 127, .g = 0, .b = 127 } },
         red.interpolate(blue, 0.5),

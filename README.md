@@ -50,6 +50,228 @@ With piped stdin (`interactive = false`) the region emits one plain
 frame, with no interactive escape sequences. `sync_output = false`
 only disables DEC 2026; an interactive terminal still renders in place.
 
+### Package routes and support
+
+This package supports native Zig 0.16.0. The manifest's `minimum_zig_version`
+is a floor, not a claim about later compiler lines or every target.
+Pure drawing and formula operations do not open a terminal. Terminal input,
+raw mode, and pipe capture require native POSIX descriptors and a compatible
+live `std.Io` provider; replacing `Io` does not replace direct POSIX calls.
+There is no C ABI or mirrored-header contract.
+
+Add the module you use to your own build graph:
+
+```zig
+const dep = b.dependency("notui", .{ .target = target, .optimize = optimize });
+exe.root_module.addImport("notui", dep.module("notui"));
+```
+
+| Registered module | Consumer import | Purpose |
+|---|---|---|
+| `notui` | `@import("notui")` | Toolkit namespaces listed below |
+| `ztex` | `@import("ztex")` | Parse/layout/SVG facade and font context |
+| `ztex.atom` | `@import("ztex.atom")` | Formula AST and packed payload codecs |
+| `ztex.parse` | `@import("ztex.parse")` | Source parsing and structured diagnostics |
+| `ztex.layout` | `@import("ztex.layout")` | Metrics-driven draw-list construction |
+| `ztex.svg` | `@import("ztex.svg")` | Draw-list serialization |
+
+Register each extra import explicitly; module import tables are not transitive.
+For example, add `dep.module("ztex")` under `"ztex"` for the formula facade.
+Its namespaces expose the types used by its signatures; the four lower-level
+module routes also support direct consumers. Vendored `skript` is an example
+dependency, not a toolkit export.
+
+`zig build check` compiles toolkit, REPL, and formula test paths.
+`zig build test` executes them; `zig build test-formula` isolates formula tests.
+`zig build` also builds the shipped examples. Generic bodies still need a caller
+to instantiate them; none of these commands certifies every possible instantiation.
+`zig build docs` generates each registered root under `zig-out/docs/<module>/`.
+
+### API repair migration
+
+These are clean contract changes, with no legacy aliases:
+
+- `Text.scratch` and `Suggestions.scratch` are required caller-owned lists.
+  Keep a separate stable list for each component whose drawn cells coexist.
+  Do not mutate or free it until rendering consumes those cells. Pass its
+  owning allocator to `draw`, then deinitialize the list with that allocator.
+  `StatusBar.scratch` was unused and is removed; segment text remains borrowed.
+- The unused no-op `Component` template is removed. Call each concrete
+  component's `draw`; its declaration gives the allocator and return unit.
+- `width.fitPrefixLen` returns a borrowed prefix boundary without allocation.
+  Components and `width.truncate` use the same grapheme-budget rule.
+  The component helper is removed. Formula boxes use `num_children == 0`
+  to identify a leaf; the unused `null_child` index sentinel is removed.
+- `Cmd(Msg).tick` takes `{ delay_ms, msg }`; `every` takes `{ interval_ms, msg }`.
+  The runtime delivers that explicit message. A timer-free `Msg` needs no
+  `.tick` member. References inside a scheduled message remain caller-owned.
+- `App.send` and `Region.historyPending` return allocation errors.
+  Use `try` or handle `error.OutOfMemory`; failure is not a dropped message
+  or a false empty ledger. Pending-id results borrow query storage.
+- `View(Model)` uses `Model.DrawError` when declared, otherwise
+  `std.mem.Allocator.Error`. A custom paint error must be in that closed set;
+  unconstrained `anyerror` callbacks are not supported.
+- `App.start` rolls back runtime acquisition on failure. Optional
+  `Model.deinit(self, gpa)` releases successfully initialized model resources.
+  `App.deinit` is idempotent for the same instance, not for copied owners.
+  Restart clears the heartbeat, pacing samples, and frame statistics.
+  The configured watchdog budget survives disposal and restart.
+- `Region.placeAt` returns `error.AnchorUnmeasured` without output when its
+  absolute anchor is unusable. Route CPR replies through `applyCpr` first.
+- `Region.writeTranscript` returns `error.HistoryIdExhausted` if the accepted
+  history id is already `maxInt(u64)`. Zero-row deltas still carry block receipts.
+- `Buffer.rowFootprint(gpa, y, wide_columns, null_gaps)` puts the tape allocator
+  before the row index, like the other allocating Buffer operations.
+- Kitty image transmission rejects zero geometry or empty PNG payloads with
+  `error.DegenerateImage`, and wrong-sized raw pixels with `error.ImageSizeMismatch`.
+  Both checks precede output. Placements with zero cell extents return `error.CellOutOfRange`.
+- `ztex.Context.init(gpa, io)` and `FontContext.init(gpa, io)` borrow a live
+  caller provider for font discovery. Keep it and `gpa` live until one disposal.
+  `FontContext.metrics` retains a face's pointer identity in its cache.
+  Keep an external face alive, unmodified, and at a stable address until context disposal.
+  `ztex.render` with static metrics remains I/O-free.
+- `ztex.parse.Info.span` is optional. Depth failures carry `.depth_exceeded`;
+  allocation failures carry `.out_of_memory` with no source span.
+  The diagnostic is filled on every parse failure and untouched on success.
+- `component.editor` publishes `Editor`, `Options`, `Error`, and the default limits.
+  `component.Editor` remains the existing short type route.
+  Setting a history depth to zero stops new recording, not access to retained entries.
+  Editing errors preserve logical text and cursor, but can end an edit sequence.
+  A failed yank can invalidate an old text borrow after a successful buffer growth.
+- A zero `Spinner.interval` or `AnimatedText.interval` acts as one nanosecond.
+  Their `advance` result means an interval elapsed, including a complete frame cycle.
+- `Region.Options.width_policy`, `Capabilities.WidthPolicy`, and `widthPolicy` are removed.
+  Remove those settings and calls. Toolkit widths use `zg` Unicode 16 data.
+  Terminal `unicode_core` detection remains informational.
+- Formula and coverage quadratic curves now have an `extern` representation:
+  `p0`, `p1`, `p2`, each `[2]f32` in `[x, y]` order.
+  Existing casts remain zero-copy. `FontFace.glyphOutline` accepts a const face.
+- A Markdown highlighter uses the supplied arena or static storage for replacement slices.
+  Keep replacements valid through the returned block's lifetime. Hyperlinks remain caller borrows.
+
+The owning declarations document callback reentry, failure residue, option
+defaults, and slice invalidation. Copies of storage owners share resources;
+they are not a second disposal obligation. `Buffer` borrows drawn graphemes
+and style hyperlinks. `Region.prev` copies graphemes but still borrows hyperlink
+bytes until a successful replacement snapshot or disposal.
+
+### API repair decisions
+
+This is the `evolve` branch: change the supported contract and migrate its callers
+without compatibility shims. The working-copy repair starts from
+`34c238162fe984db60e9708c3d8092ba6cc4c7f7`; that is a baseline, not a commit of
+the result. Scope: the six registered native roots above, on Zig 0.16.0.
+
+These are this repair's contextual judgments, not recovered historical motives.
+Their taste grade is **analyst-inferred**, attributed to the implementing assistant:
+
+- **Caller scratch:** prioritize independent components in one frame because cells
+  retain drawn bytes. Callers hold separate lists, pass their allocators, and free
+  each list after its last frame. Per-component owned storage would win for an
+  application that wants self-contained, long-lived component instances, at the
+  cost of an allocator and disposal lifecycle per instance.
+- **Explicit timer messages:** prioritize model-independent timers because each
+  model defines its own `Msg`. Callers supply the payload and keep its referenced
+  data live until delivery or session end. A conventional `.tick` message would
+  win for homogeneous models that all use the same timer meaning.
+- **Stored font `Io`:** prioritize repeated discovery through one live provider.
+  The font context borrows that provider and the allocator through disposal.
+  Passing `Io` per operation would win when callers must change providers between
+  lookups; it adds plumbing to each lookup instead of a context-lifetime obligation.
+- **Closed paint errors:** prioritize a declared failure contract for typed model
+  callbacks. Models with custom paint errors declare `DrawError`. A catch-all would
+  win for unconstrained plug-in callbacks, but would no longer declare which errors
+  this typed framework can return.
+- **Allocator order:** prioritize consistency with the allocating Buffer operations.
+  Footprint callers move `gpa` before `y`. Geometry-first order would win for an API
+  that uniformly groups positional arguments before operation capabilities.
+- **Editor namespace:** prioritize nameable configuration and error types without flattening
+  the component root. Callers use `component.editor.Options` and `.Error`.
+  Root-level names would win for a small library without component-specific namespaces.
+- **One width source:** prioritize a contract that matches actual toolkit geometry.
+  Callers remove an option that never affected width calculation.
+  A selectable width policy would win when terminal-specific widths are implemented
+  across measurement, wrapping, and painting. That implementation does not exist here.
+- **Curve representation:** prioritize the existing zero-copy formula-to-coverage path.
+  Callers keep the declared field order and `[x, y]` coordinates.
+  Explicit conversion would win for incompatible foreign layouts, but adds work here.
+- **Zero animation interval:** prioritize a defined result for a publicly mutable interval.
+  Zero means one nanosecond, with no new error channel.
+  Treating zero as disabled would win for an API that uses its interval as an enable switch.
+
+Rollback, exact allocation release, diagnostic residue, geometry validation, and
+borrow validity are **safety-fixed obligations**, not competing style preferences.
+Zig copies do not create independent ownership or enforce exactly-once disposal.
+
+### API repair verification
+
+**Runtime observation, native Linux x86-64, Zig 0.16.0:** 801/801 tests passed in
+Debug and ReleaseSafe: 757 toolkit, 15 REPL, and 29 formula tests.
+`zig build test check docs install` completed 81/81 steps.
+`zig build test check -Doptimize=ReleaseSafe` completed 47/47 steps.
+The ReleaseSafe example build completed 60/60 steps. Formatting passed for toolkit,
+example, and formula sources. AST checks passed for 71 files; zlint passed for the
+56-file non-vendor analyzer scope.
+The counter and statusline emitted the same plain frames in Debug and ReleaseSafe.
+The formula's 30-by-12 fraction raster matched in Debug, ReleaseSafe, and ReleaseFast.
+
+An external consumer imported all six roots and ran in Debug and ReleaseSafe.
+It exercised allocator failures and exact release, independent component storage,
+history receipts including zero-row blocks, formula diagnostics and SVG output,
+caller-owned font `Io`, explicit timers, fallible send, and model disposal.
+A PTY run observed failed startup restoring the original termios and releasing
+the runtime. Rendered component smoke covered the widest labelled Progress,
+filtered selection, and an oversized aligned Text marker.
+The shipped counter emitted its plain frame. The ReleaseFast benchmark's ten
+case invariants and real App/TCP snapshot path passed; this was integration proof,
+not a controlled performance comparison.
+
+The boundary consumer passed in Debug, ReleaseSafe, and ReleaseFast. It checked
+retained Editor history, allocation-failure residue, and rendered text.
+It also checked zero and maximal elapsed animation intervals, malformed DECRPM
+consumption, a const font outline, and zero-copy curve rasterization.
+The highlighter returned both static and arena-backed replacements, including
+language, URL, and hyperlink data. Both results matched the consumer's expected bytes.
+
+**Exercised compilation:** both `anyerror` and non-error `Model.DrawError`
+declarations were rejected by their intended guards. All six registered roots
+generated documentation. An external caller named `Buffer.RowFootprint` and its
+`NullGap`, then called the allocator-first footprint API.
+
+**Analyzer assessment, source reading at `bb4d44bf013b`:** all 132 diagnostic
+occurrences were reviewed. There are 82 false positives and 50 intentional test
+assertions. No reported finding exposed a confirmed runtime defect.
+
+| Analyzer report | Count | Assessment |
+|---|---:|---|
+| ziglint: public type exposure | 4 | `Buffer.RowFootprint` is public |
+| ziglint: incomplete disposal | 1 | Test fixture frees its buffer and retains its observation counter |
+| zwanzig: optional unwrap | 112 | 62 guarded or constructed values, 50 intentional test assertions |
+| zwanzig: identifier style | 13 | Valid type and value aliases |
+| zwanzig: unreachable code | 1 | Intentional compile-time bounds check |
+| zwanzig: swallowed error | 1 | Invalid UTF-8 rejects the cluster through the boolean result |
+
+The unwrap assessment relies on documented lifecycle and non-reentry contracts.
+It does not cover arbitrary mutation of runtime fields or every possible consumer.
+[`ANALYZER-TRIAGE.json`](ANALYZER-TRIAGE.json) records every occurrence and its
+source evidence, including the duplicate ziglint report. The tools were ziglint
+`0.5.3-1+66709a4` and zwanzig `0.15.1` with the Zig 0.16.0 frontend.
+
+A live sanitizer probe rejected an invalid cluster after its valid prefix advanced
+the escape state. `Sanitizer.acceptCluster` now documents this residue. Its behavior
+is unchanged and matched the copying sanitizer on the probe input.
+
+**Verification limits:** `zig-gate --no-cross --no-zbc` still exits 1 on these
+reviewed reports. No warning was suppressed and no global analyzer was changed.
+A previous serial `zbc --jobs=1` attempt crashed in its binding cache with exit 134.
+There is no completed current zbc verdict.
+
+No cross-target or other compiler-line execution is claimed. Generic coverage is
+limited to reached consumers, and generated doc navigation was not browser-tested.
+The working-copy evidence is `zig-out/visual/api-contract-repair/verification.json`;
+that local verification artifact is not part of the published package.
+
+
 ## Modules
 
 | Module   | Purpose |
@@ -374,9 +596,9 @@ Product code was unchanged during that baseline. The following defects were obse
   The logical query still evaluates to `42`.
   Evidence: `editor-16b-midline-insert.png`, `editor-16c-backspace-undo.png`,
   and `editor-19-answer.png`.
-  Right-side syntax segments all draw at the same column (`examples/skript_repl.zig:1168-1169`).
-  Region owns the previous frame's glyph copies. Borrowed-text aliasing is not the cause
-  (`src/region.zig:1234-1265`).
+  The baseline drew right-side syntax segments at the same column in
+  `examples/skript_repl.zig`. Its Region owned the previous frame's glyph copies
+  in `src/region.zig`, so borrowed-text aliasing was not the cause.
 - **Popup height transitions:** Old prompt and candidate rows survive above the collapsed input band.
   Evidence: `editor-10-esc-token-gone.png` and `editor-15-line-cleared.png`.
 - **Width resize:** An old status-bar row survives both narrow and restored-wide frames.
@@ -391,16 +613,15 @@ Product code was unchanged during that baseline. The following defects were obse
   The prompt and selected candidate disappear above the viewport.
   Evidence: `resize-repl-popup-short.png`.
 - **In-string completion:** Cursor movement inside a quoted string opens symbol suggestions.
-  The REPL prefix heuristic has no string context (`examples/skript_repl.zig:1085-1095`).
+  The baseline REPL prefix heuristic had no string context (`examples/skript_repl.zig`).
   Evidence: `editor-13-cursor-grapheme.png` and `editor-14-backspace-codepoint.png`.
 
-The popup residue has a source-level cause.
-Escape shrinks and regrows the band before one render.
-`Region.paintGrow` reserves the last delta, not the net change from the painted extent
-(`src/region.zig:398-406,969-981`). Later frames cannot erase the rows left above the band.
-The Escape branch also lacks the suppression flag used by Tab (`examples/skript_repl.zig:268-277`).
-The short-terminal defect belongs to the example, which ignores terminal rows during resize
-(`examples/skript_repl.zig:365-375`).
+The baseline popup residue also had a source-level cause.
+Escape shrank and regrew the band before one render.
+The former `Region.paintGrow` reserved the last delta, not the net change from
+the painted extent. Later frames could not erase the rows left above the band.
+The Escape branch lacked the suppression flag used by Tab in `examples/skript_repl.zig`.
+The baseline example also ignored terminal rows during resize, causing the short-terminal defect.
 
 Checks without observed defects:
 
@@ -504,11 +725,11 @@ row 11. Three states have no PNG, so their buffer record is the only evidence; t
 
 ### Zwanzig baseline triage (historical)
 
-The first full zwanzig run reported 120 findings. That count is historical: the pass it
-came from predates the repairs above, and later runs add and remove findings, so it is
-not a current total. The current strict run reports 114; see
-[Gate diagnostics and zbc triage](#gate-diagnostics-and-zbc-triage) for that pass. Its breakdown and
-the outcome of each class:
+The first full zwanzig run reported 120 findings. These counts are historical
+and predate the API repair. A later pre-repair strict run reported 114 findings.
+See [Gate diagnostics and zbc triage](#gate-diagnostics-and-zbc-triage) for that pass,
+and [API repair verification](#api-repair-verification) for the current assessment.
+The first pass had this breakdown:
 
 | Class | Count | Triage |
 |---|---:|---|
@@ -542,9 +763,9 @@ to suppress nothing.
 
 ### Gate diagnostics and zbc triage
 
-The gate excludes vendored packages with `GATE_EXCLUDE='^./vendor/'`.
-This keeps upstream code unchanged and checks all 54 owned Zig files.
-No lint rule was disabled.
+The historical gate excluded vendored packages with `GATE_EXCLUDE='^./vendor/'`.
+That pass checked 54 owned Zig files. The current analyzer assessment covers 56
+non-vendor files. No lint rule was disabled.
 
 The `zig-gate` script now checks analyzer exit codes.
 It strips ANSI colors before it counts the zlint summary.
@@ -578,25 +799,25 @@ The report also records 27 unresolved import lookups.
 That count limits analyzer coverage. It does not prove those imports safe.
 No warning was suppressed, and no source guard was added just to change analyzer output.
 
-The current gate state is a block, not a gap. `zig-gate --no-cross --no-zbc` (277.12 s) passed
+Before this API repair, `zig-gate --no-cross --no-zbc` (277.12 s) passed
 format, build, tests, AST checks, ziglint and zlint, then failed on the strict zwanzig stage with
 114 findings: 101 `optional-unwrap`, 11 `identifier-style`, 1 `unreachable-code-engine` and
 1 `swallowed-error`. `zwanzig-current-report.json` carries the raw list and
 `zwanzig-current-triage.json` carries all 114 as per-site classifications with their proofs. Under
 the documented contract none of them is an owned-source defect: 101 guarded lifecycle and test
 premises, 11 valid names (the `Key` type the examples reach through `notui.key`, plus the lowercase
-codec and flag values), the `comptime` invariant guard, and the fail-closed UTF-8 reject path. The
-one proposed counterexample, a headless `tick` panic at `src/app.zig:795`, was withdrawn: it called
-`tick` on a hand-wired headless app, which the public contract forbids. The stage still fails on
-114 — no suppression, rename, guard deletion, global tool edit or policy waiver.
+codec and flag values), the `comptime` invariant guard, and the fail-closed UTF-8 reject path.
+One proposed counterexample, a headless `App.tick` panic, was withdrawn: it called
+`tick` on a hand-wired headless app, which the public contract forbids.
+That historical stage failed on 114 findings without suppression or a policy waiver.
 
-`zbc` was run separately over the 54 owned files, serial and explicit (`zbc --jobs=1`, 35.10 s on
-the final source): 54 analyzed, 0 parser failures, 7 warnings on the same seven index-underflow
+Before this API repair, `zbc` ran over the 54 owned files, serial and explicit
+(`zbc --jobs=1`, 35.10 s): 54 analyzed, 0 parser failures, 7 index-underflow warning
 sites and 27 unresolved import lookups, exit 1 advisory. `zbc-current-summary.json` holds that
 summary, the 54-file list and the seven sites. No full `zig-gate` verdict is claimed: the initial
 full run hit its 600 s outer timeout, entered zbc without a verdict and never reached zwanzig.
-The installed CLI does finish on a single file, so `zbc --jobs=1 src/emit.zig` is a usable spot
-check.
+At that stage, the installed CLI finished on a single file with
+`zbc --jobs=1 src/emit.zig`; this is historical evidence, not a current verdict.
 
 ## Measurement and verification
 
@@ -606,11 +827,11 @@ zig build bench -Doptimize=ReleaseFast
 gate                              # zig-gate, then the same benchmark
 ```
 
-Test totals as run, in the order they happened. `zig build` completed 58/58 steps and
+Historical test totals before the API repair, in run order. `zig build` completed 58/58 steps and
 `662/662` tests passed in Debug and ReleaseSafe (647 library plus 15 REPL in each) on the
 tree that carried the physical-height and parser repairs. Two bottom-row tests were added
 after that run, and the next `zig build test` reported 662 of 664 with those two failing.
-The current tree passes `zig build test` 663/663 in Debug (`zig build` 58/58 steps) and in
+Before this API repair, `zig build test` passed 663/663 in Debug (`zig build` 58/58 steps) and in
 ReleaseSafe (44/44 steps), 648 library plus 15 REPL in each.
 [Post-repair deep QA](#post-repair-deep-qa-2026-10-0102) names them and records the gate
 state.
@@ -620,8 +841,8 @@ allocations per frame at 80×24 and 200×60 for static and streaming content.
 Static steady-state frames must write zero bytes. Rendering allocations
 are counted rather than assumed.
 
-Measured on this host (`zig build bench`, ReleaseFast, Zig 0.16; timing
-floor clock p50 73 ns / p99 80 ns):
+Historical measurement on this host (`zig build bench`, ReleaseFast, Zig 0.16;
+timing floor clock p50 73 ns / p99 80 ns):
 
 | case | p50 ns | p99 ns | bytes/frame | allocs/frame |
 |---|---|---|---|---|

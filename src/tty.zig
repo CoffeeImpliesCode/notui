@@ -1,21 +1,24 @@
-//! Raw-mode terminal: /dev/tty input, std.Io output, SIGWINCH resize
-//! flag, panic-restore global.
+//! The terminal device in raw mode: `/dev/tty` for input and termios, a
+//! second descriptor for frame output, SIGWINCH and signal cleanup.
 //!
-//! Adapted from zigzag `terminal/platform/posix.zig` (raw mode, isTty,
-//! SIGWINCH flag, poll) and libvaxis `tty.zig` (winsize, panic-restore
-//! global, /dev/tty open). zigzag's fd-based state is replaced with the
-//! §5 std.Io-threaded handle; the notifyWinsize callback registry is
-//! dropped — v0 uses one atomic flag (the single sanctioned global, plan
-//! §0). Windows paths are not copied (deferred to v1).
+//! Two descriptors, opened independently. `fd` is the read/write `/dev/tty`:
+//! it stays blocking and owns the termios, the ioctls and the buffered writer
+//! used for capability probes and teardown. `out` is a second, write-only
+//! `/dev/tty` opened `O_NONBLOCK`, and it is the frame transport. The split is
+//! what keeps the loop nonblocking: a full terminal buffer reports `EAGAIN`
+//! and the frame stays queued, while input still reads through the descriptor
+//! it has always used.
 //!
-//! Output has two descriptors. `fd` is the original read/write
-//! `/dev/tty`: it stays blocking, it owns the termios, the ioctls and
-//! the buffered writer used for capability probes and teardown.
-//! `out` is a SECOND, write-only `/dev/tty` opened `O_NONBLOCK`, and
-//! it is the frame transport (`tryWrite`). The split is what makes the
-//! event loop nonblocking: a full terminal buffer reports EAGAIN, the
-//! frame stays in the `OutputQueue`, and nothing blocks — while input
-//! still reads with the same blocking descriptor it always used.
+//! `io` is used for the buffered writes, the reads and the window-size
+//! fallback. Termios changes, window size and the readiness checks are native
+//! `posix` calls on the stored descriptors, and the signal handlers are
+//! process-wide: one tty at a time, one handler per signal. `restoreTerminal`
+//! needs neither, because it writes the descriptor directly and is built to be
+//! called from a signal handler or a panic hook.
+//!
+//! Windows and WASI have no `/dev/tty`. There the frame transport is absent
+//! and `tryWrite` reports `error.WriteFailed` rather than quietly blocking on
+//! a descriptor that cannot be nonblocking.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -79,29 +82,43 @@ fn ioctlReq(req: u32) if (builtin.link_libc) c_int else u32 {
     return if (builtin.link_libc) @bitCast(req) else req;
 }
 
-/// SIGWINCH resize flag — the single sanctioned global (plan §0), set by
-/// the signal handler, drained by `Tty.checkResize`.
+/// Set by the SIGWINCH handler and drained by `Tty.checkResize`. It is
+/// process-wide because the handler is: a signal carries no instance, so one
+/// flag records that some terminal in this process resized. A reader that
+/// drains it learns only that a resize happened, never which descriptor.
 var resize_signaled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
-/// Whether the SIGWINCH handler is installed (one Tty at a time in v0).
+/// Whether the SIGWINCH handler is installed. The handlers are process-wide
+/// and installed once; `Tty.deinit` restores the default disposition, so a
+/// later session installs them again.
 var handler_installed: bool = false;
 
-/// Whether the SIGTERM/SIGINT cleanup handlers are installed.
+/// Whether the SIGTERM and SIGINT cleanup handlers are installed, under the
+/// same process-wide, install-once rule as `handler_installed`.
 var term_signal_cleanup_installed: bool = false;
 
-/// Global tty instance for panic restore. Not guaranteed to work with
-/// multiple Tty instances under one compilation unit, but better than
-/// nothing (libvaxis pattern). `makeRaw` keeps the copy's termios in
-/// sync so a panic handler can restore even when raw mode is entered
-/// after init.
+/// The tty a signal or panic handler restores, or `null` when no session has
+/// opened one. `Tty.init` stores a copy here and `makeRaw` keeps its termios in
+/// step, and `Tty.deinit` clears it when it owns that same descriptor.
+///
+/// It is one slot for the whole process, because a signal handler and a panic
+/// hook have nothing to carry an instance in. Two `Tty` values open at once
+/// therefore share the slot: the last one opened is the one a signal restores.
+/// An application that needs two independent terminals must not rely on this
+/// slot and must restore each one itself.
 pub var global_tty: ?Tty = null;
 
-/// Restore the terminal from the `global_tty` copy: termios plus the
-/// minimal mode disables (cursor show, kitty keyboard pop, sync off).
-/// Used by the SIGTERM/SIGINT handler and by app roots via a `panic`
-/// override — defers never run on kill or panic, and a raw terminal left
-/// behind is what forces a hard reset. Best-effort: safe for the
-/// async-signal context; failure is observed, not acted on.
+/// Put the terminal back the way `global_tty` found it: the original termios,
+/// then autowrap, the cursor, the kitty keyboard and synchronized output.
+///
+/// Called by this module's SIGTERM and SIGINT handlers and available to an
+/// application as a `panic` override, because neither a kill nor a panic runs
+/// a `defer`, and a raw terminal left behind is what forces a manual reset.
+///
+/// Best-effort and built for that context: it touches only the stored
+/// descriptor, reports nothing, and does nothing at all when `global_tty` is
+/// null. It does not write the App's own exit sequences, so a session that
+/// ends normally still uses `Capabilities.restore`.
 pub fn restoreTerminal() void {
     if (global_tty) |*g| {
         if (g.original_termios) |termios| {
@@ -121,10 +138,25 @@ pub fn restoreTerminal() void {
     }
 }
 
+/// One terminal, opened for input, termios and window size and — where the
+/// platform allows it — opened a second time as the nonblocking frame
+/// transport.
+///
+/// A `Tty` owns both descriptors and releases them in `deinit`; it borrows the
+/// `io` it was built with, which must stay valid for the `Tty`'s life. Its
+/// fields are reachable, so a caller may build one around descriptors it
+/// already has (`out` stays null there, which is what makes `tryWrite`
+/// refuse rather than fall back to the blocking descriptor).
+///
+/// `writer` caches a buffered writer inside the value, so a `Tty` must not
+/// move once it is in use. The signal handlers and `global_tty` are
+/// process-wide, as described at module level: two `Tty` values share one
+/// handler and one restore slot.
 pub const Tty = struct {
-    /// The Io the tty is threaded onto (output, clock).
+    /// The `std.Io` every buffered read and write on this instance goes
+    /// through. Borrowed: it must outlive the `Tty`.
     io: std.Io,
-    /// The /dev/tty file descriptor (input, termios, ioctl).
+    /// The read/write `/dev/tty`: input, termios and the ioctls. Blocking.
     fd: std.Io.File,
 
     /// The frame transport: a SECOND, write-only `/dev/tty` opened
@@ -135,19 +167,28 @@ pub const Tty = struct {
     /// Never the same descriptor as `fd`: input stays blocking.
     out: ?std.Io.File = null,
 
-    /// Original termios captured by makeRaw; restored by restore/deinit.
+    /// The termios captured by `makeRaw`, restored by `restore` and `deinit`.
+    /// Null until `makeRaw` succeeds, and null again after a restore.
     original_termios: ?posix.termios = null,
+    /// Whether this instance currently owns a raw-mode terminal. `restore`
+    /// clears it; `makeRaw` and `deinit` consult it.
     in_raw_mode: bool = false,
-
-    /// Streaming writer over `fd`, built lazily on the first `writer()`
-    /// call so the internal buffer lives at the instance's stable address
-    /// (init returns by value).
+    /// The buffered writer over `fd`, built on the first `writer` call so its
+    /// buffer lives at this instance's address rather than a copy's.
     tty_writer: ?std.Io.File.Writer = null,
+    /// The storage `tty_writer` buffers into.
     write_buf: [4096]u8 = undefined,
 
-    /// Open /dev/tty for input and install the SIGWINCH handler. Raw mode
-    /// is NOT entered — call `makeRaw` explicitly (event-loop order:
-    /// init → makeRaw → Caps.detect).
+    /// Open `/dev/tty` for input and termios, open the nonblocking frame
+    /// transport where the platform allows one, and install the SIGWINCH and
+    /// SIGTERM/SIGINT handlers once per process. Raw mode is NOT entered:
+    /// call `makeRaw` next, so the order is `init`, `makeRaw`, then capability
+    /// detection on an already-raw terminal.
+    ///
+    /// `io` must stay valid as long as the returned value is used. Open
+    /// failures propagate, including a refused frame transport, and nothing
+    /// is left open when one does. The returned value is also published in
+    /// `global_tty`, so a signal handler can restore it.
     pub fn init(io: std.Io) !Tty {
         var f = try std.Io.Dir.openFileAbsolute(io, tty_path, .{ .mode = .read_write });
         errdefer f.close(io);
@@ -187,8 +228,10 @@ pub const Tty = struct {
         return self;
     }
 
-    /// Restore the terminal, uninstall the signal handler, close both
-    /// /dev/tty descriptors.
+    /// Restore the terminal, restore the default disposition of the signal
+    /// handlers, and close both descriptors. Releases what `init` took; a
+    /// `Tty` built by a caller around its own descriptors has those closed
+    /// too, because the value owns them. The value is unusable afterwards.
     pub fn deinit(self: *Tty) void {
         if (global_tty) |*g| {
             if (g.fd.handle == self.fd.handle) global_tty = null;
@@ -200,15 +243,21 @@ pub const Tty = struct {
         self.* = undefined;
     }
 
-    /// Check if a file descriptor is a tty by probing for terminal window
-    /// size (TIOCGWINSZ ioctl — only granted to terminal devices; replaces
-    /// posix.isatty, removed in Zig 0.16).
+    /// Whether `fd` is a terminal device, decided by asking it for its window
+    /// size: only a terminal answers `TIOCGWINSZ`. False for a file, a pipe,
+    /// a socket, and for a descriptor that is not open.
     pub fn isTty(fd: posix.fd_t) bool {
         var wsz: posix.winsize = undefined;
         return posix.system.ioctl(fd, posix.T.IOCGWINSZ, @intFromPtr(&wsz)) == 0;
     }
 
-    /// Enter raw mode: save the original termios, apply `rawTermios`.
+    /// Enter raw mode: capture the current termios and apply the raw form.
+    ///
+    /// A no-op when the instance is already raw, so it is safe to call twice.
+    /// `error.GetAttrFailed` and `error.SetAttrFailed` mean the terminal kept
+    /// the state it had; nothing else changed, and a later `restore` is still
+    /// a no-op. On success the captured termios also reach `global_tty`, so a
+    /// signal or panic handler can put the terminal back.
     pub fn makeRaw(self: *Tty) !void {
         if (self.in_raw_mode) return;
         const orig = posix.tcgetattr(self.fd.handle) catch return error.GetAttrFailed;
@@ -223,7 +272,10 @@ pub const Tty = struct {
         }
     }
 
-    /// Restore the original termios captured by makeRaw. Idempotent.
+    /// Put back the termios `makeRaw` captured. Idempotent, and a no-op when
+    /// the instance was never raw. A failed `tcsetattr` is logged and leaves
+    /// the instance marked as not raw, because retrying the same restore will
+    /// not do better.
     pub fn restore(self: *Tty) void {
         if (!self.in_raw_mode) return;
         if (self.original_termios) |termios| {
@@ -234,9 +286,10 @@ pub const Tty = struct {
         self.in_raw_mode = false;
     }
 
-    /// Window size via TIOCGWINSZ. On ioctl error (or a zero-sized
-    /// report) falls back to 80x24 — graceful, never a hard throw for
-    /// width (plan §8.8).
+    /// The terminal size from `TIOCGWINSZ`. An ioctl error, or a report with a
+    /// zero row or column, falls back to 80x24 with no pixel counts: a caller
+    /// always gets a usable band, and the error is not worth failing a frame
+    /// over. The result is a snapshot; ask again after a resize.
     pub fn getWinsize(self: *Tty) !Winsize {
         var wsz: posix.winsize = .{
             .row = 0,
@@ -255,8 +308,10 @@ pub const Tty = struct {
         return .{ .rows = 24, .cols = 80, .x_pixel = 0, .y_pixel = 0 };
     }
 
-    /// True when a SIGWINCH arrived since the last check (atomic flag
-    /// swap; no threads in v0).
+    /// Whether a SIGWINCH arrived since the last check, and clears the flag.
+    ///
+    /// The flag is process-wide, so a true result means this terminal may
+    /// have resized, not that it did: confirm with `getWinsize`.
     pub fn checkResize(self: *Tty) bool {
         _ = self;
         return resize_signaled.swap(false, .acquire);
@@ -278,8 +333,10 @@ pub const Tty = struct {
         return output.tryWriteFd(self.io, file, bytes);
     }
 
-    /// The buffered output writer. Created once against the instance's
-    /// internal buffer; the instance must not move afterwards.
+    /// The buffered writer over `fd`, built once against this instance's
+    /// internal buffer, so it must not be moved afterwards. The caller flushes
+    /// it; nothing here writes on its own, and the writer is the only handle
+    /// to `fd`'s write side, which is deliberately not used for frames.
     pub fn writer(self: *Tty) *std.Io.Writer {
         if (self.tty_writer == null) {
             self.tty_writer = self.fd.writerStreaming(self.io, self.write_buf[0..]);
@@ -287,7 +344,11 @@ pub const Tty = struct {
         return &self.tty_writer.?.interface;
     }
 
-    /// Blocking read from the tty.
+    /// Read from `fd` into `buf`, blocking until at least one byte arrives,
+    /// and return how many. `0` means the input ended. The descriptor is
+    /// blocking by design, so readiness is the caller's to establish before
+    /// calling; this is the path `Reader` uses, and a cancelation request does
+    /// not interrupt the wait.
     pub fn read(self: *Tty, buf: []u8) !usize {
         const n = try self.fd.readStreaming(self.io, &.{buf});
         return n;

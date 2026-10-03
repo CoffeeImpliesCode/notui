@@ -7,11 +7,19 @@
 //! Every primitive carries the byte span (into the original source) of the box
 //! it came from, so any output drawable maps back to its input text/tokens in
 //! O(1) — the provenance requirement.
+//!
+//! Coordinates are baseline-anchored: `y` is the baseline, and ascent is
+//! negative. `ztex.svg` and the terminal rasterizers flip that convention
+//! themselves.
 
 const std = @import("std");
 const box = @import("box.zig");
+/// `ztex.atom`, re-exported so a `draw` consumer reaches `CharStyle` and
+/// `Span` through one import.
 pub const atom = @import("ztex.atom");
 
+/// A straight-alpha RGBA colour; each channel 0-255. `a` is 255 unless the
+/// caller sets it, and no drawable in this module produces a partial alpha.
 pub const Color = struct {
     r: u8,
     g: u8,
@@ -29,8 +37,20 @@ pub const Draw = union(enum) {
     line: Line,
 };
 
+/// One glyph run.
+///
+/// `bytes` has two owners depending on the box it came from, and the
+/// difference decides what must stay alive: a box whose bytes exist in the
+/// formula source aliases that source, so the source must outlive this
+/// primitive; a box whose glyph was synthesized by layout (a big operator,
+/// `\sum` → `∑`) has no source bytes and borrows the owning `DrawList`'s
+/// `glyph_arena` instead, so the DRAW LIST must outlive the primitive. The
+/// two regimes are not distinguishable from the primitive alone — decide
+/// from the draw list's lifetime, which is the safe assumption either way.
+/// `src_start`/`src_end` always name the source range the box came from,
+/// which for a synthetic glyph is the command that produced it.
 pub const Text = struct {
-    /// utf-8 glyph bytes (a slice into the source, never copied)
+    /// UTF-8 glyph bytes; borrowed as described above, never copied.
     bytes: []const u8,
     /// baseline position in output coordinates
     x: f32,
@@ -40,11 +60,14 @@ pub const Text = struct {
     /// effective font style (\text/\mathrm = roman, variables = italic, …)
     style: atom.CharStyle,
     color: Color,
-    // provenance
+    /// byte offset of the source range this glyph came from
     src_start: u32,
+    /// byte offset just past that range
     src_end: u32,
 };
 
+/// A filled rectangle spanning `[x, x+w)` × `[y, y+h)` in output
+/// coordinates. `src_start`/`src_end` name the source range it came from.
 pub const Rect = struct {
     x: f32,
     y: f32,
@@ -55,6 +78,9 @@ pub const Rect = struct {
     src_end: u32,
 };
 
+/// A stroked segment of `width` points centred on the line from
+/// `(x0, y0)` to `(x1, y1)`. `src_start`/`src_end` name the source range it
+/// came from.
 pub const Line = struct {
     x0: f32,
     y0: f32,
@@ -67,17 +93,33 @@ pub const Line = struct {
 };
 
 /// The flat, ordered draw list. Painter's order; absolute coordinates.
+///
+/// A `DrawList` owns its `items` and the `glyph_arena` holding every
+/// synthesized glyph a `Text.bytes` slice can point into; `deinit` releases
+/// both. The allocator and the formula source are NOT released here — the
+/// source is borrowed by most `Text.bytes` and must outlive the list.
+/// Copying a `DrawList` copies both handles, not the storage, so a copy is
+/// not a second owner and must not be `deinit`'d separately: exactly one
+/// `deinit` per `init`.
 pub const DrawList = struct {
+    /// Allocator for `items` and the glyph arena; owned by the caller.
     gpa: std.mem.Allocator,
+    /// The primitives, in painter's order: later entries draw over earlier.
     items: std.ArrayList(Draw) = .empty,
     /// arena for generated glyphs (e.g. big-operator ∑) that have no source
     /// bytes; frees with the draw list
     glyph_arena: std.heap.ArenaAllocator,
-    /// total laid-out bounds (for an SVG viewBox)
+    /// Laid-out bounds in points: `width` across, `height` above the
+    /// baseline and `depth` below it, so the ink spans
+    /// `[0, width] × [-height, depth]` around the origin. Zero until a
+    /// renderer fills them in.
     width: f32 = 0,
     height: f32 = 0,
     depth: f32 = 0,
 
+    /// An empty draw list with zero bounds, allocating nothing yet. `gpa`
+    /// backs both the item list and the glyph arena and is not released by
+    /// `deinit`.
     pub fn init(gpa: std.mem.Allocator) DrawList {
         return .{
             .gpa = gpa,
@@ -85,16 +127,25 @@ pub const DrawList = struct {
         };
     }
 
+    /// Release the item list and the glyph arena. `gpa` and the borrowed
+    /// source are not released. Every primitive and every `Text.bytes` slice
+    /// borrowed from the glyph arena is invalid afterward, and a second call
+    /// is a double free.
     pub fn deinit(self: *DrawList) void {
         self.items.deinit(self.gpa);
         self.glyph_arena.deinit();
         self.* = undefined;
     }
 
+    /// Append one primitive at the end, so it paints over the ones already
+    /// there. Nothing in `d` is copied beyond the struct itself: a `Text`
+    /// keeps borrowing whatever its `bytes` pointed at. On
+    /// `error.OutOfMemory` nothing is appended.
     pub fn add(self: *DrawList, d: Draw) !void {
         try self.items.append(self.gpa, d);
     }
 
+    /// The number of primitives, the same as `items.items.len`.
     pub fn len(self: *const DrawList) usize {
         return self.items.items.len;
     }
@@ -102,10 +153,23 @@ pub const DrawList = struct {
 
 const black: Color = .{ .r = 0, .g = 0, .b = 0 };
 
-/// Flatten a box tree into a draw list in painter's order.
+/// Flatten a box tree into `out` in painter's order.
 ///
-/// `(x, y)` is the box's reference point (baseline). Children are placed at
-/// `(x + cr.x_shift, y + cr.shift)`, computed by layout.
+/// `(x, y)` is the root box's reference point (its baseline). Children are
+/// placed at `(x + cr.x_shift, y + cr.shift)`, the offsets layout computed,
+/// and the recursion stops at `root`'s subtree. `root` must index a box in
+/// `list`, and every box's `src_start`/`src_end` must lie inside `src`.
+///
+/// Every `Text` appended borrows `src` for its bytes, except a synthetic
+/// glyph's, which is duplicated into `out.glyph_arena` — see `Text`. `src`
+/// must therefore outlive `out`, and `out` must outlive every `Text.bytes`
+/// taken from it.
+///
+/// Primitives emitted before an `error.OutOfMemory` stay in `out`, so a
+/// caller that wants an all-or-nothing result discards `out` on error; the
+/// glyph arena's allocations survive with it until `out.deinit`.
+///
+/// Recurses once per box level, so it is bounded by the box tree's depth.
 pub fn flatten(
     list: *const box.BoxList,
     root: u32,

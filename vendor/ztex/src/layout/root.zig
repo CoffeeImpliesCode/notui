@@ -2,21 +2,46 @@
 //!
 //! Usable on its own: give it any `atom.Ast` (from ztex.parse or hand-built)
 //! plus a root node index, and it produces an SVG-style `draw.DrawList`.
+//!
+//! The two stages are separate: `ztex.layout.layout.layout` builds the box
+//! pool, and `ztex.layout.draw.flatten` turns a box pool into primitives.
+//! `render` below runs both and frees the box pool, which is why it is the
+//! entry point a consumer normally wants.
+//!
+//! Nothing here reads a font file or a `std.Io`: `render` measures from the
+//! bundled static tables via `metrics.default`. The font-backed pipeline is
+//! `ztex.Context`, which supplies a `metrics.FontMetrics` of its own.
 
 const std = @import("std");
 const atom = @import("ztex.atom");
 
+/// `ztex.layout.metrics`: the bundled metric tables and `FontMetrics`.
 pub const metrics = @import("metrics.zig");
+
+/// `ztex.layout.box`: the superflat box pool the layout pass fills.
 pub const box = @import("box.zig");
+
+/// `ztex.layout.draw`: the draw model, re-exported at the layout root.
 pub const draw = @import("draw.zig");
+
+/// `ztex.layout.layout`: the layout pass itself.
 pub const layout = @import("layout.zig");
 
+/// TeX math style; an alias of `ztex.atom.MathStyle`, so a style value is
+/// the same type in a parser node's `data` and in a layout call.
 pub const Style = layout.Style;
 
-/// Lay out an atom tree and flatten it to a draw list.
+/// Lay out the atom tree rooted at `root` and flatten it to a draw list,
+/// measured from the bundled static tables via `metrics.default`.
 ///
-/// The returned `DrawList`'s `text` primitives alias `ast.src`, so the source
-/// (and ast) must outlive the draw list. The box pool is scratch and freed.
+/// The returned `DrawList`'s `Text.bytes` alias `ast.src` — or the draw
+/// list's own glyph arena for a synthesized glyph — so `ast.src` must
+/// outlive the draw list, which the caller releases with `deinit`. `root`
+/// must index a node in `ast`, and `size_pt` is the base font size in
+/// points. Nothing is read from the file system and no `std.Io` is needed.
+///
+/// On `error.OutOfMemory` or `error.InvalidTable` the box pool is released
+/// and no draw list is returned, so nothing partial survives.
 pub fn render(
     gpa: std.mem.Allocator,
     ast: *const atom.Ast,

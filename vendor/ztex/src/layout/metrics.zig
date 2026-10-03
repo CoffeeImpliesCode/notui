@@ -12,7 +12,10 @@
 //! layout advance == render advance. Height/depth stay the LM Math ink
 //! (see `ink_table`); italic corrections and the TeX glue parameters stay
 //! the CM values (spacing facts, not render geometry).
-//! Self-contained: no external font files, fully deterministic lookups.
+//! The static tables need no external font file and answer deterministically,
+//! which is what `metrics.default` is; a `FontMetrics` wired to a real font
+//! through `FontMetrics.font_glyph` is the caller's own addition and is not
+//! covered by that claim.
 //!
 //! Font selection still follows MicroTeX's "mathnormal" style mapping
 //! (tex_param.res.cpp): digits/operators/punctuation → cmr10, Latin letters
@@ -37,72 +40,184 @@ const atom = @import("ztex.atom");
 
 /// Per-glyph metrics, in points at the base font size (10pt).
 pub const Glyph = struct {
+    /// Horizontal advance in points at the base size.
     width: f32,
+    /// Extent above the baseline in points at the base size.
     height: f32,
+    /// Extent below the baseline in points at the base size; non-negative.
     depth: f32,
+    /// How far the glyph leans out past its advance in points at the base
+    /// size — what a superscript's raise and a script's skew account for.
     italic_correction: f32,
 };
 
-/// Drawn-glyph ink extents, in em of the glyph's font-size: ascent above
-/// the baseline, descent below. layoutChar/layoutText box every normal
-/// glyph by these (× the drawn size) so the box — and the frame/viewBox —
-/// bounds the ink that is actually drawn; see `glyphInk`.
+/// Drawn-glyph ink extents, in em of the glyph's own font size.
+///
+/// These are where the ink actually falls, which is narrower than the
+/// font's nominal `Glyph` extents. layoutChar and layoutText box every normal
+/// glyph by these (× the drawn size), so the box — and the frame or viewBox
+/// around it — bounds the ink that is drawn rather than the font's line
+/// box. See `glyphInk`.
 pub const GlyphInk = struct {
+    /// Ink above the baseline, in em of the glyph's font size.
     asc: f32,
+    /// Ink below the baseline, in em of the glyph's font size; non-negative.
     desc: f32,
 };
 
-/// TeX layout parameters, in points at the base size (10pt). Values are
-/// MicroTeX tex_param.res.cpp em values × 10 (plus denom3/sub3/x_height from
-/// the standard Computer-Modern parameter set). layout scales by size/10.
+/// TeX layout parameters, in points at the base size (10pt). Layout scales
+/// every one of them by `size_pt / 10`.
+///
+/// Values are MicroTeX `tex_param.res.cpp` em values × 10 (plus denom3/sub3
+/// and x_height from the standard Computer-Modern parameter set). Each field
+/// is one TeX glue parameter, used only by the construction its name names.
+/// A caller replacing the table must supply all of them: there are no
+/// defaults, and `FontMetrics.glue` is expected to answer for every field.
 pub const GlueParams = struct {
+    /// Height of the fraction bar's centre above the baseline. Layout centres
+    /// a fraction rule, a radical bar and a \overline rule on it, so it is
+    /// the one vertical reference every rule aligns to.
     axis_height: f32,
+    /// Stroke width of a drawn rule in points: the fraction bar, the radical
+    /// bar, the \overline/\underline rule, an array's `|` rule, and the
+    /// minimum thickness a \genfrac thickness is not allowed to fall below.
     rule_thickness: f32,
-    num1: f32, // numerator gap, display style
-    num2: f32, // numerator gap, text style (with rule)
-    num3: f32, // numerator gap, script style / \atop
-    denom1: f32, // denominator gap, display style
-    denom2: f32, // denominator gap, text style
-    denom3: f32, // denominator gap, script style
-    sup1: f32, // superscript raise floor, display style
-    sup2: f32, // superscript raise floor, text style
-    sup3: f32, // superscript raise floor, script style
-    sub1: f32, // subscript drop floor, sub-only
-    sub2: f32, // subscript drop floor, sup+sub
-    sub3: f32, // subscript drop floor, script style
-    supdrop: f32, // superscript drop: base height − supdrop floor
-    subdrop: f32, // subscript drop: base depth + subdrop floor
-    bigop_spacing1: f32, // min gap over an over-limit
-    bigop_spacing2: f32, // min gap under an under-limit
-    bigop_spacing3: f32, // max gap over an over-limit
-    bigop_spacing4: f32, // max gap under an under-limit
-    bigop_spacing5: f32, // extra padding above over / below under
-    scriptfactor: f32, // script style size fraction
-    scriptscriptfactor: f32, // scriptscript style size fraction
-    x_height: f32, // cmmi10 x-height, for script clearance floors
+    /// Minimum gap above a numerator, display style.
+    num1: f32,
+    /// Minimum gap above a numerator, text style (fraction with a rule).
+    num2: f32,
+    /// Minimum gap above a numerator, script style and for \atop, where the
+    /// rule is thinner than the glyphs it separates.
+    num3: f32,
+    /// Minimum gap below a denominator, display style.
+    denom1: f32,
+    /// Minimum gap below a denominator, text style.
+    denom2: f32,
+    /// Minimum gap below a denominator, script style.
+    denom3: f32,
+    /// Floor for the superscript's baseline raise, display style.
+    sup1: f32,
+    /// Floor for the superscript's baseline raise, text style.
+    sup2: f32,
+    /// Floor for the superscript's baseline raise, script style — cramped
+    /// contexts use this one instead of sup1/sup2.
+    sup3: f32,
+    /// Floor for the subscript's baseline drop when only a subscript is
+    /// attached to the base.
+    sub1: f32,
+    /// Floor for the subscript's baseline drop when both scripts are
+    /// attached and must clear the superscript.
+    sub2: f32,
+    /// Floor for the subscript's baseline drop in script style.
+    sub3: f32,
+    /// How far the superscript's baseline may drop BELOW the base's height;
+    /// the effective raise is the larger of "clear the base's ink" and this.
+    supdrop: f32,
+    /// How far the subscript's baseline may rise ABOVE the base's depth; the
+    /// effective drop is the larger of "clear the base's ink" and this.
+    subdrop: f32,
+    /// Smallest gap left above an over-limit (a big operator's superscript
+    /// placed above it).
+    bigop_spacing1: f32,
+    /// Smallest gap left under an under-limit (a big operator's subscript
+    /// placed below it).
+    bigop_spacing2: f32,
+    /// Largest gap tolerated above an over-limit; a wider gap is closed up
+    /// so the script still reads as attached.
+    bigop_spacing3: f32,
+    /// Largest gap tolerated under an under-limit.
+    bigop_spacing4: f32,
+    /// Extra padding added above an over-limit and below an under-limit,
+    /// beyond the spacing the three fields above bound.
+    bigop_spacing5: f32,
+    /// Size a display-style formula's scripts are drawn at, as a fraction of
+    /// the current size (TeX's `\scriptstyle` factor).
+    scriptfactor: f32,
+    /// Size a script-style formula's scripts are drawn at, as a fraction of
+    /// the current size (TeX's `\scriptscriptstyle` factor).
+    scriptscriptfactor: f32,
+    /// x-height of the math italic face at the base size, used as the
+    /// clearance floor a script must keep from the base's ink.
+    x_height: f32,
 };
 
-/// Metric lookup interface. The fields are function pointers so the bundled
-/// table can be swapped for a real font implementation at runtime.
+/// Metric lookup interface: four function pointers plus the opaque font they
+/// may be wired to, so the bundled static table can be swapped for real
+/// fonts.
+///
+/// A `FontMetrics` is a value, not an owner. Copying it copies the four
+/// function pointers and the `font` pointer: a copy ALIASES the same font
+/// context and therefore the same mutable caches, so it is not an
+/// independent metrics source and must not be deinitialised or torn down
+/// separately. Build one, and hand out copies or a `*const` reference.
+///
+/// Two regimes, told apart by `font`, and they differ in what a caller may do
+/// concurrently.
+///
+/// The bundled `default` has `font == null` and `font_glyph == null`. Its
+/// four callbacks are pure functions of the compiled-in tables: they write
+/// nothing and allocate nothing, so one `default` may be shared by any number
+/// of threads and every copy of it is interchangeable.
+///
+/// A wired instance — what `ztex.Context` builds — has both set, and its
+/// `font_glyph` writes the `FontContext`'s per-(face, codepoint) metric cache
+/// through `font` on a miss. That write is unsynchronised, so a wired
+/// instance may be read from ONE thread at a time; concurrent `render` calls
+/// sharing one `Context` are out of contract. It is still safe to read a
+/// wired instance through a `*const`, which is what layout's `fm` parameter
+/// is — the pointer is const because the FIELDS are, not because the callee
+/// is, and const-casting it to defeat this is a defect.
+///
+/// Calling convention, common to all four slots. Each is reached through its
+/// field and called with the `FontMetrics` it hangs off as the first
+/// argument: `self` is borrowed for the duration of that one call and is not
+/// retained. Every other argument and every return value is by value, so
+/// nothing a callback hands back can dangle — a returned `Glyph` or
+/// `GlueParams` is a copy with no borrow in it. `glyph`, `glyphAt` and
+/// `hasGlyph` call `font_glyph` only when `font` is non-null; `glue` takes
+/// no codepoint or style and returns the whole `GlueParams`, so it is not a
+/// `Glyph` producer.
+///
+/// Threading and reentry. A callback runs on the thread that called its
+/// field, inside that call, before the call returns — there is no queue and
+/// no cancellation point. It may reenter the same `FontMetrics` it was
+/// reached through: the bundled callbacks do not, and a font hook is expected
+/// to answer from the font context rather than re-dispatch. Callbacks using a mutable
+/// font context must be serialized with every other use of that context; the bundled
+/// pure default has no such restriction.
+///
+/// A callback is a plain function pointer, so the code it names must outlive
+/// every `FontMetrics` value that carries it; a `ztex.Context` installs its
+/// hook as a module-level function, which outlives the context.
 pub const FontMetrics = struct {
-    /// The `FontContext` this metrics is wired to, when the real font is the
-    /// metric source (see context.zig). Opaque here because the ztex.layout
-    /// module cannot import src/font.zig without a build.zig change (out of
-    /// scope); context.zig casts it back to `*font.FontContext`. Null →
-    /// the bundled static tables are the only source — exactly the previous
-    /// behavior. Non-const because the context's `metrics()` mutates its
-    /// cache.
+    /// The font source behind `font_glyph`, or `null` for the static-table
+    /// regime. `ztex.Context` sets it to its own `FontContext`; layout.zig
+    /// cannot import font.zig, so the value is opaque here and cast back in
+    /// context.zig. The pointee is BORROWED, not owned: this struct never
+    /// releases it, and it must stay valid for as long as this `FontMetrics`
+    /// is used. A wired instance writes that font's caches during a lookup,
+    /// which is why it is single-threaded.
     font: ?*anyopaque = null,
-    /// Font-backed glyph lookup for `self.font`, installed by context.zig.
-    /// `glyph`/`glyphAt` consult it (when `font` is set) BEFORE the static
-    /// tables; it must return null for codepoints the face does not map so
-    /// the fallback chain (font → static table → glyphEstimate) proceeds.
-    /// Defaults to null = no font path.
+    /// Font-backed glyph lookup consulted before the static tables.
+    /// `glyph`, `glyphAt` and `hasGlyph` call it when `font` is non-null; it
+    /// returns `null` for a codepoint the face does not map, which is what
+    /// lets the fallback chain (font → static table → `glyphEstimate`)
+    /// continue. Runs on the calling thread inside the lookup, with `self`
+    /// valid only for the call; it may write the font cache `font` points at
+    /// and so must not be called concurrently on the same instance.
+    /// `null` means no font path at all, whatever `font` says.
     font_glyph: ?*const fn (self: *const FontMetrics, cp: u21, style: atom.CharStyle) ?Glyph = null,
-    /// Exact per-glyph metrics for `cp` in `style`; null if not in the table.
+    /// Exact per-glyph metrics for `cp` in `style` at the 10pt base; `null`
+    /// when neither the wired font nor the static table has the codepoint.
+    /// Required — there is no default.
     glyph: *const fn (self: *const FontMetrics, cp: u21, style: atom.CharStyle) ?Glyph,
-    /// Deterministic fallback for any unknown glyph (em-based estimate).
+    /// Deterministic fallback for any glyph `glyph` does not resolve: an
+    /// em-based estimate, never `null`, so layout always has a box. Same
+    /// calling convention as `glyph`.
     glyphEstimate: *const fn (self: *const FontMetrics, cp: u21, style: atom.CharStyle) Glyph,
+    /// The TeX glue parameters for this style family: a `GlueParams` by
+    /// value, every field set. Total and allocation-free, same calling
+    /// convention as `glyph` minus the codepoint and style arguments.
     glue: *const fn (self: *const FontMetrics) GlueParams,
 };
 
@@ -1773,8 +1888,12 @@ pub fn glyphInk(cp: u21) GlyphInk {
 /// so a variant box placed with shift (asc−desc)/2 − axis sits centered on
 /// the math axis exactly like the XeTeX reference.
 pub const DelimVariant = struct {
+    /// Horizontal advance in em of the glyph's font size — the box width this
+    /// variant takes when the delimiter is drawn at the base size.
     adv: f32,
+    /// Ink above the baseline in em of the glyph's font size.
     asc: f32,
+    /// Ink below the baseline in em of the glyph's font size; non-negative.
     desc: f32,
 };
 
@@ -2395,10 +2514,19 @@ fn glue(self: *const FontMetrics) GlueParams {
 /// and 6.64pt at 20pt, i.e. it scales with size_pt like the other table ic
 /// values). The h/d below are the old cmex10 reference values only.
 pub const DisplayOp = struct {
+    /// Codepoint drawn in the display-style position of a big operator.
     cp: u21,
+    /// Advance of the display glyph at the base size, in points. Reference
+    /// value: layoutOp boxes the operator by `bigOpInk` instead.
     w: f32,
+    /// Nominal ascent at the base size, in points. Reference value only —
+    /// see `w`.
     h: f32,
+    /// Nominal descent at the base size, in points; reference value only.
     d: f32,
+    /// Latin-Modern-Math MATH-table italic correction in points at the base
+    /// size — the live value here, driving the post-operator tail and the
+    /// skew of a display-style limit.
     ic: f32,
 };
 
@@ -2421,7 +2549,15 @@ pub fn displayOp(cp: u21) ?DisplayOp {
     return null;
 }
 
-/// Bundled default metrics (Latin-Modern-Math advance widths, 10pt base).
+/// The bundled metric source: Latin-Modern-Math advance widths at the 10pt
+/// base, with no font wired in — the pure static-table regime described on
+/// `FontMetrics`.
+///
+/// It is a `const`, so copying it is free and every copy is interchangeable:
+/// lookups allocate nothing and write nothing, which is what makes one
+/// instance safe to share across threads. This is the metrics
+/// `ztex.layout.render` measures with, and `lookupAscii` recognises this
+/// exact value — pointer equality — and only this one.
 pub const default: FontMetrics = .{
     .glyph = glyph,
     .glue = glue,

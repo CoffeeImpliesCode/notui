@@ -1,9 +1,12 @@
-//! AnimatedText: a frame-cycling and/or color-breathing text component
-//! (baseui-contract.md §4.3). Superset of Text: a single frame with no
-//! gradient behaves exactly as a styled static string. Used for
-//! marquee / pulsing word / blinking status. The color pulse
-//! interpolates `style.fg` between `gradient_a` and `gradient_b` over
-//! `gradient_period` with a sine wave (t in 0..1), merged over `style`.
+//! AnimatedText: a frame-cycling and/or colour-breathing text
+//! component, a superset of a styled static string — one frame with no
+//! gradient draws exactly like plain styled text. It suits a marquee, a
+//! pulsing word or a blinking status label.
+//!
+//! The colour pulse interpolates `style.fg` between `gradient_a` and
+//! `gradient_b` over `gradient_period` along a sine, merged over
+//! `style`. Everything drawn is borrowed from `frames`/`text`, so the
+//! component allocates nothing and emits no ANSI.
 
 const std = @import("std");
 const Buffer = @import("../buffer.zig").Buffer;
@@ -12,29 +15,47 @@ const Color = @import("../color.zig").Color;
 const Clock = @import("component.zig").Clock;
 const elapsedSince = @import("component.zig").elapsedSince;
 
+/// Animation state for a frame table and a colour pulse: the current
+/// frame, the clock the last advance measured from, and the accumulated
+/// gradient phase. `draw` advances first, so one call per frame is
+/// enough; `advance` alone reports whether an interval elapsed, which
+/// a frame cycle uses to skip a re-render.
 pub const AnimatedText = struct {
-    /// Cycling frames; empty => draw `text` (color-only animation).
+    /// Frames to cycle, BORROWED (never freed, never copied): the drawn
+    /// cell keeps the current frame's bytes, so they must outlive the
+    /// buffer that shows them. Empty means `text` only.
     frames: []const []const u8 = &.{},
-    /// Static text drawn when `frames` is empty.
+    /// Static text drawn when `frames` is empty; borrowed like `frames`.
     text: []const u8 = "",
-    /// Nanoseconds per frame.
+    /// Nanoseconds per frame; 200 ms by default. Zero is treated as 1 ns.
     interval: u64 = 200 * std.time.ns_per_ms,
+    /// Base style; the pulse colour is merged over it, so attributes
+    /// set here survive the animation.
     style: Style = .{},
-    /// When both are set, the fg color breathes between them.
+    /// When both are set, the foreground breathes between them along a
+    /// sine; either one alone leaves the colour alone.
     gradient_a: ?Color = null,
     gradient_b: ?Color = null,
-    /// Nanoseconds per full gradient cycle.
+    /// Nanoseconds per full gradient cycle; 0 is treated as 1ns.
     gradient_period: u64 = 2 * std.time.ns_per_s,
-    // state
+    /// Index into `frames`, wrapped by `advance`.
     frame_index: usize = 0,
+    /// Clock of the last advance; null until the first `advance` anchors
+    /// it. Never re-anchored while the interval has not elapsed, so
+    /// elapsed time keeps accumulating.
     last_advance: ?Clock = null,
-    phase_ns: u64 = 0, // accumulated time for the gradient phase
+    /// Gradient phase accumulated from elapsed time, wrapping modulo
+    /// 2^64; the sine reads it as a fraction of `gradient_period`.
+    phase_ns: u64 = 0,
 
     /// Advance the frame (time-gated, like Spinner) and always
-    /// accumulate the gradient phase. Returns true only when the frame
-    /// index moved.
+    /// accumulate the gradient phase. With more than one frame, returns
+    /// true once an interval has elapsed: a whole number of cycles
+    /// counts too, even though it leaves the index where it started. A
+    /// static frame or `text` still breathes, but always returns false.
     pub fn advance(self: *AnimatedText, now: Clock) bool {
-        const elapsed = elapsedSince(now, self.last_advance, self.interval) orelse {
+        const interval = @max(self.interval, 1);
+        const elapsed = elapsedSince(now, self.last_advance, interval) orelse {
             // First call: anchor the clock. Before the interval:
             // accumulate, do NOT re-anchor.
             if (self.last_advance == null) self.last_advance = now;
@@ -48,8 +69,18 @@ pub const AnimatedText = struct {
             self.last_advance = now;
             return false;
         }
-        const n = elapsed / self.interval;
-        self.frame_index = (self.frame_index + n) % self.frames.len;
+        const n = elapsed / interval;
+        // A long stall makes `frame_index + n` exceed u64, so add with a
+        // carry and fall back to the exact 128-bit sum only then; the
+        // hot path stays one 64-bit add and one modulus.
+        const sum, const carried = @addWithOverflow(@as(u64, self.frame_index), n);
+        // `len` is u64 so the hot path stays a 64-bit modulus; each arm
+        // is usize, so LLVM cannot widen it to the 128-bit fallback.
+        const len: u64 = self.frames.len; // ≥ 2, never a divide by zero
+        self.frame_index = if (carried == 0)
+            @intCast(sum % len)
+        else
+            @intCast((@as(u128, self.frame_index) + n) % len);
         self.last_advance = now;
         return n > 0;
     }
@@ -83,6 +114,27 @@ pub const AnimatedText = struct {
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "animated_text: zero interval advances and draws on the next nanosecond" {
+    var text: AnimatedText = .{ .frames = &.{ "a", "b" }, .interval = 0 };
+    var buf = try Buffer.init(std.testing.allocator, 1, 1);
+    defer buf.deinit();
+    _ = try text.draw(&buf, 0, 0, .fromNanoseconds(0));
+    try std.testing.expectEqualStrings("a", buf.get(0, 0).grapheme);
+    _ = try text.draw(&buf, 0, 0, .fromNanoseconds(1));
+    try std.testing.expectEqualStrings("b", buf.get(0, 0).grapheme);
+    try std.testing.expect(!text.advance(.fromNanoseconds(1)));
+}
+
+test "animated_text: maximal elapsed time keeps the modular frame" {
+    var text: AnimatedText = .{ .frames = &.{ "a", "b", "c" }, .interval = 0 };
+    var buf = try Buffer.init(std.testing.allocator, 1, 1);
+    defer buf.deinit();
+    _ = try text.draw(&buf, 0, 0, .fromNanoseconds(0));
+    _ = try text.draw(&buf, 0, 0, .fromNanoseconds(1));
+    _ = try text.draw(&buf, 0, 0, .fromNanoseconds(@as(i96, 1) << 64));
+    try std.testing.expectEqualStrings("b", buf.get(0, 0).grapheme);
 }
 
 /// Fixed-buffer writer for golden tests (same pattern as src/buffer.zig).

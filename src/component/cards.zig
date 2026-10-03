@@ -52,9 +52,16 @@ const tab_width: usize = 4;
 /// shows the whole body with no truncation. Static — `advance` is
 /// always false; the ladder is app-driven, not time-driven.
 pub const Card = struct {
-    /// Card title, BORROWED and sanitised at draw.
+    /// Card title, BORROWED and sanitised at draw: the drawn cells keep
+    /// the surviving bytes, so it must outlive the buffer that shows
+    /// them.
     title: []const u8 = "",
-    /// Card body, BORROWED; split on '\n' at draw, sanitised per line.
+    /// Card body, BORROWED like `title`; split on '\n' at draw and
+    /// sanitised as ONE stream with the header — `draw` runs the title,
+    /// every body row and the truncation note through a single `Pen`, so
+    /// filter state carries across row breaks and an unterminated escape
+    /// swallows the start of the next row. Each row is measured on its
+    /// own stream, so a box can be sized for bytes no cell paints.
     body: []const u8 = "",
     /// Lifecycle state; drives the header glyph and its colour.
     state: State = .pending,
@@ -69,8 +76,8 @@ pub const Card = struct {
     /// Scratch for the "… +N more" note. Cells borrow it, so the card
     /// must not move between `draw` and the buffer render.
     note_buf: [24]u8 = undefined,
+    /// Every style the card paints; see `Look`.
     look: Look = .{},
-
     /// Card lifecycle state.
     pub const State = enum { pending, running, ok, @"error" };
 
@@ -322,14 +329,21 @@ pub const Hunk = struct {
     new_start: u32 = 0,
     /// New-file line count; a header may omit it, which means 1.
     new_count: u32 = 1,
+    /// The hunk's rows in order; `parseUnified` appends to this list and
+    /// `deinitHunks` frees its storage with `gpa`.
     lines: std.ArrayList(Line) = .empty,
 };
 
 /// Failures `parseUnified` reports instead of trapping: a header or a
 /// hunk-body line that does not match the unified-diff grammar.
 pub const ParseError = error{
+    /// A `@@` line that does not have the
+    /// `-old[,count] +new[,count] @@` shape.
     MalformedHunkHeader,
+    /// A line inside a hunk whose first byte classifies as none of
+    /// `+`, `-`, ` `, `\` (an empty line is an empty context row).
     MalformedHunkLine,
+    /// Appending a hunk or one of its lines could not allocate.
     OutOfMemory,
 };
 
@@ -444,6 +458,8 @@ fn parseUint(line: []const u8, i: *usize) ?u32 {
 pub const Diff = struct {
     /// Hunks to render, BORROWED. Each owns its line storage.
     hunks: []const Hunk = &.{},
+    /// Row layout; see `Layout`. Side-by-side pairs a removal with the
+    /// addition that follows it.
     layout: Layout = .unified,
     /// Draw the `@@` header row above each hunk's lines.
     show_headers: bool = true,
@@ -470,9 +486,13 @@ pub const Diff = struct {
 
     /// Every style the diff paints, so a theme layer can supply them.
     pub const Look = struct {
+        /// Style for an added line and its `+` marker.
         add: Style = .{ .fg = .{ .ansi = .green } },
+        /// Style for a removed line and its `-` marker.
         del: Style = .{ .fg = .{ .ansi = .red } },
+        /// Style for a context line and its leading space.
         context: Style = .{},
+        /// Style for hunk headers and `\`-prefixed notes.
         meta: Style = .{ .fg = .{ .ansi256 = 245 }, .attrs = .{ .dim = true } },
     };
 
@@ -1298,7 +1318,7 @@ test "diff: a Region band carries the styled cells and keeps source escapes out 
     // No history corruption: the frame staged no ledger batch, and the
     // band's own cells are the ones the app drew.
     try std.testing.expectEqual(@as(usize, 0), region.historyBytes());
-    try std.testing.expectEqual(@as(usize, 0), region.historyPending().len);
+    try std.testing.expectEqual(@as(usize, 0), (try region.historyPending()).len);
     try std.testing.expect(region.cur.get(0, 0).style.eql(d.look.meta));
 
     // Bring every source row into the band. The sanitizer must remove
@@ -1369,7 +1389,7 @@ test "diff: a Region writes its ledger above the band and never erases above it"
 
     // A replay batch supersedes what was staged, and the transport's
     // acknowledgement frees the retained copy exactly once.
-    try std.testing.expectEqualSlices(u64, &.{id}, region.historyPending());
+    try std.testing.expectEqualSlices(u64, &.{id}, try region.historyPending());
     try region.acknowledgeHistory(id);
     try std.testing.expectEqual(@as(usize, 0), region.historyBytes());
     try std.testing.expectError(error.UnknownHistoryId, region.acknowledgeHistory(id));

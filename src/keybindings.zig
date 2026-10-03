@@ -1,4 +1,4 @@
-//! Keybinding declaration and hint rendering (ROADMAP D3).
+//! keybindings.zig — keybinding declaration and hint rendering.
 //!
 //! The app declares a binding ONCE — an opaque `ActionId`, a `chord` of
 //! `KeyMatch` steps, an optional `description`, an optional display
@@ -54,8 +54,10 @@ const Clock = @import("component/component.zig").Clock;
 /// through `fromEnum`, or a raw integer through `init`); the keymap only
 /// stores and compares ids and never interprets the value.
 pub const ActionId = struct {
+    /// The app-defined number; only compared, never interpreted.
     value: u32,
 
+    /// Wrap a raw app-defined integer as an id.
     pub fn init(value: u32) ActionId {
         return .{ .value = value };
     }
@@ -66,6 +68,7 @@ pub const ActionId = struct {
         return .{ .value = @intCast(@intFromEnum(value)) };
     }
 
+    /// Whether two ids are the same action.
     pub fn eql(a: ActionId, b: ActionId) bool {
         return a.value == b.value;
     }
@@ -75,12 +78,17 @@ pub const ActionId = struct {
 /// `mods` may carry caps_lock/num_lock; `Key.matches` strips both from
 /// each side, so a declaration is not sensitive to lock state.
 pub const KeyMatch = struct {
+    /// The codepoint this step requires (a special-key constant or a
+    /// character); never compared as bytes.
     codepoint: u21,
+    /// The modifiers this step requires. Caps-lock and num-lock are
+    /// ignored on both sides, so a declaration is lock-state agnostic.
     mods: Key.Modifiers = .{},
 };
 
 /// A stored binding: everything the keymap owns a copy of.
 pub const Binding = struct {
+    /// The action this binding triggers.
     action: ActionId,
     /// Chord steps, owned by the keymap's arena.
     chord: []const KeyMatch,
@@ -93,9 +101,12 @@ pub const Binding = struct {
 /// A binding as the app declares it. `bind` copies every slice, so
 /// temporaries and stack literals are fine.
 pub const Decl = struct {
+    /// The action this binding triggers.
     action: ActionId,
     /// Chord steps; an empty chord is rejected with `error.EmptyChord`.
     chord: []const KeyMatch,
+    /// Human description shown next to the hint; null draws the key
+    /// alone.
     description: ?[]const u8 = null,
     /// Display form override; null derives one from the chord.
     hint: ?[]const u8 = null,
@@ -130,23 +141,39 @@ pub const Selection = struct {
 pub const BindError = error{
     /// The declared chord has no steps.
     EmptyChord,
+    /// A chord, description or hint could not be copied into the arena.
     OutOfMemory,
 };
 
-/// The app's keymap: bindings grouped by action, all storage in one
-/// arena. A Keymap must not be copied after `init` (its arena hands out
-/// pointers into itself); hold it in a variable or a stable container.
+/// The app's keymap: bindings grouped by action, with every byte they
+/// need in one arena.
+///
+/// Storage and identity: `init` builds the arena on the caller's
+/// allocator, and `bind` COPIES the chord, description and hint into
+/// it, so declarations may be stack temporaries and need no lifetime of
+/// their own. Copying a `Keymap` shares that one arena, so a copy must
+/// not be deinit'ed separately; hold the map by pointer or move it.
+/// Nothing else frees anything: `deinit` releases the arena, and every
+/// slice handed back (`chord`, `Binding`) borrows it until then.
+/// Matching and hint rendering never allocate.
 pub const Keymap = struct {
+    /// Backing store for every copied chord, description and hint.
+    /// Deinitialised by `deinit`; shared by any copy of this map.
     arena: std.heap.ArenaAllocator,
-    /// Bindings per action, in declaration order.
+    /// Bindings per action, in declaration order; allocated from
+    /// `arena`.
     groups: std.ArrayList(ActionGroup) = .empty,
 
-    /// All bindings that share one action id.
+    /// Every binding that shares one action id.
     pub const ActionGroup = struct {
+        /// The action this group collects bindings for.
         action: ActionId,
+        /// Its bindings, in declaration order.
         bindings: std.ArrayList(Binding) = .empty,
     };
 
+    /// Create a keymap whose arena is backed by `gpa`. Nothing is
+    /// allocated until the first `bind`.
     pub fn init(gpa: std.mem.Allocator) Keymap {
         return .{ .arena = std.heap.ArenaAllocator.init(gpa) };
     }

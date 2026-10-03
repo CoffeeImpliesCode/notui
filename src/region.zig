@@ -22,9 +22,9 @@
 //! - **Transactional frames.** `render` stages the whole frame into the
 //!   writer and commits the region state — `prev`, the dirty flags, the
 //!   append queue, the ledger receipts, the anchor — only after the last
-//!   byte is staged. A writer that fails (a full output queue, B1)
-//!   therefore leaves the region exactly as it was, and the caller can
-//!   retry the same frame later.
+//!   byte is staged. Failure preserves the committed snapshot and queued payloads,
+//!   though reusable capacity and preparation state may change. Discard a failed
+//!   staging prefix before retrying; a direct terminal writer needs explicit recovery.
 //!
 //! - **Anchor.** The band top is the anchor; between frames the cursor
 //!   sits at the band bottom (column 1 of the last row) and every move
@@ -181,9 +181,14 @@
 //!   recorded as reflow geometry they no longer have.
 //!
 //! Writer-agnostic: imports only buffer, cell, style, emit, image
-//! (kitty placement via `placeAt`), width, caps and markdown (the one
-//! escape machine caller text is measured through). No tty, no zg — the
-//! zg import grep-gate is `width.zig` only.
+//! (kitty placement via `placeAt`), width and markdown (the one escape
+//! machine caller text is measured through). No tty, no zg — the zg import
+//! grep-gate is `width.zig` only.
+//!
+//! Use through `@import("notui").region`: `init`, `resize`, draw into `cur`, then
+//! `render` into caller-owned staging. Call `exit` before one `deinit`.
+//! This module does not own a terminal or drain the writer. Failed writes may have
+//! emitted a prefix; discard failed staging before retrying, or restore the terminal.
 
 const std = @import("std");
 const Buffer = @import("buffer.zig").Buffer;
@@ -192,7 +197,6 @@ const Style = @import("style.zig").Style;
 const emit = @import("emit.zig");
 const markdown = @import("markdown.zig");
 const Width = @import("width.zig");
-const caps = @import("caps.zig");
 const image = @import("image.zig"); // no cycle — image.zig imports only std
 
 /// One ledger write (roadmap C1, zomp's history contract).
@@ -236,6 +240,13 @@ pub const ResizeMode = enum {
 };
 
 /// The inline Region renderer.
+/// Construct with `init`; a literal is not an initialized owner. The stored `gpa` must
+/// stay live through one `deinit`. Copies share storage, not independent ownership.
+/// Use on one thread without reentry through a writer. Only `cur`'s cells are
+/// caller-mutable; other reachable fields are read-only state owned by the renderer.
+/// `cur` borrows drawn strings until rendering consumes them. `prev` owns grapheme
+/// copies, but style hyperlink strings remain borrowed until that snapshot is replaced
+/// by a successful render or `deinit`. Mutating those strings can hide style damage.
 pub const Region = struct {
     /// What the CALLER's terminal does to hard logical groups when the
     /// window's width changes.
@@ -278,6 +289,8 @@ pub const Region = struct {
         },
     };
 
+    /// Band geometry and terminal behavior supplied at initialization.
+    /// Defaults assume interactive relative-cursor rendering with no native reflow.
     pub const Options = struct {
         /// Number of terminal rows the region owns.
         height: u16,
@@ -291,14 +304,9 @@ pub const Region = struct {
         /// exit park. False = piped/degraded output: one plain frame,
         /// no escape sequences, and `sync_output` is ignored.
         interactive: bool = true,
-        /// The terminal answered DECRQM for synchronized output (mode
-        /// 2026). Gates only the sync pair inside the envelope; it is
-        /// NOT the interactive flag (that conflation was the bug this
-        /// split removes — see PORTING.md).
+        /// Enables DEC 2026 around an interactive frame; default assumes support.
+        /// Set false for terminals without synchronized output. Ignored when noninteractive.
         sync_output: bool = true,
-        /// Width measurement policy; passed through to the width seam
-        /// consumers (Buffer.draw enforces width via zg).
-        width_policy: caps.Capabilities.WidthPolicy = .zg_unicode,
         /// Resize behaviour for a width change.
         resize_mode: ResizeMode = .append,
         /// The caller's declared model for native width reflow. `.none`
@@ -312,8 +320,9 @@ pub const Region = struct {
         max_history_bytes: usize = 256 * 1024,
     };
 
-    /// Queued output written ABOVE the region into scrollback before the
-    /// next render (the print-above escape hatch).
+    /// Queued scrollback output. Payload slices remain caller-owned and immutable
+    /// until a successful flushing render or `deinit`; a screen-covering band can defer
+    /// flushing indefinitely. Use `writeHistory` for an immediately copied payload.
     pub const Append = union(enum) {
         /// Free text; the terminal reflows/wraps it. Internal `\n` is
         /// written as `\r\n`, so every one of them is a HARD row move:
@@ -334,6 +343,7 @@ pub const Region = struct {
         text: []const u8,
         /// One hard-wrapped exact-layout terminal row. Written verbatim,
         /// occupies exactly one row — the anchor shifts deterministically.
+        /// Must fit one row at the painted width and contain no newline or cursor controls.
         line: []const u8,
     };
 
@@ -444,7 +454,7 @@ pub const Region = struct {
         /// window's height is.
         fn up(self: *Frame, n: anytype) void {
             if (self.last_row < 0 or n == 0) return;
-            const step = @as(i32, @intCast(n));
+            const step: i32 = @intCast(n);
             self.cursor = @max(0, self.cursor - step);
             self.query_shift -= step;
             self.query_low = @max(0, self.query_low - step);
@@ -457,7 +467,7 @@ pub const Region = struct {
         /// scroll counter is needed.
         fn down(self: *Frame, n: anytype) void {
             if (self.last_row < 0 or n == 0) return;
-            const step = @as(i32, @intCast(n));
+            const step: i32 = @intCast(n);
             self.cursor = @min(self.last_row, self.cursor + step);
             self.query_shift += step;
             self.query_low = @min(self.last_row, self.query_low + step);
@@ -547,13 +557,16 @@ pub const Region = struct {
         rows: u32 = 1,
     };
 
+    /// Ledger admission failures; no batch is admitted on error.
     pub const WriteHistoryError = error{ DuplicateHistoryId, HistoryTooLarge, OutOfMemory };
+    /// The id is not a retained, written, unacknowledged batch.
     pub const AcknowledgeError = error{UnknownHistoryId};
 
+    /// Stored allocation provider for grids, copied rows, and geometry. Do not replace it.
     gpa: std.mem.Allocator,
-    /// Current frame the app draws into; public so apps can draw.
+    /// Borrowed view of the current drawing grid; do not separately deinitialize it.
     cur: Buffer,
-    /// Previous frame, diffed against on `.diff` frames.
+    /// Read-only committed snapshot; owns graphemes but still borrows style hyperlinks.
     prev: Buffer,
     /// The replacement grid for the committed snapshot, staged by the
     /// frame in flight when the external geometry has moved it and
@@ -772,7 +785,7 @@ pub const Region = struct {
     cursor_wanted_hidden: bool = true,
     /// `exit()` already ran (idempotence).
     exited: bool = false,
-    /// Pending appends, flushed before the region renders each frame.
+    /// Queue metadata is Region-owned; `Append` payloads remain caller-borrowed.
     append_queue: std.ArrayList(Append) = .empty,
     /// The width the band is currently painted at (`.preserve` reflow).
     last_width: u16 = 80,
@@ -795,6 +808,9 @@ pub const Region = struct {
     /// Buffer height (mirrors `cur.height`; from `opts.height`).
     height: u16,
 
+    /// Region-owned copied history payload, released only by the Region.
+    /// Copies alias the row array. `bytes` includes each row's line terminator;
+    /// `acked` marks transport/product acknowledgement pending ordered prefix release.
     const OwnedBatch = struct {
         id: u64,
         kind: @FieldType(HistoryBatch, "kind"),
@@ -808,6 +824,7 @@ pub const Region = struct {
     ///
     /// Buffers start 80 columns wide — a zero-width buffer would
     /// silently drop the first frame's draws until a resize arrives.
+    /// On `error.OutOfMemory` no owner escapes and every partial allocation is released.
     pub fn init(gpa: std.mem.Allocator, opts: Options) !Region {
         var cur = try Buffer.init(gpa, 80, opts.height);
         errdefer cur.deinit();
@@ -827,6 +844,9 @@ pub const Region = struct {
         };
     }
 
+    /// Release grids, copied history, snapshots, and geometry through the stored allocator.
+    /// Does not emit terminal teardown; call `exit` first if needed. Invalidates all views.
+    /// The owner is unusable afterward; repeated disposal or disposing a copy is invalid.
     pub fn deinit(self: *Region) void {
         for (self.history.items) |b| self.releaseBatch(b);
         self.history.deinit(self.gpa);
@@ -876,6 +896,8 @@ pub const Region = struct {
     /// Region that only looked at the last would skip the capacity loss
     /// an intermediate width caused. It is accounted before any frame
     /// byte is composed, so it is not repeated by a retry.
+    /// `error.OutOfMemory` leaves the old grid and geometry unchanged. Success invalidates
+    /// pointers into `cur.cells`; drawn text and prior-snapshot borrows are not released.
     pub fn resize(self: *Region, new_width: u16, terminal_rows: u16, new_height: u16) !void {
         if (new_width == self.width) return self.setSizedHeight(terminal_rows, new_height);
         try self.reshape(new_width, new_height);
@@ -1264,9 +1286,9 @@ pub const Region = struct {
         return self.cursor_screen +| 1 == term_rows;
     }
 
-    /// Height-only resize. Reallocates both buffers to `new_height`
-    /// keeping the width and marks the next frame for the `height` or
-    /// `collapse` strategy. No-op when unchanged.
+    /// Height-only resize of the drawing grid; the prior snapshot changes only at render.
+    /// Marks the next frame for `height` or `collapse`; unchanged height is a no-op.
+    /// `error.OutOfMemory` leaves the old grid and geometry unchanged.
     ///
     /// Growth always reserves the new rows with CRLF: without a
     /// physical reservation the band would not exist on screen and the
@@ -1322,11 +1344,14 @@ pub const Region = struct {
     }
 
     /// Queue `item` to flush ABOVE the region on the next render.
+    /// Retains the slice without copying; `Append` states its lifetime and escape constraints.
+    /// `error.OutOfMemory` leaves the queue unchanged.
     pub fn append(self: *Region, item: Append) !void {
         try self.append_queue.append(self.gpa, item);
     }
 
     /// Force a full redraw on the next render.
+    /// On error the full redraw remains requested; `render` states writer-prefix recovery.
     pub fn renderFull(self: *Region, w: anytype) !void {
         self.width_dirty = true;
         try self.render(w);
@@ -1344,6 +1369,7 @@ pub const Region = struct {
     /// stale so it is discarded rather than read through a gap in its own
     /// history; the slot stays held until it lands, and the frame after
     /// that asks once more.
+    /// Allocates and emits nothing; the error set is empty for the uniform effect interface.
     pub fn reanchor(self: *Region) !void {
         self.anchor_dirty = true;
         if (self.query_outstanding) self.query_stale = true;
@@ -1385,6 +1411,7 @@ pub const Region = struct {
     /// - otherwise — the measurement. The anchor, the cursor row and
     ///   the reach every retirement erase is bounded by are published
     ///   from it, and the outstanding obligation clears.
+    /// Allocates and emits nothing; the error set is empty for the uniform effect interface.
     pub fn applyCpr(self: *Region, row: u16, col: u16) !void {
         _ = col;
         if (!self.query_outstanding) return; // unsolicited or duplicate
@@ -1468,6 +1495,9 @@ pub const Region = struct {
     /// (column 1 of the last row) so the next frame's relative moves
     /// start where the painter expects. The one absolute cursor
     /// positioning in this file (grep-gate exception; cursor restored).
+    /// Returns `error.AnchorUnmeasured` without output when `anchorRow()` is zero.
+    /// `band_row` must be below `painted_rows`, and `col` must be in `1..width`.
+    /// Writer errors can leave a partial image command or an unrestored cursor.
     pub fn placeAt(
         self: *Region,
         w: anytype,
@@ -1476,6 +1506,7 @@ pub const Region = struct {
         opts: PlaceAtOptions,
     ) !void {
         const top: u32 = self.anchorRow();
+        if (top == 0) return error.AnchorUnmeasured;
         try image.kitty.place(w, .{
             .id = opts.id,
             .col = col,
@@ -1505,6 +1536,8 @@ pub const Region = struct {
     /// changes nothing. `error.HistoryTooLarge` when the retained bytes
     /// would exceed the bound; the batch is not staged, so nothing is
     /// ever dropped silently.
+    /// OOM admits no batch or id; reusable metadata capacity may grow. The bound includes
+    /// one line terminator per row, including empty rows.
     pub fn writeHistory(self: *Region, batch: HistoryBatch) WriteHistoryError!void {
         if (batch.id == 0 or batch.id <= self.history_high) return error.DuplicateHistoryId;
         var total: usize = 0;
@@ -1543,10 +1576,14 @@ pub const Region = struct {
     /// Stage `rows` as one ledger batch with the next Region-owned
     /// monotonic id and return that id — the receipt to hand back to
     /// `acknowledgeHistory` (or to the transcript's `commitReceipt`)
-    /// once the transport accepted it. The id is always fresh, so the
-    /// failure a caller can hit is the retained-bytes bound.
-    pub fn writeTranscript(self: *Region, rows: []const []const u8) WriteHistoryError!u64 {
-        const id = self.history_high + 1;
+    /// once the transport accepted it. OOM or the retained-byte bound admits no batch;
+    /// exhausted id space returns `error.HistoryIdExhausted` without changing the ledger.
+    pub fn writeTranscript(
+        self: *Region,
+        rows: []const []const u8,
+    ) (WriteHistoryError || error{HistoryIdExhausted})!u64 {
+        const id = std.math.add(u64, self.history_high, 1) catch
+            return error.HistoryIdExhausted;
         try self.writeHistory(.{ .id = id, .rows = rows, .kind = .append });
         return id;
     }
@@ -1578,6 +1615,8 @@ pub const Region = struct {
     /// are returned in write order. The App calls this when the queue
     /// drained empty — the transport contract for "written exactly
     /// once, acknowledged exactly once".
+    /// Borrows receipt storage until the next `acknowledgeDrained`, a `writeHistory`
+    /// that grows that storage, or `deinit`. Copy ids before another such operation.
     pub fn acknowledgeDrained(self: *Region) []const u64 {
         self.history_ids.clearRetainingCapacity();
         // Only the batches whose bytes the transport actually took: a
@@ -1605,10 +1644,8 @@ pub const Region = struct {
         }
     }
 
-    /// Cells that differ from the previous frame: the damage a `.diff`
-    /// frame had to paint. Zero while a frame is uncommitted (a failed
-    /// composition leaves `prev` alone), so a caller that measures
-    /// damage before `render` never counts a frame twice.
+    /// Current cell differences against the last committed snapshot. Drawing can make this
+    /// nonzero before rendering; a successful render republishes the snapshot and clears it.
     pub fn dirtyCells(self: *const Region) usize {
         var n: usize = 0;
         for (0..self.cur.height) |y| {
@@ -1619,11 +1656,12 @@ pub const Region = struct {
         return n;
     }
 
-    /// Ids the Region still retains: written or not, unacknowledged, in
-    /// write order. The slice is valid until the next ledger call.
-    pub fn historyPending(self: *Region) []const u64 {
+    /// Retained batch ids, including written batches awaiting prefix release, in write order.
+    /// Borrows query storage until the next successful `historyPending` or `deinit`.
+    /// `error.OutOfMemory` leaves the ledger and the previous query result unchanged.
+    pub fn historyPending(self: *Region) std.mem.Allocator.Error![]const u64 {
+        try self.history_pending_buf.ensureTotalCapacity(self.gpa, self.history.items.len);
         self.history_pending_buf.clearRetainingCapacity();
-        self.history_pending_buf.ensureTotalCapacity(self.gpa, self.history.items.len) catch return &.{};
         for (self.history.items) |b| self.history_pending_buf.appendAssumeCapacity(b.id);
         return self.history_pending_buf.items;
     }
@@ -1657,9 +1695,10 @@ pub const Region = struct {
     /// cursor) → commit the frame state. After the frame the cursor
     /// sits at the band bottom (column 1 of the last row), which is
     /// exactly the row the query asks about, so a reply needs no
-    /// correction for the frame that asked it. A writer error aborts
-    /// the frame with NO state change, so the caller may retry it
-    /// unchanged.
+    /// correction for the frame that asked it. Allocation failure occurs before output.
+    /// A writer error preserves the committed frame and queued payloads, but `w` may hold
+    /// a prefix. Retry only after discarding that staging; direct terminal output needs
+    /// explicit recovery. Internal reusable capacity and preparation state may change.
     pub fn render(self: *Region, w: anytype) !void {
         if (!self.opts.interactive) return self.renderPlain(w);
 
@@ -2337,7 +2376,7 @@ pub const Region = struct {
     /// this emits no bytes for them.
     fn settleExtent(self: *Region, w: anytype, f: *Frame) !void {
         const old = self.bandRows();
-        const want = @as(u32, self.height);
+        const want: u32 = self.height;
         if (want > old) {
             const gained = want - old;
             try emit.appendLines(w, @intCast(gained));
@@ -2806,8 +2845,8 @@ pub const Region = struct {
         self.band_next_gaps.clearRetainingCapacity();
         for (0..self.cur.height) |y| {
             const fp = try self.cur.rowFootprint(
-                @intCast(y),
                 self.gpa,
+                @intCast(y),
                 &self.band_next,
                 &self.band_next_gaps,
             );
@@ -4611,7 +4650,7 @@ test "region: a piped frame that fails advances nothing and retries whole" {
     try r.render(&t.w);
     try testing.expectEqualStrings("queued\nledger\nab  \ncd  \n", t.bytes());
     try testing.expect(!r.first_frame);
-    try testing.expectEqual(@as(usize, 0), r.historyPending().len);
+    try testing.expectEqual(@as(usize, 0), (try r.historyPending()).len);
     try testing.expectEqual(@as(usize, 0), r.historyBytes());
 }
 
@@ -4673,7 +4712,7 @@ test "region: a frame that does not fit the queue stages nothing" {
     try testing.expectEqual(@as(usize, 1), r.append_queue.items.len);
     try testing.expectEqual(@as(usize, 0), r.history_written);
     try testing.expect(r.historyRetained(1));
-    try testing.expectEqual(@as(usize, 1), r.historyPending().len);
+    try testing.expectEqual(@as(usize, 1), (try r.historyPending()).len);
     try testing.expectEqual(@as(usize, 0), q.pending());
 
     // The retry produces the complete frame.
@@ -6633,8 +6672,8 @@ test "region: a batch is written once and acknowledged once" {
     try testing.expectEqual(@as(usize, 1), count(t1.bytes(), "one\r\n"));
     try testing.expectEqual(@as(usize, 1), count(t1.bytes(), "two\r\n"));
     // One receipt outstanding.
-    try testing.expectEqual(@as(usize, 1), r.historyPending().len);
-    try testing.expectEqual(@as(u64, 7), r.historyPending()[0]);
+    try testing.expectEqual(@as(usize, 1), (try r.historyPending()).len);
+    try testing.expectEqual(@as(u64, 7), (try r.historyPending())[0]);
     try testing.expect(r.historyRetained(7));
 
     // The transport drained: acknowledge once, receipts released.
@@ -6642,7 +6681,7 @@ test "region: a batch is written once and acknowledged once" {
     try testing.expectEqual(@as(usize, 1), receipts.len);
     try testing.expectEqual(@as(u64, 7), receipts[0]);
     try testing.expect(!r.historyRetained(7));
-    try testing.expectEqual(@as(usize, 0), r.historyPending().len);
+    try testing.expectEqual(@as(usize, 0), (try r.historyPending()).len);
     try testing.expectEqual(@as(usize, 0), r.historyBytes());
 
     // Acknowledging again is a contract violation, not a second receipt.
@@ -6790,7 +6829,7 @@ test "region: a replay that overflows the queue keeps the whole ledger for the r
     // every unwritten batch are exactly as they were.
     try testing.expectEqual(@as(usize, 1), r.append_queue.items.len);
     try testing.expectEqual(@as(usize, 1), r.history_written);
-    try testing.expectEqualSlices(u64, &.{ 1, 2, 3, 4 }, r.historyPending());
+    try testing.expectEqualSlices(u64, &.{ 1, 2, 3, 4 }, try r.historyPending());
 
     // The retry delivers the complete replay exactly once, and only the
     // replay: the append and the other unwritten batches are superseded
@@ -6809,12 +6848,12 @@ test "region: a replay that overflows the queue keeps the whole ledger for the r
     try testing.expect(!r.historyRetained(2));
     try testing.expect(r.historyRetained(3));
     try testing.expect(!r.historyRetained(4));
-    try testing.expectEqualSlices(u64, &.{ 1, 3 }, r.historyPending());
+    try testing.expectEqualSlices(u64, &.{ 1, 3 }, try r.historyPending());
     try testing.expectEqual(@as(usize, 0), r.append_queue.items.len);
     // One drain acknowledges exactly the written batches: the settled
     // one from the earlier frame and the replay.
     try testing.expectEqualSlices(u64, &.{ 1, 3 }, r.acknowledgeDrained());
-    try testing.expectEqual(@as(usize, 0), r.historyPending().len);
+    try testing.expectEqual(@as(usize, 0), (try r.historyPending()).len);
     try testing.expectEqual(@as(usize, 0), r.historyBytes());
 }
 
@@ -7677,7 +7716,7 @@ test "region: a batch that has not been written yet cannot be acknowledged" {
     // drain reports it.
     try r.acknowledgeHistory(1);
     try testing.expect(!r.historyRetained(1));
-    try testing.expectEqual(@as(usize, 0), r.historyPending().len);
+    try testing.expectEqual(@as(usize, 0), (try r.historyPending()).len);
     try testing.expectEqual(@as(usize, 1), count(t.bytes(), "pending\r\n"));
     // The written cursor is consistent again, so a later drain cannot
     // walk past the end of the list.
@@ -8077,4 +8116,44 @@ test "region: a frame that dies staging across a width change leaves the snapsho
     const base = term.row - 2;
     for (0..3) |y| try testing.expectEqualStrings("wider", term.text(base + y));
     try testing.expectEqual(@as(usize, 0), term.col);
+}
+
+// Allocation failure must not look like an empty retention ledger.
+test "region: pending history query reports allocation failure without losing receipts" {
+    var r = try makeRegion(1, .{});
+    defer r.deinit();
+    try r.writeHistory(.{ .id = 7, .rows = &.{"retained"}, .kind = .append });
+
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    r.gpa = failing.allocator();
+    defer r.gpa = testing.allocator;
+    try testing.expectError(error.OutOfMemory, r.historyPending());
+    try testing.expect(r.historyRetained(7));
+    try testing.expectEqual(@as(u64, 7), r.historyWatermark());
+
+    r.gpa = testing.allocator;
+    try testing.expectEqualSlices(u64, &.{7}, try r.historyPending());
+}
+
+// An unknown absolute anchor must not emit an image command at terminal row zero.
+test "region: image placement refuses an unmeasured anchor without output" {
+    var r = try makeRegion(2, .{});
+    defer r.deinit();
+    var t: TestWriter = .{};
+    t.init();
+    try testing.expectError(error.AnchorUnmeasured, r.placeAt(&t.w, 0, 1, .{ .id = 1 }));
+    try testing.expectEqualStrings("", t.bytes());
+}
+
+test "region: automatic history ids report exhaustion after the maximum accepted id" {
+    var r = try makeRegion(1, .{});
+    defer r.deinit();
+    try r.writeHistory(.{
+        .id = std.math.maxInt(u64),
+        .rows = &.{"last"},
+        .kind = .append,
+    });
+    try testing.expectError(error.HistoryIdExhausted, r.writeTranscript(&.{"not admitted"}));
+    try testing.expectEqual(std.math.maxInt(u64), r.historyWatermark());
+    try testing.expectEqual(@as(usize, 1), (try r.historyPending()).len);
 }

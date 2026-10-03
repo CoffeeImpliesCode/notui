@@ -10,6 +10,12 @@ const atom = @import("ztex.atom");
 const lexer = @import("lexer.zig");
 const parse_err = @import("error.zig");
 
+/// Everything the parser can return: `error.OutOfMemory` from the `Ast`
+/// plus the input failures below. Each corresponds to exactly one
+/// `ztex.parse.Kind`, so `Parser.err_info` is filled on every path.
+///
+/// The lexer's two input failures are not here — they come from `ztex.parse.lex`
+/// and are unioned into `ztex.parse.Error`.
 pub const Error = std.mem.Allocator.Error || error{
     UnexpectedRGroup,
     UnexpectedScript,
@@ -28,14 +34,17 @@ pub const Error = std.mem.Allocator.Error || error{
     MismatchedEnd,
     /// \begin{...} never closed by \end{...} (or \end missing its name).
     UnclosedEnvironment,
-    /// Recursion guard tripped (deeply nested input).
+    /// Row nesting deeper than `max_row_depth`. The recursion guard returns
+    /// this instead of overflowing the call stack, so the guard is a
+    /// published bound on accepted input rather than a crash.
     StackOverflow,
 };
 
-/// Parse rows recursively (groups, scripts, mathstyle); `max_row_depth`
-/// bounds the nesting so deeply nested input fails with StackOverflow
-/// instead of overflowing the call stack.
-const max_row_depth: u32 = 256;
+/// Deepest row nesting `parse` accepts, counted in nested `parseRow` calls
+/// (groups, scripts, style scopes, \left...\right interiors). Input nested
+/// one level deeper fails with `Error.StackOverflow` and an `Info` of kind
+/// `Kind.depth_exceeded`.
+pub const max_row_depth: u32 = 256;
 
 /// Opcode for each supported command name; `cmd_map` returns one of these and
 /// `parseCommand`'s switch applies the command's effect.
@@ -596,20 +605,34 @@ const not_cp_map = [_]struct { cp: u21, neg: u21 }{
 };
 
 /// Recursive-descent parser over a flat token table.
+///
+/// A `Parser` borrows `src` and `tokens` and allocates every node it appends
+/// from `gpa`; it owns no node itself — the `atom.Ast` passed to `parse` does.
+/// It holds the caller's `err_info` pointer for the duration of `parse` and
+/// never retains it. One `Parser` parses one token table into one `Ast`; it
+/// is not reusable for a second input, and it is not safe to share across
+/// threads.
 pub const Parser = struct {
+    /// Allocator for every node the parser appends to the `Ast`.
     gpa: std.mem.Allocator,
+    /// The formula bytes; borrowed, used to place zero-width spans at EOF.
     src: []const u8,
+    /// The pre-lexed token table; borrowed for the whole parse.
     tokens: []const atom.Token,
+    /// Index of the next token to consume; `tokens.len` means end of input.
     pos: usize = 0,
     /// 1 while parsing the interior of a \left ... \right pair (parseRow in
     /// .delimited mode): \middle is only valid there (TeX). parseLeftRight
     /// increments before the interior and decrements after.
     delim_depth: u32 = 0,
     /// parseRow nesting depth; the depth counter doubles as the stack
-    /// guard (zbc wants recursive parse fns to call an explicit guard).
+    /// guard, bounded by `max_row_depth`.
     row_depth: u32 = 0,
-    /// Caller-provided parse-error context: filled (when non-null) with the
-    /// kind + offending span immediately before any error is returned.
+    /// Caller-provided parse-error context, borrowed for as long as this
+    /// parser lives. `parse` fills it (when non-null) before EVERY error it
+    /// returns — kind + offending span for an input failure, and
+    /// `Kind.out_of_memory` with a `null` span for an allocation failure —
+    /// and leaves it untouched on success. Nothing else writes it.
     err_info: ?*parse_err.Info = null,
 
     /// Safe to recurse one more parseRow level (zbc stack guard).
@@ -617,6 +640,12 @@ pub const Parser = struct {
         return self.row_depth < max_row_depth;
     }
 
+    /// A parser over `tokens`, writing failure context into `err_info` when
+    /// it is non-null. `src` and `tokens` are borrowed and must outlive the
+    /// parse; `err_info` must stay writable for the whole `parse` call.
+    ///
+    /// The returned parser has not consumed anything; call `parse` with the
+    /// `atom.Ast` its nodes go into.
     pub fn init(
         gpa: std.mem.Allocator,
         src: []const u8,
@@ -642,17 +671,18 @@ pub const Parser = struct {
         return t;
     }
 
-    /// Fill the caller's Info (when provided) with a kind + span.
-    fn setErr(self: *Parser, kind: parse_err.Kind, span: atom.Span) void {
+    /// Fill the caller's Info (when provided) with a kind + optional span.
+    fn setErr(self: *Parser, kind: parse_err.Kind, span: ?atom.Span) void {
         if (self.err_info) |info| info.* = .{ .kind = kind, .span = span };
     }
 
     /// Record the error context and return the matching error-set value.
-    /// Every error-return site goes through here, so the error VALUES are
-    /// unchanged (`expectError` still sees error.Xxx) and the Info is always
-    /// filled before the caller's `catch` observes the failure. This switch
-    /// is the parser's kind→error mapping (the lexer's two kinds never
-    /// reach the parser — `fail` is only called with the 11 parser kinds).
+    /// Every positioned error-return site goes through here, so the error
+    /// VALUES are unchanged (`expectError` still sees error.Xxx) and the Info
+    /// is always filled before the caller's `catch` observes the failure.
+    /// This switch is the whole kind→error mapping; `.dangling_escape` and
+    /// `.invalid_utf8` are lexer-only and `.out_of_memory` is the caller's,
+    /// so none of the three can reach here.
     fn fail(self: *Parser, kind: parse_err.Kind, span: atom.Span) Error {
         self.setErr(kind, span);
         return switch (kind) {
@@ -667,7 +697,8 @@ pub const Parser = struct {
             .unknown_environment => error.UnknownEnvironment,
             .mismatched_end => error.MismatchedEnd,
             .unclosed_environment => error.UnclosedEnvironment,
-            .dangling_escape, .invalid_utf8 => unreachable, // lexer-only kinds
+            .depth_exceeded => error.StackOverflow,
+            .out_of_memory, .dangling_escape, .invalid_utf8 => unreachable,
         };
     }
 
@@ -692,9 +723,29 @@ pub const Parser = struct {
         return .{ .start = t.start, .end = t.end };
     }
 
-    /// Parse the whole token table into a row atom (the root).
+    /// Parse the whole token table into a row atom, appending every node to
+    /// `ast`, and return the root node's index.
+    ///
+    /// `err_info` (when non-null) is filled before EVERY error this returns:
+    /// an input failure records its kind and the offending token's byte span,
+    /// and `error.OutOfMemory` records `Kind.out_of_memory` with a `null`
+    /// span. On success the out-param is untouched. This is the low-level
+    /// route, so it makes the same guarantee `ztex.parse.parse` does: a
+    /// direct caller can trust the out-param after any error without a
+    /// wrapper.
+    ///
+    /// The `Ast` is the caller's and nothing partial is cleaned up here: on
+    /// error the nodes appended before the failure stay in `ast.nodes`, and
+    /// `ast.root` is left as it was. The caller decides whether to keep or
+    /// `deinit` them.
     pub fn parse(self: *Parser, ast: *atom.Ast) Error!u32 {
-        const root = try self.parseRow(ast, .top);
+        const root = self.parseRow(ast, .top) catch |err| switch (err) {
+            error.OutOfMemory => {
+                self.setErr(.out_of_memory, null);
+                return error.OutOfMemory;
+            },
+            else => |e| return e,
+        };
         if (!self.atEnd()) return self.fail(.unexpected_r_group, self.curSpan());
         return root;
     }
@@ -725,7 +776,10 @@ pub const Parser = struct {
     /// returned as a fraction node (TeX: `{a \atop b}`). A second delimiter
     /// is ambiguous (TeX: "you need another { and }") and errors.
     fn parseRow(self: *Parser, ast: *atom.Ast, mode: RowMode) Error!u32 {
-        if (!self.isSafeToRecurse()) return error.StackOverflow;
+        // The guard reports through `fail` like every other positioned
+        // failure, so the caller's Info names this input rather than
+        // whatever the previous call left there.
+        if (!self.isSafeToRecurse()) return self.fail(.depth_exceeded, self.curSpan());
         self.row_depth += 1;
         defer self.row_depth -= 1;
         const start_tok: u32 = @intCast(self.pos);
@@ -2072,6 +2126,47 @@ fn parseSrc(gpa: std.mem.Allocator, src: []const u8) !atom.Ast {
     var p = Parser.init(gpa, src, ast.tokens.items, null);
     ast.root = try p.parse(&ast);
     return ast;
+}
+
+test "parser: the direct route records the depth guard over a stale kind" {
+    // `Parser` is published through `ztex.parse.parser`, so a consumer can
+    // drive it without the `ztex.parse.parse` wrapper. It has to keep the
+    // same guarantee, or this caller reads the previous parse's failure.
+    var src: [max_row_depth + 8]u8 = undefined;
+    @memset(&src, '{');
+    var ast = atom.Ast.init(testing.allocator, &src);
+    defer ast.deinit();
+    try lexer.lex(&ast, null);
+
+    var err_info: parse_err.Info = .{
+        .kind = .unexpected_r_group,
+        .span = .{ .start = 2, .end = 3 },
+    };
+    var p = Parser.init(testing.allocator, &src, ast.tokens.items, &err_info);
+    try testing.expectError(error.StackOverflow, p.parse(&ast));
+    try testing.expectEqual(parse_err.Kind.depth_exceeded, err_info.kind);
+    const span = err_info.span.?;
+    try testing.expect(span.start < src.len);
+    try testing.expect(span.end <= src.len);
+}
+
+test "parser: the direct route fills Info on its own allocation failure" {
+    var ast = atom.Ast.init(testing.allocator, "x+1");
+    defer ast.deinit();
+    try lexer.lex(&ast, null);
+
+    // The Ast owns the tokens, so only the parser's own node allocations
+    // fail here; the first of them is parseRow's child reserve.
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    var err_info: parse_err.Info = .{
+        .kind = .unexpected_r_group,
+        .span = .{ .start = 2, .end = 3 },
+    };
+    var p = Parser.init(failing.allocator(), ast.src, ast.tokens.items, &err_info);
+    try testing.expectError(error.OutOfMemory, p.parse(&ast));
+    try testing.expectEqual(parse_err.Kind.out_of_memory, err_info.kind);
+    try testing.expectEqual(@as(?atom.Span, null), err_info.span);
+    try testing.expectEqualStrings("Out of memory", err_info.message());
 }
 
 test "parser: empty source yields an empty row" {

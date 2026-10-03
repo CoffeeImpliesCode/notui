@@ -16,6 +16,10 @@
 //! and the SGR that goes with it is memoized in a fixed-size
 //! allocation-free cache of encoded transitions keyed by the style the
 //! terminal actually receives.
+//!
+//! Reach through `@import("notui").buffer`: `init`, `draw` or `set`, then render into
+//! the caller's writer. One `deinit` releases the grid, not the strings its cells borrow.
+//! Terminal modes, transport, and committed text snapshots belong to `Region` or the caller.
 
 const std = @import("std");
 const Cell = @import("cell.zig").Cell;
@@ -32,6 +36,12 @@ const default_style: Emitted = .{};
 /// A cell grid plus the delta renderer for double-buffered output.
 ///
 /// Cells are stored flat, row-major: `cells[y * self.width + x]`.
+/// Construct with `init`; zero dimensions are valid empty grids. The stored allocator
+/// stays live through one `deinit`. Copies alias the allocation and are not new owners.
+/// Cell graphemes and style hyperlinks are borrowed and must stay live and unchanged while
+/// retained or compared. A shallow previous grid does not preserve mutable text.
+/// Use serially without writer reentry. `cells` may be edited; allocator and dimensions
+/// must not be changed independently of the allocation. Cell pointers expire on resize.
 pub const Buffer = struct {
     allocator: std.mem.Allocator,
     cells: []Cell,
@@ -50,6 +60,8 @@ pub const Buffer = struct {
         };
     }
 
+    /// Release the grid through its stored allocator, not its borrowed strings.
+    /// Invalidates all grid views; repeated disposal or disposing a copy is invalid.
     pub fn deinit(self: *Buffer) void {
         self.allocator.free(self.cells);
         self.* = undefined;
@@ -58,6 +70,8 @@ pub const Buffer = struct {
     /// Reallocate to `new_width` x `new_height`, copying the overlapping
     /// region row by row (zigzag screen.zig :88-117); the new area is
     /// empty cells.
+    /// `error.OutOfMemory` preserves the old grid. Success invalidates all cell pointers,
+    /// but copied cell payloads still borrow the same caller strings.
     pub fn resize(self: *Buffer, new_width: u16, new_height: u16) !void {
         const new_size = @as(usize, new_width) * @as(usize, new_height);
         const new_cells = try self.allocator.alloc(Cell, new_size);
@@ -97,6 +111,7 @@ pub const Buffer = struct {
     ///
     /// Out of bounds is a no-op; never errors (plan §0: graceful
     /// truncation, no throw paths).
+    /// Retains `cell`'s grapheme and style slices without copying; the type states their lifetime.
     pub fn set(self: *Buffer, x: u16, y: u16, cell: Cell) !void {
         if (x >= self.width or y >= self.height) return;
         const idx = @as(usize, y) * @as(usize, self.width) + x;
@@ -137,6 +152,8 @@ pub const Buffer = struct {
     /// glyph that would cross the right edge drops, and with it the rest
     /// of the line (graceful truncation — never an error). Returns the
     /// number of columns consumed.
+    /// Retains slices of `text` and any style hyperlink until cells are replaced or released.
+    /// The error set is empty for the common component drawing interface.
     pub fn draw(self: *Buffer, style: Style, text: []const u8, x: u16, y: u16) !u16 {
         if (y >= self.height or text.len == 0) return 0;
 
@@ -188,6 +205,8 @@ pub const Buffer = struct {
     /// ends with a reset when the last emitted style was non-default, so
     /// the terminal's active style is always default at a frame boundary
     /// and the next frame starts clean.
+    /// Does not retain the writer or modify either grid. Writer failure may emit a prefix;
+    /// discard staged output or restore the terminal before retrying.
     pub fn renderDiff(self: *const Buffer, prev: *const Buffer, w: anytype) !void {
         var styles: SgrCache = .{};
         var tracked: Emitted = default_style;
@@ -221,6 +240,8 @@ pub const Buffer = struct {
     /// `ESC[J`; the cursor sits at the anchor (column 0 of row 0). Each
     /// row: `\r`(+`\n`) + column-1 eraseLine, then the row's cells with
     /// the same style-tracking rules as `renderDiff`.
+    /// Does not retain the writer or modify the grid. Writer failure may emit a prefix;
+    /// discard staged output or restore the terminal before retrying.
     pub fn renderAll(self: *const Buffer, w: anytype) !void {
         var styles: SgrCache = .{};
         var tracked: Emitted = default_style;
@@ -329,6 +350,9 @@ pub const Buffer = struct {
     /// row's last glyph: the terminal trims trailing null cells, but
     /// keeps spaces. Both tapes belong to the caller and can be reused.
     /// Dense narrow-glyph rows append nothing and allocate nothing.
+    /// The default is a blank row with no tape entries. Copies share tape indices, not storage.
+    /// Query arguments must contain this record's full sorted, in-range, nonoverlapping
+    /// tape ranges. Keep the tape contents unchanged while the footprint is queried.
     pub const RowFootprint = struct {
         /// One past the last column this row paints; zero paints
         /// nothing. Trailing default blanks are NOT counted, because
@@ -349,6 +373,7 @@ pub const Buffer = struct {
         null_start: usize = 0,
         null_count: usize = 0,
 
+        /// Half-open unprinted column interval. `start < end` and both are within the row.
         pub const NullGap = struct {
             start: u16,
             end: u16,
@@ -470,7 +495,7 @@ pub const Buffer = struct {
         ) Packed {
             // At least one wide glyph fits every chunk, so no chunk is
             // ever opened empty and a narrower ask cannot loop.
-            const limit: u32 = @as(u32, self.columns);
+            const limit: u32 = self.columns;
             const width: u32 = @max(@as(u32, cols), min_reflow_columns);
             var out: Packed = .{ .rows = 1, .columns = 0, .wide_count = 0 };
             var used: u32 = 0; // columns filled in the chunk being built
@@ -553,10 +578,11 @@ pub const Buffer = struct {
     /// Both tapes append row-local positions. The footprint names each
     /// row's slice. On allocation failure both lengths return to their
     /// original values; any capacity increase remains reusable.
+    /// `gpa` must own both tapes and stay live until the caller deinitializes them.
     pub fn rowFootprint(
         self: *const Buffer,
-        y: u16,
         gpa: std.mem.Allocator,
+        y: u16,
         wide_columns: *std.ArrayList(u16),
         null_gaps: *std.ArrayList(RowFootprint.NullGap),
     ) error{OutOfMemory}!RowFootprint {
@@ -1867,7 +1893,7 @@ test "rowFootprint: interior gaps are columns, trailing blanks are not" {
     var null_gaps: std.ArrayList(Buffer.RowFootprint.NullGap) = .empty;
     defer null_gaps.deinit(gpa);
 
-    const fp = try buf.rowFootprint(0, gpa, &tape, &null_gaps);
+    const fp = try buf.rowFootprint(gpa, 0, &tape, &null_gaps);
     // The erase left columns 5..9 blank, so they are not part of the
     // row. The blanks the renderer SKIPPED between the two glyphs are:
     // they are columns the terminal still shows.
@@ -1893,14 +1919,14 @@ test "rowFootprint: a styled tail blank counts, a default one does not" {
 
     try std.testing.expectEqual(
         @as(u16, 2),
-        (try buf.rowFootprint(0, gpa, &tape, &null_gaps)).columns,
+        (try buf.rowFootprint(gpa, 0, &tape, &null_gaps)).columns,
     );
 
     // A styled blank emits so its background paints, and `draw` takes
     // the style it is handed: a row that ends in one is that wide even
     // though the erase already blanked the column.
     _ = try buf.draw(shaded, " ", 4, 0);
-    const fp = try buf.rowFootprint(0, gpa, &tape, &null_gaps);
+    const fp = try buf.rowFootprint(gpa, 0, &tape, &null_gaps);
     try std.testing.expectEqual(@as(u16, 5), fp.columns);
     try std.testing.expectEqual(@as(u32, 1), fp.rowsAt(tape.items, 5));
 }
@@ -1917,7 +1943,7 @@ test "rowFootprint: continuations, empty graphemes and dropped leads emit nothin
 
     // The wide glyph at column 1 is painted by one write covering two
     // columns; its continuation at column 2 emits nothing of its own.
-    const painted = try buf.rowFootprint(0, gpa, &tape, &null_gaps);
+    const painted = try buf.rowFootprint(gpa, 0, &tape, &null_gaps);
     try std.testing.expectEqual(@as(u16, 3), painted.columns);
     try std.testing.expectEqualSlices(u16, &.{1}, tape.items);
 
@@ -1928,7 +1954,7 @@ test "rowFootprint: continuations, empty graphemes and dropped leads emit nothin
     try buf.set(0, 1, .{ .grapheme = "", .style = .{ .fg = .{ .ansi = .red } } });
     try buf.set(1, 1, .{ .grapheme = "z", .wide = true });
     try buf.set(3, 1, .{ .grapheme = "界" });
-    const blank = try buf.rowFootprint(1, gpa, &tape, &null_gaps);
+    const blank = try buf.rowFootprint(gpa, 1, &tape, &null_gaps);
     try std.testing.expectEqual(@as(u16, 0), blank.columns);
     try std.testing.expectEqual(@as(usize, 0), blank.wide_count);
     try std.testing.expectEqual(@as(usize, 1), blank.wide_start);
@@ -1945,7 +1971,7 @@ test "rowsAt: whole-grapheme packing, not a ceiling division" {
     defer tape.deinit(gpa);
     var null_gaps: std.ArrayList(Buffer.RowFootprint.NullGap) = .empty;
     defer null_gaps.deinit(gpa);
-    const fp = try buf.rowFootprint(0, gpa, &tape, &null_gaps);
+    const fp = try buf.rowFootprint(gpa, 0, &tape, &null_gaps);
 
     try std.testing.expectEqual(@as(u16, 8), fp.columns);
     try std.testing.expectEqualSlices(u16, &.{ 0, 2, 4, 6 }, tape.items);
@@ -1973,7 +1999,7 @@ test "prefixRows: a chunk ends at its last glyph, never in its padding" {
     defer tape.deinit(gpa);
     var null_gaps: std.ArrayList(Buffer.RowFootprint.NullGap) = .empty;
     defer null_gaps.deinit(gpa);
-    const fp = try buf.rowFootprint(0, gpa, &tape, &null_gaps);
+    const fp = try buf.rowFootprint(gpa, 0, &tape, &null_gaps);
 
     // Three columns hold one wide glyph and one column of padding. That
     // padding is neither a glyph nor a null gap, so the prefix of the
@@ -2011,7 +2037,7 @@ test "prefixRows: a cut inside a one-cell run keeps whole chunks" {
     // Forty plain columns are four chunks of ten, and nothing in them
     // can move down, so a cut after two chunks is exactly the end of
     // the second: twenty columns, still two chunks.
-    const ascii = try buf.rowFootprint(0, gpa, &tape, &null_gaps);
+    const ascii = try buf.rowFootprint(gpa, 0, &tape, &null_gaps);
     try std.testing.expectEqual(@as(u16, 40), ascii.columns);
     try std.testing.expectEqual(@as(u32, 4), ascii.rowsAt(tape.items, 10));
     const cut = ascii.prefixRows(tape.items, 10, 2);
@@ -2024,7 +2050,7 @@ test "prefixRows: a cut inside a one-cell run keeps whole chunks" {
     // take the rest and the cut below lands inside that run. The
     // boundary must still be a whole chunk, and the prefix must still
     // be a footprint of its own.
-    const mixed = try buf.rowFootprint(1, gpa, &tape, &null_gaps);
+    const mixed = try buf.rowFootprint(gpa, 1, &tape, &null_gaps);
     try std.testing.expectEqual(@as(u16, 22), mixed.columns);
     try std.testing.expectEqual(@as(u32, 5), mixed.rowsAt(tape.items, 5));
     const two = mixed.prefixRows(tape.items, 5, 2);
@@ -2050,7 +2076,7 @@ test "rowsAt: the wide positions decide the packing, not their count" {
     // cells. Positions are row-local, so the first row's slice starts
     // the tape at 0.
     _ = try buf.draw(Style{}, "界界xx", 0, 0);
-    const tight = try buf.rowFootprint(0, gpa, &tape, &null_gaps);
+    const tight = try buf.rowFootprint(gpa, 0, &tape, &null_gaps);
     try std.testing.expectEqual(@as(u16, 6), tight.columns);
     try std.testing.expectEqualSlices(u16, &.{ 0, 2 }, tape.items);
 
@@ -2058,7 +2084,7 @@ test "rowsAt: the wide positions decide the packing, not their count" {
     // wide glyphs, but a narrow cell between the leads. Its positions
     // are its own 0 and 3, appended after the first row's.
     _ = try buf.draw(Style{}, "界x界x", 0, 1);
-    const sparse = try buf.rowFootprint(1, gpa, &tape, &null_gaps);
+    const sparse = try buf.rowFootprint(gpa, 1, &tape, &null_gaps);
     try std.testing.expectEqualSlices(u16, &.{ 0, 3 }, tape.items[2..]);
     try std.testing.expectEqual(tight.columns, sparse.columns);
     try std.testing.expectEqual(tight.wide_count, sparse.wide_count);
@@ -2081,7 +2107,7 @@ test "prefixRows: a boundary falls before or after a wide glyph" {
     defer tape.deinit(gpa);
     var null_gaps: std.ArrayList(Buffer.RowFootprint.NullGap) = .empty;
     defer null_gaps.deinit(gpa);
-    const fp = try buf.rowFootprint(0, gpa, &tape, &null_gaps);
+    const fp = try buf.rowFootprint(gpa, 0, &tape, &null_gaps);
     try std.testing.expectEqual(@as(u16, 4), fp.columns);
     try std.testing.expectEqualSlices(u16, &.{2}, tape.items);
 
@@ -2109,7 +2135,7 @@ test "rowsAt: a row that paints nothing is one blank physical row" {
     var null_gaps: std.ArrayList(Buffer.RowFootprint.NullGap) = .empty;
     defer null_gaps.deinit(gpa);
 
-    const blank = try buf.rowFootprint(0, gpa, &tape, &null_gaps);
+    const blank = try buf.rowFootprint(gpa, 0, &tape, &null_gaps);
     try std.testing.expectEqual(@as(u16, 0), blank.columns);
     try std.testing.expectEqual(@as(u32, 1), blank.rowsAt(tape.items, 4));
     try std.testing.expectEqual(@as(u32, 1), blank.rowsAt(tape.items, 1));
@@ -2117,7 +2143,7 @@ test "rowsAt: a row that paints nothing is one blank physical row" {
     try std.testing.expectEqual(blank.columns, blank.prefixRows(tape.items, 4, 1).columns);
 
     // A row past the band paints nothing and records no positions.
-    const past = try buf.rowFootprint(9, gpa, &tape, &null_gaps);
+    const past = try buf.rowFootprint(gpa, 9, &tape, &null_gaps);
     try std.testing.expectEqual(@as(u16, 0), past.columns);
     try std.testing.expectEqual(@as(usize, 0), past.wide_count);
     try std.testing.expectEqual(@as(usize, 0), tape.items.len);
@@ -2141,11 +2167,11 @@ test "rowFootprint: capture never allocates once both geometry tapes have room" 
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
     const alloc = failing.allocator();
 
-    const ascii = try buf.rowFootprint(0, alloc, &tape, &null_gaps);
+    const ascii = try buf.rowFootprint(alloc, 0, &tape, &null_gaps);
     try std.testing.expectEqual(@as(u16, 11), ascii.columns);
     try std.testing.expectEqual(@as(usize, 0), tape.items.len); // ASCII appends nothing
 
-    const wide = try buf.rowFootprint(1, alloc, &tape, &null_gaps);
+    const wide = try buf.rowFootprint(alloc, 1, &tape, &null_gaps);
     try std.testing.expectEqual(@as(u16, 4), wide.columns);
     try std.testing.expectEqual(@as(usize, 0), wide.wide_start);
     try std.testing.expectEqualSlices(u16, &.{ 0, 2 }, tape.items);
@@ -2175,11 +2201,11 @@ test "rowFootprint: a failed capture hands the tape back unchanged" {
     failing.resize_fail_index = 0; // a remap must not sneak past either
     try std.testing.expectError(
         error.OutOfMemory,
-        buf.rowFootprint(0, failing.allocator(), &tape, &null_gaps),
+        buf.rowFootprint(failing.allocator(), 0, &tape, &null_gaps),
     );
     try std.testing.expectEqualSlices(u16, &.{99}, tape.items);
 
-    const fp = try buf.rowFootprint(0, gpa, &tape, &null_gaps);
+    const fp = try buf.rowFootprint(gpa, 0, &tape, &null_gaps);
     try std.testing.expectEqual(@as(u16, 18), fp.columns);
     try std.testing.expectEqual(@as(usize, 1), fp.wide_start);
     try std.testing.expectEqual(@as(usize, 9), fp.wide_count);
@@ -2225,7 +2251,7 @@ test "rowFootprint: the captured end is where the frame stops painting" {
     defer tape.deinit(gpa);
     var null_gaps: std.ArrayList(Buffer.RowFootprint.NullGap) = .empty;
     defer null_gaps.deinit(gpa);
-    const fp = try buf.rowFootprint(0, gpa, &tape, &null_gaps);
+    const fp = try buf.rowFootprint(gpa, 0, &tape, &null_gaps);
     try std.testing.expectEqual(@as(u16, 8), fp.columns);
     try std.testing.expectEqualSlices(u16, &.{4}, tape.items);
 
@@ -2252,8 +2278,8 @@ test "rowFootprint: removing a suffix distinguishes null gaps from printed space
     var null_gaps: std.ArrayList(Buffer.RowFootprint.NullGap) = .empty;
     defer null_gaps.deinit(gpa);
 
-    const dense = try buf.rowFootprint(0, gpa, &tape, &null_gaps);
-    const sparse = try buf.rowFootprint(1, gpa, &tape, &null_gaps);
+    const dense = try buf.rowFootprint(gpa, 0, &tape, &null_gaps);
+    const sparse = try buf.rowFootprint(gpa, 1, &tape, &null_gaps);
     var dense_prefix = dense.prefixRows(tape.items, 55, 1);
     var sparse_prefix = sparse.prefixRows(tape.items, 55, 1);
     dense_prefix.columns = dense_prefix.paintedPrefixColumns(null_gaps.items, 55);
@@ -2262,7 +2288,7 @@ test "rowFootprint: removing a suffix distinguishes null gaps from printed space
     try std.testing.expectEqual(@as(u32, 1), sparse_prefix.rowsAt(tape.items, 3));
 
     _ = try buf.draw(.{ .bg = .{ .ansi = .blue } }, " ", 20, 1);
-    const painted_space = try buf.rowFootprint(1, gpa, &tape, &null_gaps);
+    const painted_space = try buf.rowFootprint(gpa, 1, &tape, &null_gaps);
     try std.testing.expectEqual(
         @as(u16, 21),
         painted_space.paintedPrefixColumns(null_gaps.items, 55),
@@ -2293,13 +2319,13 @@ test "rowFootprint: gap allocation failure restores both tapes for retry" {
 
     try std.testing.expectError(
         error.OutOfMemory,
-        buf.rowFootprint(0, failing.allocator(), &tape, &null_gaps),
+        buf.rowFootprint(failing.allocator(), 0, &tape, &null_gaps),
     );
     try std.testing.expectEqualSlices(u16, &.{99}, tape.items);
     try std.testing.expectEqual(@as(usize, 1), null_gaps.items.len);
     try std.testing.expectEqualDeep(sentinel, null_gaps.items[0]);
 
-    const fp = try buf.rowFootprint(0, gpa, &tape, &null_gaps);
+    const fp = try buf.rowFootprint(gpa, 0, &tape, &null_gaps);
     try std.testing.expectEqual(@as(u16, 6), fp.paintedPrefixColumns(null_gaps.items, 8));
     try std.testing.expectEqualSlices(u16, &.{ 99, 0 }, tape.items);
     try std.testing.expectEqualDeep(sentinel, null_gaps.items[0]);

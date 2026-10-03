@@ -1,58 +1,30 @@
-//! Component contract: the common `draw`/`advance` surface and the
-//! shared time-gated advance helper for the base-ui presentation layer
-//! (baseui-contract.md §3).
+//! Shared monotonic clock and elapsed-time helpers for presentation components.
 //!
-//! A component is a plain stateful struct that owns its configuration
-//! and animation state. It draws grapheme cells into a `Buffer` (the
-//! same contract `Region.renderDiff` consumes) at an explicit (x, y),
-//! never emits ANSI, and never allocates during `draw`. `draw` advances
-//! animation state to `now` first, so one call per frame is enough;
-//! `advance` alone lets an app time-animate without redrawing and
-//! reports whether the frame changed (for render gating).
+//! Each component has its own draw signature and return unit. Most take
+//! `(buf, x, y, now)` and return consumed columns. `Text` and `Suggestions`
+//! also take the allocator that owns their caller-provided scratch.
+//! `Suggestions.draw` returns popup rows, not columns. No base type or
+//! vtable imposes a uniform draw signature.
+//!
+//! Drawn cells borrow text. Keep caller scratch and component-owned formatted
+//! bytes stable until the buffer has rendered. `advance` updates animation
+//! without drawing and reports whether a frame changed.
 //!
 //! `now` is the monotonic clock: `std.Io.Timestamp.now(io, .awake)`.
 //! Components take it as a parameter so they stay pure and testable
 //! (tests pass synthetic values via `std.Io.Timestamp.fromNanoseconds`).
 
 const std = @import("std");
-const Buffer = @import("../buffer.zig").Buffer;
 
 /// The monotonic clock a component reads.
 pub const Clock = std.Io.Timestamp;
 
-/// The template surface every component implements. Components do NOT
-/// inherit this struct; each is a standalone struct exposing `draw` and
-/// `advance` with these shapes (duck-typed, no vtable).
-pub const Component = struct {
-    /// Draw into `buf` with the top-left at (x, y); return the number of
-    /// COLUMNS consumed (width-aware truncation: never exceeds
-    /// `buf.width`, per Buffer.draw). May draw multiple rows (a wrapped
-    /// Text); consumed = widest row. Advances animation state to `now`
-    /// first, so a frame that calls `draw` reflects the current time.
-    pub fn draw(self: *Component, buf: *Buffer, x: u16, y: u16, now: Clock) !u16 {
-        _ = self;
-        _ = buf;
-        _ = x;
-        _ = y;
-        _ = now;
-        return 0;
-    }
-
-    /// Advance animation to `now` WITHOUT drawing. Returns true when the
-    /// frame changed (the app may use it to skip re-renders). Idempotent:
-    /// calling twice with the same `now` advances at most once.
-    pub fn advance(self: *Component, now: Clock) bool {
-        _ = self;
-        _ = now;
-        return false;
-    }
-};
-
 /// Elapsed nanoseconds since `last`, when at least `interval` ns have
-/// passed (zigzag spinner.zig update model, baseui-contract.md §3).
-/// Returns null when `last` is unset (first call — the caller should
-/// anchor its clock) or when the interval has not yet elapsed (the
-/// caller must NOT re-anchor, so elapsed keeps accumulating).
+/// passed; the time gate an animated component applies in `advance`.
+///
+/// Returns null when `last` is unset (first call — the caller anchors
+/// its clock) or when the interval has not yet elapsed. The caller must
+/// not re-anchor `last` on a null, or elapsed time stops accumulating.
 pub fn elapsedSince(now: Clock, last: ?Clock, interval: u64) ?u64 {
     const l = last orelse return null;
     const d = now.nanoseconds -| l.nanoseconds; // monotonic: safe

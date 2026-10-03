@@ -16,9 +16,13 @@
 //!   `findFont`, and serves per-(face, cp) metric lookups from a cache.
 //!
 //! All values returned in "em" units are font-relative (value ÷ unitsPerEm),
-//! so callers multiply by the desired size in points. Every number asserted
-//! in the tests below was measured from the real fonts (see
-//! notes/font-context.md for the measurement method).
+//! so callers multiply by the desired size in points.
+//!
+//! A `FontFace` reads no ambient state and needs no `std.Io`. The two
+//! entry points that touch the file system — `FontContext.loadFromFile` and
+//! `FontContext.findFont` — use the `std.Io` the context was built with, so
+//! the caller chooses the backend and owns keeping it alive. Nothing here
+//! reaches for a process-global I/O instance.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -56,19 +60,40 @@ pub const FontError = error{
 
 /// A quadratic Bézier segment in font units (em), Y-up (y grows up,
 /// FreeType convention). TrueType glyphs are quadratic by construction;
-/// a line is stored with p1 = midpoint(p0, p2).
-pub const QuadCurve = struct {
+/// a line is stored with p1 = midpoint(p0, p2). Each of `p0`, `p1` and `p2`
+/// is `[x, y]`: index 0 is x, index 1 is y.
+///
+/// `extern`, so the field order is the C one: `struct { float p0[2]; float
+/// p1[2]; float p2[2]; }` — offsets 0, 8 and 16, size 24, alignment 4.
+/// A consumer that reads the segments as their own bytes without copying —
+/// reinterpreting an `Outline`'s curve array, as `std.mem.bytesAsSlice`
+/// does — depends on that order and size, and only the C layout promises
+/// them.
+pub const QuadCurve = extern struct {
     p0: [2]f32,
     p1: [2]f32,
     p2: [2]f32,
 };
 
-/// A glyph's outline: every contour reduced to quadratic segments.
-/// Points are in font units (em), Y-up. Free with `deinit`.
+/// A glyph's outline: every contour reduced to quadratic segments. Points
+/// are in font units (em), Y-up (y grows up).
+///
+/// An `Outline` owns its `curves` and is released by exactly one `deinit`
+/// with the same allocator it was built with; the allocator itself is not
+/// released and no `FontFace` state is touched, so one face may be asked for
+/// outlines from several threads as long as each caller owns its own
+/// `Outline`.
 pub const Outline = struct {
+    /// Allocator that owns `curves`; the one `glyphOutline` was given.
     gpa: std.mem.Allocator,
+    /// The segments, contour by contour: `p2` of one curve is the `p0` of the
+    /// next, and a new contour starts wherever that chain breaks. Empty for a
+    /// glyph with no outline, such as a space.
     curves: std.ArrayList(QuadCurve) = .empty,
 
+    /// Release the segment list. `gpa` is not released. The outline and every
+    /// slice borrowed from it are invalid afterward, and a second call is a
+    /// double free.
     pub fn deinit(self: *Outline) void {
         self.curves.deinit(self.gpa);
         self.* = undefined;
@@ -251,21 +276,37 @@ fn cmap4Lookup(table: []const u8, cp: u16) ?u32 {
     return gid16 +% delta;
 }
 
-/// A parsed font. Owns a private copy of the file bytes (via `fromBytes`)
-/// or is arena-managed by a `FontContext` (gpa == null, never deinit'd).
+/// A parsed font.
+///
+/// Two ownership regimes, told apart by `gpa`. A face from `fromBytes` owns
+/// a private copy of the file bytes in the allocator it was given and is
+/// released by exactly one `deinit`; the allocator is not released. A face a
+/// `FontContext` owns has `gpa == null`, its bytes live in that context's
+/// arena, and `deinit` is a no-op — such a face is invalid once the context
+/// is deinited and must not be `deinit`'d to release it.
+///
+/// A face borrows nothing beyond its own bytes, so a copy is independent.
+/// Every accessor reads the byte copy only, so a face may be read from
+/// several threads while nothing writes it; `glyphOutline` allocates its own
+/// `Outline` and does not touch the face.
 pub const FontFace = struct {
-    /// Allocator that owns `data`; null when a FontContext's arena owns it.
+    /// The allocator that owns `data`, or `null` when a `FontContext`'s
+    /// arena owns it and `deinit` releases nothing.
     gpa: ?std.mem.Allocator,
-    /// Owned copy of the whole font file (sfnt container).
+    /// The whole font file (sfnt container), owned as described above and
+    /// borrowed by every table slice below.
     data: []u8,
 
+    /// head.unitsPerEm; every "font units" figure below divides by it.
     units_per_em: u16,
+    /// maxp.numGlyphs; valid glyph ids are `[0, num_glyphs)`.
     num_glyphs: u16,
 
     // hhea
     hhea_ascender: i16,
     hhea_descender: i16,
     hhea_line_gap: i16,
+    /// hmtx entries carrying their own advance; later glyphs reuse the last.
     num_h_metrics: u16,
 
     // OS/2 (optional table; zero when absent)
@@ -301,21 +342,29 @@ pub const FontFace = struct {
     /// need FDArray/FDSelect; glyphOutline reports UnsupportedFont.
     cff_cid: bool,
 
-    /// Parse `data` into a face, duplicating the bytes into `gpa`.
-    /// The returned face owns its copy; free it with `deinit`.
+    /// Parse a font file into a face, duplicating the bytes into `gpa`.
+    ///
+    /// The returned face owns its copy and is released by exactly one
+    /// `deinit`; `gpa` itself is not released. On any `FontError` or
+    /// `error.OutOfMemory` the copy is released before returning and no face
+    /// is produced. `data` is not retained.
     pub fn fromBytes(gpa: std.mem.Allocator, data: []const u8) !FontFace {
         const owned = try gpa.dupe(u8, data);
         errdefer gpa.free(owned);
         return parseOwned(owned, gpa);
     }
 
-    /// Release the owned byte copy. No-op for arena-managed faces (gpa null).
+    /// Release the owned byte copy; a no-op for a `FontContext`-owned face
+    /// (`gpa == null`), whose bytes die with the context's arena. The face
+    /// and every slice borrowed from it are invalid afterward, and a second
+    /// call is a double free.
     pub fn deinit(self: *FontFace) void {
         if (self.gpa) |gpa| gpa.free(self.data);
         self.* = undefined;
     }
 
-    /// Font design size in font units per em (head.unitsPerEm).
+    /// Font design size in font units per em (head.unitsPerEm), the divisor
+    /// for every em-unit accessor below.
     pub fn unitsPerEm(self: *const FontFace) u16 {
         return self.units_per_em;
     }
@@ -411,7 +460,13 @@ pub const FontFace = struct {
     /// MissingTable for fonts with neither glyf nor CFF, InvalidTable for
     /// out-of-range glyph ids or malformed charstrings, UnsupportedFont for
     /// CID-keyed CFF. Curves are in font units (em), Y-up.
-    pub fn glyphOutline(self: *FontFace, gpa: std.mem.Allocator, gid: u32) !Outline {
+    /// The returned `Outline` is the caller's: release it with `gpa`, which
+    /// need not be the face's allocator, and before the face itself. An
+    /// empty glyph yields an outline with no curves, not `null`.
+    ///
+    /// The face is borrowed read-only and nothing here invalidates it, so a
+    /// caller holding `*const FontFace` can decode from it.
+    pub fn glyphOutline(self: *const FontFace, gpa: std.mem.Allocator, gid: u32) !Outline {
         var out: Outline = .{ .gpa = gpa };
         errdefer out.deinit();
         if (self.is_cff) {
@@ -842,7 +897,9 @@ const max_subr_depth = 10;
 /// A parsed CFF INDEX (count, offSize, offsets array, data). Positions are
 /// absolute into the font's data; items are located via 1-based offsets.
 const CffIndex = struct {
+    /// Number of items in the INDEX; offsets 0 and `count + 1` bound it.
     count: u16,
+    /// Width in bytes of each entry in the offsets array.
     off_size: u8,
     /// Absolute offset of the offsets array (count + 1 entries).
     offsets_start: usize,
@@ -1072,13 +1129,24 @@ fn parseCffDict(dict: []const u8, kind: CffDictKind, out: *CffDict) error{Invali
     }
 }
 
-/// Parsed CFF font structure (non-CID layout), positions into the face's
-/// data. `lsubrs` is absent when the Private DICT declares no Subrs.
+/// Parsed CFF font structure for a non-CID face, reached through
+/// `FontFace.cff` and null for a TrueType face.
+///
+/// Every position is an absolute offset into the owning face's `data`, which
+/// the face owns, so this structure borrows and frees nothing and its
+/// validity is the face's. It is written once while the face is parsed and
+/// is read-only afterwards.
 const CffData = struct {
+    /// The CharStrings INDEX: item `gid` is glyph `gid`'s Type 2 charstring.
     char_strings: CffIndex,
+    /// The global Subrs INDEX, shared by every glyph. Empty when the font
+    /// declares none.
     gsubrs: CffIndex,
+    /// The Private DICT's local Subrs INDEX, or `null` when it declares none.
     lsubrs: ?CffIndex,
+    /// Precomputed Type 2 bias to add to a global subr index before lookup.
     gsubr_bias: i32,
+    /// Precomputed Type 2 bias to add to a local subr index before lookup.
     lsubr_bias: i32,
 };
 
@@ -1641,7 +1709,13 @@ const CffInterp = struct {
     }
 };
 
-/// (face, cp) key for the per-glyph metrics cache.
+/// Key of `FontContext.metrics_cache`: one codepoint in one face.
+///
+/// Private by name, but reachable through that field's type. A stored key
+/// is valid only while its face stays at that address and unmodified — the
+/// obligation `metrics` places on the caller — so a face released by its
+/// context's `deinit` must not be used as a key, and a fresh context's
+/// cache starts empty. Owns and frees nothing.
 const CacheKey = struct {
     face: *const FontFace,
     cp: u21,
@@ -1667,20 +1741,54 @@ const max_font_bytes = 64 * 1024 * 1024;
 /// Every long-lived allocation lives in `arena` (faces, paths, cache
 /// entries); `deinit` releases everything at once. `metrics` is infallible:
 /// on an allocation failure it recomputes instead of caching.
+///
+/// Every field is read-only state: only the methods below write, and a
+/// caller holding a `*const FontContext` gets the same guarantees as one
+/// holding `*FontContext` — no method requires an exclusive pointer. What
+/// the methods DO write is unsynchronised, so see the threading rule below
+/// before calling any of them.
+///
+/// The context stores the `std.Io` it was built with and owns nothing else
+/// outside its arena. That backend's provider must stay live for as long as
+/// the context is used; a context still in use after its provider is gone is
+/// out of contract. `init` performs no I/O, so a backend that refuses work
+/// would not be noticed until the first `loadFromFile` or `findFont`.
+///
+/// Copies share allocations but copy arena and hash-map metadata by value.
+/// Use only one operational instance: mutating one copy can invalidate the others.
+/// A transfer to another variable is valid only if the source is never used again.
+/// Dispose that instance exactly once; an unused copy is not a separate owner.
+///
+/// Threading: one context, one thread at a time. `loadFromFile`, `findFont`
+/// and `metrics` all write arena-backed hash maps without a lock, and the
+/// pure-looking `metrics` writes its cache on a miss. Concurrent use is out
+/// of contract; separate contexts are independent and may run on separate
+/// threads.
 pub const FontContext = struct {
-    /// Caller's allocator; backs the arena.
+    /// Caller's allocator; backs the arena. Not released by `deinit`.
     gpa: std.mem.Allocator,
     /// Single arena owns every face, cached path, and cache entry.
     arena: std.heap.ArenaAllocator,
-    /// I/O backend for file reads and directory scans. Uses the std
-    /// single-threaded instance (file ops need no concurrency here).
+    /// I/O backend for the file reads and directory scans behind
+    /// `loadFromFile` and `findFont`; the provider behind it must stay live
+    /// for as long as this context is used. Embedded-face metric lookups
+    /// never touch it.
     io: std.Io,
 
-    /// Path (arena-owned) → parsed face; dedupes `loadFromFile`.
+    /// Path (arena-owned) → parsed face; dedupes `loadFromFile`. Written only
+    /// by `loadFromFile`.
     faces: std.StringHashMapUnmanaged(*FontFace),
-    /// Font name → arena-owned discovered path; empty slice records a miss.
+    /// Font name → arena-owned discovered path; an empty slice records a
+    /// miss, so a repeated lookup for an absent name does not rescan. Written
+    /// only by `findFont`.
     found: std.StringHashMapUnmanaged([]const u8),
-    /// (face, cp) → em metrics at 1pt (scaled by size_pt on return).
+    /// One `CacheKey` per (face, codepoint) already measured → its em metrics
+    /// at 1pt, scaled by `size_pt` on return. Written only by `metrics`, on a
+    /// miss; an insert that runs out of memory is dropped and the next call
+    /// recomputes.
+    /// Entries are dropped only by `deinit`, and each one holds its face by
+    /// pointer identity: a face this context does not own must stay alive,
+    /// unmodified and at the same address until then.
     metrics_cache: std.AutoHashMapUnmanaged(CacheKey, GlyphMetrics),
 
     /// Embedded Latin Modern Math — default face for math glyphs.
@@ -1690,12 +1798,17 @@ pub const FontContext = struct {
     /// Embedded Latin Modern Roman italic.
     italic: *FontFace,
 
-    // TODO(macros): F2 will hang a macro table here (name → expansion).
-    // The slot is intentionally reserved; nothing else is needed now.
-
-    /// Create a context preloaded with the embedded fallback faces:
+    /// Create a context preloaded with the embedded Latin Modern faces:
     /// LM Math (math), LM Roman regular and italic (text).
-    pub fn init(gpa: std.mem.Allocator) !FontContext {
+    ///
+    /// `io` is stored, not called: `init` performs no I/O, so a backend that
+    /// reports failures here would be a false negative. The first operation
+    /// that touches the file system — `loadFromFile` or `findFont` — is
+    /// where `io` is used, and its provider must outlive the context.
+    ///
+    /// On `error.OutOfMemory` the arena is released and no context is
+    /// produced; the caller keeps ownership of `gpa` and `io`.
+    pub fn init(gpa: std.mem.Allocator, io: std.Io) !FontContext {
         var arena = std.heap.ArenaAllocator.init(gpa);
         errdefer arena.deinit();
         const a = arena.allocator();
@@ -1705,7 +1818,7 @@ pub const FontContext = struct {
         return .{
             .gpa = gpa,
             .arena = arena,
-            .io = std.Io.Threaded.global_single_threaded.io(),
+            .io = io,
             .faces = .empty,
             .found = .empty,
             .metrics_cache = .empty,
@@ -1715,28 +1828,49 @@ pub const FontContext = struct {
         };
     }
 
-    /// Release everything the context owns. Faces loaded via `loadFromFile`
-    /// are invalidated; standalone faces created via `FontFace.fromBytes`
-    /// are unaffected (they own their own memory).
+    /// Release everything the context owns: the arena holding every loaded
+    /// face, every discovered path, and every metric cache entry. Faces
+    /// returned by `loadFromFile` and by `mathFace`/`romanFace` are
+    /// invalidated, as are the paths `findFont` returned; standalone faces
+    /// from `FontFace.fromBytes` are unaffected (they own their own memory).
+    /// A standalone face passed to `metrics` must not be freed before this
+    /// call, because the metrics cache holds it until here; one this context
+    /// never measured carries no such obligation.
+    ///
+    /// `gpa` and the `io` provider are not released. The context and every
+    /// face and path taken from it are invalid afterward, and a second call
+    /// is a double free.
     pub fn deinit(self: *FontContext) void {
         self.arena.deinit();
         self.* = undefined;
     }
 
-    /// The embedded Latin Modern Math face (math glyphs).
+    /// The embedded Latin Modern Math face (math glyphs), owned by this
+    /// context's arena and valid until `deinit`. Never `null`.
     pub fn mathFace(self: *const FontContext) *FontFace {
         return self.math;
     }
 
-    /// The embedded Latin Modern Roman face; `italic` selects the italic
-    /// variant (for \text/\mathrm).
+    /// The embedded Latin Modern Roman face — the italic variant for `italic`,
+    /// the regular one otherwise — owned by this context's arena and valid
+    /// until `deinit`. Never `null`.
     pub fn romanFace(self: *const FontContext, italic: bool) *FontFace {
         return if (italic) self.italic else self.roman;
     }
 
-    /// Parse a font file and cache the face by path. Repeated calls with the
-    /// same path return the cached face. The face is arena-owned: it lives
-    /// until `deinit`. `gpa` is used for the transient read buffer.
+    /// Parse a font file and cache the face under `path`.
+    ///
+    /// A repeated call with the same `path` returns the cached face without
+    /// touching the file system. The returned face is arena-owned: it is
+    /// never `deinit`'d and is invalidated by this context's `deinit`.
+    /// `gpa` is used only for the transient read buffer and released before
+    /// returning; it need not be the context's allocator.
+    ///
+    /// `path` resolves against the process working directory and must be
+    /// readable through `self.io`. `error.FileTooBig` is the tag for a file
+    /// over 64 MiB; `error.OutOfMemory`, a file-system error, and every
+    /// `FontError` are the other failures. A failure leaves the cache
+    /// unchanged, so the next call retries the read.
     pub fn loadFromFile(self: *FontContext, gpa: std.mem.Allocator, path: []const u8) !*FontFace {
         if (self.faces.get(path)) |face| return face;
         const bytes = try std.Io.Dir.readFileAlloc(.cwd(), self.io, path, gpa, .limited(max_font_bytes));
@@ -1748,11 +1882,24 @@ pub const FontContext = struct {
     }
 
     /// Discover a font file on disk by name (basename, case-insensitive, or
-    /// prefix of it). Search order: explicit well-known roots, user font
-    /// dirs ($XDG_DATA_HOME/fonts, $HOME/.local/share/fonts), the nix store
-    /// (/nix/store scan of LM/font packages), then `fc-list` output.
-    /// Results (and misses) are memoized per name; the returned path is
-    /// arena-owned and valid until `deinit`.
+    /// a prefix of it) and return its path.
+    ///
+    /// Search order: explicit well-known roots, user font dirs
+    /// (`$XDG_DATA_HOME/fonts`, `$HOME/.local/share/fonts`), the nix store
+    /// (`/nix/store` scan of LM/font packages), then `fc-list` output.
+    /// Results and misses are memoized per name, so a second lookup for the
+    /// same name answers from the memo without rescanning. The returned path
+    /// is arena-owned and valid until `deinit`; `name` is not retained
+    /// separately.
+    ///
+    /// This is a best-effort scan and its failure policy is uniform: every
+    /// file-system, permission and subprocess failure is reported the same
+    /// way as "no such font", so `null` cannot distinguish an absent file
+    /// from an unreadable tree or a missing `fc-list`. A caller that must
+    /// tell those apart loads a known path with `loadFromFile` instead.
+    /// If the answer cannot be memoized, it is returned uncached and the next lookup rescans.
+    /// Blocks in file scans and `fc-list`; cancellation and provider failures are misses,
+    /// not returned errors.
     pub fn findFont(self: *FontContext, name: []const u8) ?[]const u8 {
         if (self.found.get(name)) |cached| {
             return if (cached.len == 0) null else cached;
@@ -1765,11 +1912,21 @@ pub const FontContext = struct {
         return path;
     }
 
-    /// Per-glyph metrics at `size_pt` points, cached per (face, cp) in em
-    /// units and scaled linearly. Height/depth/line_gap are the face's OWN
-    /// nominal extents (hhea) — real font data, never a hard-coded table —
-    /// and bound every glyph. Unmapped codepoints get a 0.5em advance with
-    /// the same nominal extents (the caller decides how to draw them).
+    /// Per-glyph metrics for `cp` in `face`, scaled from em units to
+    /// `size_pt` points and cached per (face, cp).
+    ///
+    /// Height/depth/line_gap are the face's OWN nominal extents (hhea) — real
+    /// font data, never a hard-coded table — and bound every glyph. A
+    /// codepoint the face does not map gets a 0.5em advance with the same
+    /// nominal extents; the caller decides how to draw it.
+    ///
+    /// A face passed here remains owned by its existing owner. Keep it alive,
+    /// unmodified, and at a stable address until this context's `deinit`:
+    /// the metrics cache retains its pointer identity. Context-owned faces
+    /// already satisfy this.
+    ///
+    /// If a cache insertion runs out of memory, the current result is unaffected and a
+    /// later lookup recomputes it. Cache mutation requires serial use of this context.
     pub fn metrics(self: *FontContext, face: *const FontFace, cp: u21, size_pt: f32) GlyphMetrics {
         const key: CacheKey = .{ .face = face, .cp = cp };
         const em: GlyphMetrics = if (self.metrics_cache.get(key)) |cached|
@@ -1936,15 +2093,19 @@ fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
 }
 
 // ── tests ────────────────────────────────
-// Expected values below were measured from the real OTF files (fontTools +
-// the byte-level parser in this module cross-checked byte-for-byte; see
-// notes/font-context.md). Nothing is guessed.
+// Expected values below were measured from the real OTF files with fontTools,
+// then cross-checked byte-for-byte against this module's own table parser.
+// Nothing is guessed.
 
 const testing = std.testing;
 
 test {
     testing.refAllDecls(@This());
 }
+
+/// The backend the font tests drive, chosen here by the test rather than
+/// reached for by the code under test.
+const test_io: std.Io = std.Io.Threaded.global_single_threaded.io();
 
 test "font: parse embedded LM Math — upem and nominal extents" {
     var face = try FontFace.fromBytes(testing.allocator, lmmath.lmmath_otf[0..]);
@@ -2017,7 +2178,7 @@ test "font: rejects non-sfnt input" {
 }
 
 test "font: context loads embedded fallbacks and caches metrics" {
-    var ctx = try FontContext.init(testing.allocator);
+    var ctx = try FontContext.init(testing.allocator, test_io);
     defer ctx.deinit();
     const math = ctx.mathFace();
     try testing.expectEqual(@as(u16, 1000), math.unitsPerEm());
@@ -2043,7 +2204,7 @@ test "font: context loads embedded fallbacks and caches metrics" {
 }
 
 test "font: metrics for an unmapped codepoint use nominal extents" {
-    var ctx = try FontContext.init(testing.allocator);
+    var ctx = try FontContext.init(testing.allocator, test_io);
     defer ctx.deinit();
     const g = ctx.metrics(ctx.mathFace(), 0x10FFFF, 20);
     try testing.expectApproxEqAbs(@as(f32, 10.0), g.width, 0.001); // 0.5em fallback
@@ -2052,7 +2213,7 @@ test "font: metrics for an unmapped codepoint use nominal extents" {
 }
 
 test "font: loadFromFile parses a cached face from disk" {
-    var ctx = try FontContext.init(testing.allocator);
+    var ctx = try FontContext.init(testing.allocator, test_io);
     defer ctx.deinit();
     const path = ctx.findFont("latinmodern-math.otf") orelse return error.TestUnexpectedResult;
     const face = try ctx.loadFromFile(testing.allocator, path);
@@ -2066,7 +2227,7 @@ test "font: loadFromFile parses a cached face from disk" {
 }
 
 test "font: findFont discovers the embedded fonts on disk" {
-    var ctx = try FontContext.init(testing.allocator);
+    var ctx = try FontContext.init(testing.allocator, test_io);
     defer ctx.deinit();
     const names = [_][]const u8{
         "latinmodern-math.otf",

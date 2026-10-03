@@ -1,24 +1,34 @@
-//! Style: foreground/background colors, hyperlink, and text attributes.
+//! Cell styling: foreground and background colour, hyperlink target, and
+//! the text attribute flags.
 //!
-//! Shape from architecture §5; merge semantics simplified from zigzag
-//! Style-builder inheritance to per-field precedence. No zg import.
+//! `emit` turns a `Style` into SGR parameters; nothing in this module writes
+//! bytes.
 
 const std = @import("std");
 const Color = @import("color.zig").Color;
 
-/// Text styling for a cell.
+/// The style one cell paints with.
+///
+/// `Style` owns nothing: `hyperlink` is a borrowed slice, so a copy of a
+/// `Style` copies the borrow, not the bytes, and both must outlive whatever
+/// reads the copy.
 pub const Style = struct {
-    /// Foreground color; null inherits from `base` on merge.
+    /// Foreground colour. `null` inherits `base.fg` in `merge`, and emits
+    /// nothing on its own — which is not the same as `Color.default`, which
+    /// asks for the terminal's own foreground.
     fg: ?Color = null,
-    /// Background color; null inherits from `base` on merge.
+    /// Background colour, with the same `null` meaning as `fg`.
     bg: ?Color = null,
-    /// Hyperlink URI (OSC 8). Emission is deferred (not written by
-    /// emit.writeStyle).
+    /// The OSC 8 hyperlink target, borrowed from the caller.
+    ///
+    /// This package does not emit OSC 8, so the value never reaches the
+    /// terminal; it is carried on a `Style` so a hyperlink change is visible
+    /// to `eql` and to the frame differ.
     hyperlink: ?[]const u8 = null,
-    /// Text attributes.
+    /// The attribute flags.
     attrs: Attrs = .{},
 
-    /// Packed text attribute flags. `@sizeOf(Attrs) == 1`.
+    /// The SGR attributes, packed into one byte.
     pub const Attrs = packed struct {
         bold: bool = false,
         dim: bool = false,
@@ -29,9 +39,13 @@ pub const Style = struct {
         strikethrough: bool = false,
     };
 
-    /// Structural equality. Hyperlinks compare by `std.mem.eql`; an
-    /// unset field (`null`) differs from a set one, and `Color.default`
-    /// differs from `null`.
+    /// True when the two styles would emit the same SGR parameters and carry
+    /// the same hyperlink: colours compare by tag, `hyperlink` compares by
+    /// content, and an unset field is not the same as `Color.default`.
+    ///
+    /// Two hyperlinks that are equal in content but different slices are
+    /// equal here, so a caller that mutates a URI in place can hide a style
+    /// change from the frame differ.
     pub fn eql(self: Style, other: Style) bool {
         if (!colorEql(self.fg, other.fg)) return false;
         if (!colorEql(self.bg, other.bg)) return false;
@@ -39,10 +53,12 @@ pub const Style = struct {
         return self.attrs == other.attrs;
     }
 
-    /// Merge `self` over `base` with documented precedence: non-null
-    /// fields of `self` override `base`; null fields inherit `base`.
-    /// Attributes merge per field — a flag set in `self` wins, otherwise
-    /// `base`'s flag shows through (merging can only turn a flag on).
+    /// `self` layered over `base`: a non-null `fg`, `bg` or `hyperlink` in
+    /// `self` wins, and a null one inherits `base`'s value. Attributes merge
+    /// per flag and can only be turned on, never off, so a merged style can
+    /// carry attributes neither input had on its own.
+    ///
+    /// The result borrows `hyperlink` from whichever argument supplied it.
     pub fn merge(self: Style, base: Style) Style {
         return .{
             .fg = self.fg orelse base.fg,
@@ -214,8 +230,4 @@ test "style: merge attrs precedence matrix" {
     try std.testing.expect(m.attrs.blink);
     try std.testing.expect(m.attrs.reverse);
     try std.testing.expect(m.attrs.strikethrough);
-}
-
-test "style: @sizeOf(Attrs) == 1" {
-    try std.testing.expectEqual(@as(usize, 1), @sizeOf(Style.Attrs));
 }

@@ -1,4 +1,4 @@
-//! Editor: a single-line text editor component (ROADMAP D1).
+//! Editor: a single-line text editor component.
 //!
 //! State is one line of bytes (`line`), a byte-offset cursor (`cursor`)
 //! that always sits on a grapheme-cluster boundary, a scroll window
@@ -11,12 +11,37 @@
 //! the draw window step whole clusters and never split a multi-byte
 //! cluster (base + combining mark, ZWJ emoji family) or a wide glyph.
 //!
-//! Allocation. The editor owns its line through the `gpa` given to
-//! `init`; growth is `std.ArrayList`'s (amortised 1.5x, floored at one
-//! cache line, capacity never shrinks), so `Options.initial_capacity`
-//! makes the common typing path allocation-free. `insert`/`paste` add one
-//! undo snapshot each, every kill one ring dupe, and nothing else
-//! allocates.
+//! Allocation and ownership. `init` stores the `gpa` it is given and
+//! every later allocation comes from it; `deinit` frees into it without
+//! releasing it, so that allocator must stay alive until the editor is
+//! released. The editor owns the line, every undo snapshot and every
+//! kill-ring entry in it, and has one owner: a copy names the same
+//! storage, so a second `deinit` — including one through a copy —
+//! frees the same bytes twice.
+//!
+//! Line growth is `std.ArrayList`'s and capacity never shrinks, so
+//! `Options.initial_capacity` sets how far typing grows nothing, and
+//! `clear` keeps what the line already reserved. Recording is the other
+//! half of that: with `undo_depth > 0`, each `insert`/`paste` that keeps
+//! a byte, each `backspace`/`deleteForward`/`clear` with something to
+//! remove, each kill that has bytes to kill, and each `yank`/`yankPop`
+//! that inserts text, dupes the whole line once for its snapshot; a kill
+//! with `kill_ring_depth > 0` also copies the killed bytes into the
+//! ring. The undo stack and the ring grow their own element buffers as
+//! they fill; `undo_depth = 0` takes the per-edit line copy out of all
+//! of them. `yank` and `yankPop` reserve room in the line before they
+//! edit. Motion, `scrollTo`, `undo` and the inspection methods
+//! allocate nothing.
+//!
+//! Failure. Every editing operation reserves what it needs before it
+//! edits the line, so `error.OutOfMemory` leaves the line, the cursor
+//! and the undo stack holding what they held before the call. That is a
+//! claim about content, not about storage: `yank` and `yankPop` reserve
+//! the line before the snapshot, so a failure at the snapshot can have
+//! moved the line's bytes, and `insert` grows the undo stack's element
+//! buffer before it grows the line. The operations that end the
+//! kill/yank sequence end it before that reservation, so a failed edit
+//! can still close an open sequence; each method says whether it does.
 //!
 //! Borrowed cells. `draw` draws straight from `line`: a rendered cell
 //! does borrow the editor's storage, and it stays sound because the
@@ -42,11 +67,10 @@
 //! `markdown.Sanitizer` is the library's escape-sequence machine for
 //! multi-line untrusted text: it lets tab and newline through as
 //! structure and consumes a whole escape sequence. The editor needs the
-//! opposite on both counts (a single line holds no structure, and the
-//! text after a dropped ESC is ordinary content here, exactly as
-//! pi-tui's single-line input keeps it), so it classifies codepoints
-//! locally instead. Same safety rule — no C0, DEL, C1 or invalid byte is
-//! ever stored — one policy for the single-line case.
+//! opposite on both counts — a single line holds no structure, and the
+//! text after a dropped ESC is ordinary content here — so it
+//! classifies codepoints locally instead. Same safety rule: no C0, DEL,
+//! C1 or invalid byte is ever stored, whichever path classifies it.
 //!
 //! Chunk boundaries never split a UTF-8 sequence: `input.Reader` holds a
 //! truncated tail back and reassembles it before decode, so every
@@ -67,38 +91,46 @@ const Clock = @import("component.zig").Clock;
 // claim is about the bytes a Region renders, not about the internal line.
 const Region = @import("../region.zig").Region;
 
-/// Errors an editor operation can raise: the caller's allocator refused to
-/// grow the line, the undo stack, or the kill ring. Nothing else fails —
-/// width and grapheme handling never error.
+/// Errors an editor operation can raise: the editor's allocator refused
+/// to copy the line, a killed run, or to grow the line, the undo stack
+/// or the kill ring. Nothing else fails — width and grapheme handling
+/// never error — and every method states what survives the failure.
 pub const Error = error{OutOfMemory};
 
-/// Undo snapshots retained (the bound `pi-tui` uses, MAX_UNDO_STACK).
-/// Bounded because the stack is user-input-driven memory: each snapshot is
-/// a full copy of the line, so an unbounded stack is an unbounded
-/// allocation. 100 snapshots of a prompt line stay in the tens of
-/// kilobytes and cover far more steps than a single-line edit needs.
+/// Undo snapshots retained by default. The bound is what keeps the
+/// stack user-input-driven memory in check: each snapshot is a full copy
+/// of the line, so an unbounded stack is an unbounded allocation.
 pub const default_undo_depth: usize = 100;
 
-/// Kill-ring entries retained (the bound `pi-tui` uses, MAX_ENTRIES).
-/// Bounded for the same reason: every kill would otherwise pin its bytes
-/// for the session.
+/// Kill-ring entries retained by default. Bounded for the same reason:
+/// every kill would otherwise pin its bytes for the whole session.
 pub const default_kill_ring_depth: usize = 60;
 
 /// Cursor blink half-period; 530 ms is the xterm/readline cadence.
 pub const default_blink_ns: u64 = 530 * std.time.ns_per_ms;
 
-/// Configuration for `Editor.init`.
+/// Configuration for `Editor.init`. The defaults assume a hand-typed
+/// interactive prompt: a short line typed by hand, and a bounded undo
+/// stack and kill ring.
 pub const Options = struct {
     /// Bytes reserved for the line up front. Size it for the expected
-    /// prompt length and the typing path never grows (no allocation).
+    /// prompt: typing within it grows the line's storage not at all, and
+    /// `clear` keeps what is reserved. The reservation covers the line
+    /// only — a recorded undo step still dupes the whole line.
     initial_capacity: usize = 64,
     /// Undo snapshots retained; the oldest is dropped when full. 0
-    /// disables undo, which also makes every unsnapshotable operation
-    /// allocation-free.
+    /// records no snapshot, so an editor created with it starts with an
+    /// empty undo stack and `undo` always returns false, and it takes
+    /// the per-edit line copy out of every operation. Lowering
+    /// `Editor.undo_depth` on a live editor only stops new snapshots;
+    /// the retained ones stay readable.
     undo_depth: usize = default_undo_depth,
     /// Kill-ring entries retained; the oldest is dropped when full. 0
-    /// keeps kills out of the ring (the line is still edited; `yank`
-    /// then finds nothing).
+    /// keeps kills out of the ring: the line is still edited and the
+    /// killed bytes are not retained, so an editor created with it
+    /// starts with an empty ring and `yank` always returns false.
+    /// Lowering `Editor.kill_ring_depth` on a live editor only stops
+    /// new entries; `yank` and `yankPop` still read the retained ones.
     kill_ring_depth: usize = default_kill_ring_depth,
     /// Nanoseconds between cursor blink phase toggles; 0 disables blinking
     /// (the cursor stays visible).
@@ -117,8 +149,7 @@ const Snapshot = struct {
 };
 
 /// One kill-ring entry: the killed bytes. A consecutive kill accumulates
-/// onto the newest entry, prepending when it was a backward kill (`pi-tui`
-/// kill-ring.ts `push(...,{prepend,accumulate})`).
+/// onto the newest entry, prepending when it was a backward kill.
 const Kill = struct {
     bytes: std.ArrayList(u8) = .empty,
 };
@@ -147,10 +178,15 @@ const Window = struct {
 const Action = enum { none, kill, yank };
 
 /// A single-line text editor: one line of bytes, a cluster-aligned cursor,
-/// a bounded undo stack, and a bounded kill ring. See the module docs for
+/// a bounded undo stack, and a bounded kill ring. It owns the line, every
+/// undo snapshot and every kill-ring entry allocated from `gpa`, and has
+/// one owner, which calls `deinit` once — a copy is not a second owner,
+/// and only the second `deinit` is the defect. See the module docs for
 /// the allocation and single-line invariants.
 pub const Editor = struct {
-    /// Allocator that owns the line, the undo snapshots and the kill ring.
+    /// The allocator `init` was given, stored for the editor's whole
+    /// life: it receives every allocation the editor makes, `deinit`
+    /// never releases it, and it must stay alive until that call.
     gpa: std.mem.Allocator,
     /// Style for the line text.
     style: Style = .{},
@@ -158,9 +194,20 @@ pub const Editor = struct {
     cursor_style: Style = .{ .attrs = .{ .reverse = true } },
     /// Nanoseconds between blink phase toggles; 0 disables blinking.
     blink_ns: u64 = default_blink_ns,
-    /// Undo snapshots retained (see `default_undo_depth`).
+    /// Undo snapshots retained; the oldest is dropped when a commit
+    /// exceeds the bound. 0 records no further snapshot — it does not
+    /// clear the stack, and `undo` still restores whatever `undo_stack`
+    /// already holds. Lowering this at run time frees one snapshot per
+    /// later commit rather than truncating at once, so the stack can
+    /// stay above the new bound.
     undo_depth: usize = default_undo_depth,
-    /// Kill-ring entries retained (see `default_kill_ring_depth`).
+    /// Kill-ring entries retained; the oldest is dropped when a push
+    /// exceeds the bound. 0 records no further entry, so a kill edits
+    /// the line without retaining the killed bytes; it does not empty
+    /// the ring, and `yank` and `yankPop` still read the entries
+    /// `kill_ring` already holds. Lowering this at run time drops at
+    /// most one entry per later push rather than truncating at once, so
+    /// the ring can stay above the new bound.
     kill_ring_depth: usize = default_kill_ring_depth,
 
     /// The line's bytes. Never contains C0 or DEL bytes (see module docs).
@@ -178,7 +225,8 @@ pub const Editor = struct {
     undo_stack: std.ArrayList(Snapshot) = .empty,
     /// Kill ring, oldest first; the newest entry is last.
     kill_ring: std.ArrayList(Kill) = .empty,
-    /// Kill sequence tracking (`pi-tui` `#lastAction`).
+    /// What the previous operation was; kills accumulate while this
+    /// reads `.kill`, and yank-pop is only valid while it reads `.yank`.
     action: Action = .none,
     /// Span of the text the last `yank` inserted, if a yank sequence is
     /// still open.
@@ -191,7 +239,10 @@ pub const Editor = struct {
     visible: bool = true,
 
     /// Create an editor with `options.initial_capacity` bytes reserved for
-    /// the line. Fails only if that reservation fails.
+    /// the line, and store `gpa` for every later allocation. Fails only if
+    /// that reservation fails, and then owns nothing, so there is no
+    /// partial editor to release. The returned editor owns its
+    /// allocations and is released by exactly one `deinit`.
     pub fn init(gpa: std.mem.Allocator, options: Options) Error!Editor {
         var ed: Editor = .{
             .gpa = gpa,
@@ -206,7 +257,10 @@ pub const Editor = struct {
         return ed;
     }
 
-    /// Free the line, every undo snapshot and every kill-ring entry.
+    /// Releases the line, every undo snapshot and every kill-ring entry
+    /// into `gpa`. The allocator is not released here and must stay alive
+    /// until this call. The editor is unusable afterwards: a second call,
+    /// or one through a copy, frees the same bytes again.
     pub fn deinit(self: *Editor) void {
         self.line.deinit(self.gpa);
         for (self.undo_stack.items) |snap| self.gpa.free(snap.bytes);
@@ -218,7 +272,12 @@ pub const Editor = struct {
 
     // Inspection.
 
-    /// The line's bytes, borrowed (valid until the next mutation).
+    /// The line's bytes, borrowed. The contents change with every
+    /// operation that edits the line; the storage itself moves with
+    /// `insert`, `paste`, `yank` and `yankPop` — including a `yank` or
+    /// `yankPop` that reserves the line and then fails — and is gone
+    /// after `deinit`. The cells `draw` leaves in a buffer borrow these
+    /// same bytes.
     pub fn text(self: *const Editor) []const u8 {
         return self.line.items;
     }
@@ -238,7 +297,14 @@ pub const Editor = struct {
     /// Insert `bytes` at the cursor through the sanitizer: bytes that do
     /// not decode to a storable codepoint (invalid UTF-8, C0, DEL, C1) are
     /// dropped, everything else lands verbatim — including multi-byte
-    /// characters, which are copied whole. One undo step.
+    /// characters, which are copied whole. One undo step while
+    /// `undo_depth > 0` and a byte survives the sanitizer; none otherwise.
+    ///
+    /// The kill/yank sequence ends before anything is reserved, so
+    /// `error.OutOfMemory` leaves the line, cursor and undo stack
+    /// unchanged — a snapshot taken for the failed edit is rolled back —
+    /// with that sequence closed. The undo stack's spare capacity may
+    /// have grown.
     ///
     /// `bytes` must not alias the editor's own line (`text()`): the gap is
     /// written after the line may have been reallocated.
@@ -268,14 +334,19 @@ pub const Editor = struct {
     ///
     /// Bracketed paste arrives as ordinary key bytes (the parser consumes
     /// the 200~/201~ markers without an event), so one paste reaches the
-    /// editor as a run of calls; each call is its own undo step and its own
-    /// kill-sequence boundary. A chunk of nothing but control bytes inserts
-    /// nothing and adds no undo step.
+    /// editor as a run of calls; each call is its own undo step while
+    /// `undo_depth > 0` and its own kill-sequence boundary. A chunk of
+    /// nothing but control bytes inserts nothing and adds no undo step.
+    /// Everything `insert` states about `error.OutOfMemory` holds here.
     pub fn paste(self: *Editor, bytes: []const u8) Error!void {
         try self.insert(bytes);
     }
 
-    /// Delete the cluster before the cursor (Emacs `backspace`).
+    /// Delete the cluster before the cursor (Emacs `backspace`). One undo
+    /// step while `undo_depth > 0` and there is a cluster to delete. The
+    /// kill/yank sequence ends before the snapshot is reserved, so
+    /// `error.OutOfMemory` leaves the line, cursor and undo stack
+    /// unchanged with that sequence closed.
     pub fn backspace(self: *Editor) Error!void {
         self.resetKillSequence();
         const at = self.cursorAt();
@@ -288,7 +359,11 @@ pub const Editor = struct {
         self.commitUndo();
     }
 
-    /// Delete the cluster at the cursor (Emacs `delete-char`).
+    /// Delete the cluster at the cursor (Emacs `delete-char`). One undo
+    /// step while `undo_depth > 0` and there is a cluster to delete. The
+    /// kill/yank sequence ends before the snapshot is reserved, so
+    /// `error.OutOfMemory` leaves the line, cursor and undo stack
+    /// unchanged with that sequence closed.
     pub fn deleteForward(self: *Editor) Error!void {
         self.resetKillSequence();
         const at = self.cursorAt();
@@ -301,7 +376,11 @@ pub const Editor = struct {
     }
 
     /// Reset the line to empty (what an app does after submit) and drop
-    /// the scroll window. One undo step when the line held anything.
+    /// the scroll window. One undo step when `undo_depth > 0` and the line
+    /// held anything. The kill/yank sequence and `scroll_col` are reset
+    /// before the snapshot is reserved, so `error.OutOfMemory` leaves the
+    /// line, cursor and undo stack unchanged with the sequence closed and
+    /// the window back at column 0.
     pub fn clear(self: *Editor) Error!void {
         self.resetKillSequence();
         self.yank_span = null;
@@ -362,29 +441,63 @@ pub const Editor = struct {
 
     // Kills and the kill ring.
 
-    /// Kill from the cursor to the end of the line (ctrl-k).
+    /// Kill from the cursor to the end of the line (ctrl-k). One undo
+    /// step while `undo_depth > 0` and there is something to kill.
+    /// `error.OutOfMemory` leaves the line, cursor, undo stack contents,
+    /// ring and kill/yank sequence as they were; the undo stack's spare
+    /// capacity may have grown. The ring is left whole: its push copies
+    /// the killed bytes into the new entry before it drops anything, and
+    /// dropping the oldest entry frees no capacity, so the append that
+    /// follows still fits in what the ring already had and cannot fail.
     pub fn killToEnd(self: *Editor) Error!void {
         try self.killRange(self.cursorAt(), self.line.items.len, true);
     }
 
-    /// Kill from the start of the line to the cursor (ctrl-u).
+    /// Kill from the start of the line to the cursor (ctrl-u). One undo
+    /// step while `undo_depth > 0` and there is something to kill.
+    /// `error.OutOfMemory` leaves the line, cursor, undo stack contents,
+    /// ring and kill/yank sequence as they were; the undo stack's spare
+    /// capacity may have grown. The ring is left whole: its push copies
+    /// the killed bytes into the new entry before it drops anything, and
+    /// dropping the oldest entry frees no capacity, so the append that
+    /// follows still fits in what the ring already had and cannot fail.
     pub fn killToStart(self: *Editor) Error!void {
         try self.killRange(0, self.cursorAt(), false);
     }
 
     /// Kill the word before the cursor: whitespace first, then the word
-    /// (ctrl-w, alt-backspace).
+    /// (ctrl-w, alt-backspace). One undo step while `undo_depth > 0` and
+    /// there is something to kill. `error.OutOfMemory` leaves the line,
+    /// cursor, undo stack contents, ring and kill/yank sequence as they
+    /// were; the undo stack's spare capacity may have grown. The ring is
+    /// left whole: its push copies the killed bytes into the new entry
+    /// before it drops anything, and dropping the oldest entry frees no
+    /// capacity, so the append that follows still fits in what the ring
+    /// already had and cannot fail.
     pub fn killWordBefore(self: *Editor) Error!void {
         try self.killRange(self.wordStartBefore(), self.cursorAt(), false);
     }
 
-    /// Kill from the cursor to the end of the next word (alt-d).
+    /// Kill from the cursor to the end of the next word (alt-d). One undo
+    /// step while `undo_depth > 0` and there is something to kill.
+    /// `error.OutOfMemory` leaves the line, cursor, undo stack contents,
+    /// ring and kill/yank sequence as they were; the undo stack's spare
+    /// capacity may have grown. The ring is left whole: its push copies
+    /// the killed bytes into the new entry before it drops anything, and
+    /// dropping the oldest entry frees no capacity, so the append that
+    /// follows still fits in what the ring already had and cannot fail.
     pub fn killWordForward(self: *Editor) Error!void {
         try self.killRange(self.cursorAt(), self.wordEndAfter(), true);
     }
 
     /// Insert the newest kill at the cursor (ctrl-y) and open a yank
-    /// sequence. Returns false when the ring holds nothing.
+    /// sequence. Returns false when the ring holds nothing. One undo step
+    /// while `undo_depth > 0`. The kill/yank sequence ends before the line
+    /// is reserved, so `error.OutOfMemory` leaves the line, cursor, undo
+    /// stack and ring holding what they held with that sequence closed —
+    /// but that reservation runs first, so a failure at the snapshot may
+    /// have moved the line's bytes, and bytes borrowed from `text()`
+    /// before the call do not survive it.
     pub fn yank(self: *Editor) Error!bool {
         self.resetKillSequence();
         if (self.kill_ring.items.len == 0) return false;
@@ -404,7 +517,13 @@ pub const Editor = struct {
     /// Replace the text the last `yank` inserted with the next-older ring
     /// entry (alt-y). Valid only while the yank sequence is open — any
     /// other operation ends it, exactly like readline. Returns false when
-    /// there is nothing to cycle.
+    /// there is nothing to cycle. One undo step while `undo_depth > 0`.
+    /// The line is reserved before anything else is touched, so
+    /// `error.OutOfMemory` leaves the line, cursor, undo stack, ring and
+    /// yank sequence holding exactly what they held — that reservation
+    /// runs first too, so a failure at the snapshot may have moved the
+    /// line's bytes, and bytes borrowed from `text()` before the call do
+    /// not survive it.
     pub fn yankPop(self: *Editor) Error!bool {
         if (self.action != .yank) return false;
         if (self.kill_ring.items.len <= 1) return false;
@@ -427,8 +546,10 @@ pub const Editor = struct {
     // Undo.
 
     /// Restore the line and cursor from the most recent snapshot. Returns
-    /// false when no snapshot is left. Restoring never allocates: the
-    /// line's capacity only grows.
+    /// false when no snapshot is left. Restoring never allocates — the
+    /// line's capacity only grows — so no path here can fail; the error
+    /// union is kept for uniformity with `yank` and `yankPop`. The
+    /// kill/yank sequence ends either way.
     pub fn undo(self: *Editor) Error!bool {
         self.resetKillSequence();
         self.yank_span = null;
@@ -445,8 +566,10 @@ pub const Editor = struct {
     /// Map an input event to an editor operation; true when the editor
     /// consumed it. Unmapped events (`enter`, `tab`, `escape`, arrows the
     /// caller may want for history, every non-key event) return false.
+    /// On `error.OutOfMemory` the editor is left in the state the bound
+    /// operation documents.
     ///
-    /// Bindings mirror pi-tui's `tui.editor.*` defaults:
+    /// Bindings:
     /// left/ctrl-b and right/ctrl-f move one cluster, alt/ctrl+arrow and
     /// alt-b/alt-f move one word, home/ctrl-a and end/ctrl-e go to the
     /// line ends, backspace deletes backward, delete and ctrl-d delete
@@ -620,7 +743,9 @@ pub const Editor = struct {
     /// sound: `Region` owns the previous frame's text, so it compares its
     /// diff against bytes it snapshotted, never against the line the next
     /// edit overwrites or reallocates. Draw, render and the line stay
-    /// alive across a frame. Allocates nothing and copies nothing.
+    /// alive across a frame. Allocates nothing and copies nothing, and it
+    /// cannot fail: every cell goes through `Buffer.set`, whose error set
+    /// is empty.
     pub fn draw(self: *Editor, buf: *Buffer, x: u16, y: u16, now: Clock) Error!u16 {
         _ = self.advance(now);
         if (y >= buf.height) return 0;

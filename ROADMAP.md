@@ -124,9 +124,14 @@ verdict. The evidence for that baseline:
   grapheme cursor boundary.
 
 No implementation item of this plan is open. `NEXT.md` records the key text
-synthesis contract and explains the advisory `zbc` reports. The latest QA status,
-including the red bottom-row tests, the open width-reflow and height-archive
-risks, and the current gate state, is in
+synthesis contract and explains how to read the analyzer reports.
+[`README.md`](README.md#api-repair-verification) holds the current status:
+the Zig 0.16 API-contract repair, with 801/801 tests recorded in Debug and
+ReleaseSafe, a strict gate still red on triaged analyzer findings with
+nothing suppressed, and no completed current `zbc` run. Those findings are
+classified per site in [`ANALYZER-TRIAGE.json`](ANALYZER-TRIAGE.json). The
+earlier deep-QA record — the red bottom-row tests, the open width-reflow and
+height-archive risks, and the gate state of that pass — is in
 [`README.md`](README.md#post-repair-deep-qa-2026-10-0102).
 
 ## Non-goals

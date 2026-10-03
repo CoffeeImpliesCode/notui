@@ -102,7 +102,7 @@ const Style = @import("../style.zig").Style;
 
 const testing = std.testing;
 
-// ── cells ─────────────────────────────────────────────────────
+// Cells.
 
 /// One terminal cell. A cell nothing ever wrote is NOT a space: it is
 /// the terminal's NULL cell, and telling the two apart is most of what a
@@ -153,7 +153,7 @@ fn cellWidth(cp: u21) u8 {
     return 1;
 }
 
-// ── the terminal ──────────────────────────────────────────────
+// The terminal.
 
 const Model = struct {
     gpa: Allocator,
@@ -245,7 +245,7 @@ const Model = struct {
         for (bytes) |b| try self.byte(b);
     }
 
-    // ── observation ───────────────────────────────────────────
+    // Observation.
 
     /// Append the PRINTED content of row `index`: a NULL cell contributes
     /// nothing, so a printed space and a gap stay distinguishable.
@@ -283,7 +283,7 @@ const Model = struct {
         return index - self.ybase + 1;
     }
 
-    // ── geometry ──────────────────────────────────────────────
+    // Geometry.
 
     /// Apply a window geometry change the way the measured terminal does:
     /// the row count, then the front trim, then the reflow, then the new
@@ -507,7 +507,7 @@ const Model = struct {
         }
     }
 
-    // ── the byte path ─────────────────────────────────────────
+    // The byte path.
 
     fn appendLine(self: *Model) !void {
         var l: Line = .{ .cells = .empty };
@@ -646,7 +646,7 @@ const Model = struct {
         }
     }
 
-    // ── cells ─────────────────────────────────────────────────
+    // Cells.
 
     fn blankAll(l: *Line) void {
         for (l.cells.items) |*c| c.* = .{};
@@ -718,7 +718,12 @@ const Model = struct {
         self.pend[self.pend_len] = b;
         self.pend_len += 1;
         if (self.pend_len < self.pend_need) return;
-        const cp = std.unicode.utf8Decode(self.pend[0..self.pend_need]) catch {
+        const cp = (switch (self.pend_need) {
+            2 => std.unicode.utf8Decode2(self.pend[0..2].*),
+            3 => std.unicode.utf8Decode3(self.pend[0..3].*),
+            4 => std.unicode.utf8Decode4(self.pend[0..4].*),
+            else => unreachable,
+        }) catch {
             self.pend_len = 0;
             return;
         };
@@ -869,7 +874,7 @@ const Rig = struct {
     fn bandTop(self: *const Rig) u16 {
         const rows = self.region.cur.height;
         if (rows == 0 or rows > self.term.rows) return 0;
-        const bottom = @as(usize, self.term.cursorRow());
+        const bottom: usize = self.term.cursorRow();
         if (bottom < rows) return 0;
         return @intCast(bottom - rows + 1);
     }
@@ -933,7 +938,7 @@ const Rig = struct {
     }
 };
 
-// ── fixtures ──────────────────────────────────────────────────
+// Fixtures.
 
 /// 55 ASCII columns then 38 width-two glyphs: 131 columns in one hard
 /// row, the measured native fixture.
@@ -1019,7 +1024,7 @@ const gauge_row: []const u8 = "scan ##########.......... 50%";
 /// into storage the CALLER owns.
 const statusline_tail = "v0.0.0  col {d}";
 
-// ── assertions shared by the tests ────────────────────────────
+// Assertions shared by the tests.
 
 /// The Region and the terminal must agree on where the band is. Every
 /// consumer-visible claim about the live band rests on this one number:
@@ -1321,7 +1326,7 @@ test "native model: the controlled NULL offsets reflow as measured" {
     try testing.expectEqual(@as(usize, 1), far.groupRows(0));
 }
 
-// ── consumer regressions ───────────────────────────────────────
+// Consumer regressions.
 
 test "native: a width round trip keeps one live band and every marker" {
     var rig = try Rig.init(testing.allocator, .{

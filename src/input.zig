@@ -1,21 +1,38 @@
-//! Blocking input reader with split-sequence reassembly.
+//! Input: poll the terminal, assemble split sequences, decode one event.
 //!
-//! The Reader is the only user of the tty read path in the input pipeline:
-//! it polls the tty fd, reads up to 256 bytes per poll, prepends any
-//! previously held-back tail, decodes one Event with Parser.parse, and
-//! holds back the trailing incomplete bytes so a sequence split across
-//! reads (kitty CSI-u, OSC, paste) reassembles instead of leaking its tail
-//! into the stream as literal characters.
+//! `Reader` polls the tty descriptor, reads up to `read_buf_len` bytes per
+//! poll, prepends the tail it held back from the previous read, decodes one
+//! `Event` with `Parser.parse`, and holds the trailing incomplete bytes so a
+//! sequence split across reads reassembles instead of leaking its tail into
+//! the stream as literal characters.
 //!
-//! Adapted from zigzag `input/keyboard.zig` (`incompleteTailLen` verbatim,
-//! split-seq reassembly) and zigzag `terminal/platform/posix.zig`
-//! (`readInput` poll). The bare-ESC disambiguation (hold, then one
-//! non-blocking poll, then flush as Escape) follows zigzag's program-loop
-//! pattern.
+//! Everything is fixed-size: no allocation happens in the input path, so the
+//! reader adds no allocator dependency and no per-event cost.
 //!
-//! Lifetime contract (§3): `Key.text` and `paste` slices point into
-//! Reader-owned scratch and are valid only until the next `next()` call —
-//! apps must copy them into their own arena.
+//! Two bounds are real and both fail closed, never by degrading into
+//! keypresses:
+//!
+//! * An assembled sequence that fills the buffer and still has no terminator
+//!   cannot ever be decoded. The reader drops it and ignores every byte up to
+//!   its terminator, so no payload byte of an oversized sequence is ever
+//!   delivered as a key. Input resumes at the first event after the
+//!   terminator.
+//! * The clipboard decode arena is sized for the buffer: a complete OSC 52
+//!   sequence has to fit the 512-byte assembly buffer to be decoded at all,
+//!   and its base64 payload decodes to well under the 512 bytes the arena
+//!   holds. The two bounds cannot disagree, so the arena is not a limit a
+//!   caller has to reason about.
+//!
+//! Borrowed results: a `key_press`'s `Key.text` and a `paste` point into the
+//! reader's own scratch and are valid only until the next call to `next` or
+//! `nextTimeout`. Copy them into memory the caller owns before returning from
+//! the frame that received them.
+//!
+//! `io` is used for the buffered descriptor reads; readiness itself is a
+//! native `posix.poll` on the tty's descriptor, and a bare ESC is resolved by
+//! a zero-timeout poll. A `std.Io` implementation that does not own a real
+//! descriptor cannot drive this reader, and a cancelation request does not
+//! interrupt the poll: the wait ends at its own timeout.
 
 const std = @import("std");
 const posix = std.posix;
@@ -24,37 +41,117 @@ const Key = @import("Key.zig");
 const Parser = @import("Parser.zig");
 const Tty = @import("tty.zig").Tty;
 
-/// Fresh bytes read per poll (vaxis/zigzag 256B read).
+/// Bytes read per poll.
 const read_buf_len = 256;
-/// Fixed assembly/hold-back capacity (§5: fixed 512B pending buffer).
+/// The fixed assembly and hold-back capacity. A sequence that fills it and
+/// still has no terminator is dropped whole: see the module contract.
 const buf_len = 512;
 
+/// What ends a sequence the reader is discarding.
+const DiscardKind = enum {
+    /// An OSC: `ESC \` (ST) or BEL. BEL terminates an OSC only, so a BEL
+    /// inside another string is payload and not the end of it.
+    osc,
+    /// A DCS, APC, PM or SOS string: `ESC \` (ST) and nothing else.
+    control_string,
+    /// A CSI or SS3 parameter run: any byte in `0x40..=0x7E`.
+    final_byte,
+
+    /// The kind of sequence `bytes`, the tail of one too large to assemble,
+    /// belongs to. A tail that does not start with a recognized introducer is
+    /// treated as a parameter run: the reader drops bytes until one looks
+    /// final, and never decodes anything in between.
+    fn of(bytes: []const u8) DiscardKind {
+        if (bytes.len >= 2 and bytes[0] == 0x1b) {
+            return switch (bytes[1]) {
+                ']' => .osc,
+                'P', '_', '^', 'X', '|' => .control_string,
+                else => .final_byte,
+            };
+        }
+        return .final_byte;
+    }
+};
+
+/// The bytes being dropped while the reader waits for one sequence's
+/// terminator.
+const Discard = struct {
+    kind: DiscardKind,
+    /// An `ESC` at the end of the bytes already dropped, so an `ESC \`
+    /// terminator split across two reads is still recognised.
+    after_escape: bool = false,
+
+    /// Drop `bytes` as part of the discarded sequence and report how many of
+    /// them the terminator ends: null while the sequence is still open, in
+    /// which case every byte is dropped. A count is the terminator's own
+    /// position plus one, so the caller keeps everything after it — input that
+    /// arrived in the same read is ordinary input again, not part of the
+    /// discarded payload.
+    fn scan(self: *Discard, bytes: []const u8) ?usize {
+        switch (self.kind) {
+            .osc, .control_string => {
+                for (bytes, 0..) |b, i| {
+                    if (self.after_escape) {
+                        if (b == '\\') return i + 1;
+                        self.after_escape = b == 0x1b;
+                    } else {
+                        self.after_escape = b == 0x1b;
+                    }
+                    // BEL ends an OSC; inside any other string it is payload.
+                    if (b == 0x07 and self.kind == .osc) return i + 1;
+                }
+            },
+            .final_byte => {
+                for (bytes, 0..) |b, i| {
+                    if (b >= 0x40 and b <= 0x7e) return i + 1;
+                }
+            },
+        }
+        return null;
+    }
+};
+
+/// Decodes one event at a time from a terminal's input.
+///
+/// The reader owns its own scratch and allocates nothing: it holds the tty by
+/// pointer, and that tty must outlive it. Everything a decoded event borrows —
+/// `Key.text`, a clipboard payload — points into this value and is invalidated
+/// by the next `next` or `nextTimeout` call. One reader belongs to one thread;
+/// it has no lock and takes none.
+///
+/// It must also stay at one address once it has been used. The clipboard arena
+/// is created over `paste_buf`, which is a field of this value, so a reader
+/// moved or copied after a decode would hand the parser an arena over the old
+/// copy's buffer. Give it a stable home — a field of a longer-lived value, or
+/// an allocation — before the first call.
 pub const Reader = struct {
-    /// The tty this reader pulls input from. The reader is the only user
-    /// of the tty read path.
+    /// The tty this reader pulls input from. The reader is the only user of
+    /// the tty read path. Borrowed: the tty must outlive the reader.
     tty: *Tty,
 
-    /// Decodes one event from the assembled input (the parser's `buf`
-    /// scratch lives here, so `Key.text` from CSI text fields points into
-    /// the reader and stays stable across reads).
+    /// The decoder. Its `buf` scratch lives here, so text a CSI field decodes
+    /// points into the reader and survives until the next call.
     parser: Parser = .{},
 
-    /// Assembly area: the held tail prepended to fresh reads (zigzag
-    /// `input_buf` pattern).
+    /// The assembly area: the held tail prepended to each fresh read.
     scratch: [buf_len]u8 = undefined,
-    /// Bytes held back from previous reads — an incomplete escape/CSI/SS3
-    /// tail, a truncated UTF-8 sequence, and/or complete-but-unparsed
-    /// leftover — prepended to the next read (zigzag `input_pending`
-    /// pattern).
+    /// Bytes held back from previous reads — an incomplete escape, control
+    /// string or UTF-8 tail, and/or complete-but-unparsed leftover —
+    /// prepended to the next read. Cleared when a sequence is discarded.
     pending: [buf_len]u8 = undefined,
     pending_len: usize = 0,
 
-    /// Fixed arena for OSC 52 paste decode, reset before each parse. The
-    /// decoded `paste` slice is valid only until the next `next()` call
-    /// (§3); no heap allocation in the input path.
+    /// The fixed arena clipboard payloads decode into, reset before each
+    /// parse. A decoded payload borrows it and dies at the next parse. It is
+    /// sized so that every sequence the reader can assemble also decodes: the
+    /// assembly bound is what limits a payload, not this buffer.
     paste_buf: [buf_len]u8 = undefined,
     paste_fba: std.heap.FixedBufferAllocator = undefined,
     paste_ready: bool = false,
+
+    /// Set while the bytes of one over-long sequence are being dropped; null
+    /// while the reader is decoding normally.
+    discard: ?Discard = null,
 
     /// The outcome of decoding one assembled buffer.
     const DecodeOutcome = union(enum) {
@@ -65,23 +162,68 @@ pub const Reader = struct {
         consumed,
     };
 
+    /// A reader over `tty`, which must outlive it.
+    ///
+    /// `init` returns by value, so the result must reach its final home before
+    /// the first `next` or `nextTimeout`; see the address-stability rule on the
+    /// type.
     pub fn init(tty: *Tty) Reader {
         return .{ .tty = tty };
     }
 
-    /// Blocking read of the next event. Ctrl+C arrives as a normal
-    /// `key_press` (the library never quits); `Key.text`/`paste` are valid
-    /// only until the next call.
+    /// The next event, blocking until one arrives or the input ends.
+    ///
+    /// `error.EndOfStream` when the input ended with no event left; anything
+    /// the descriptor read or the parser reports propagates unchanged.
+    ///
+    /// EOF is final for this descriptor. Later calls keep reporting it rather than
+    /// resuming a discarded sequence or exposing its payload as key events.
+    ///
+    /// Ctrl+C arrives as an ordinary `key_press`: this library never quits by
+    /// itself. Everything the returned event borrows is valid until the next
+    /// call.
     pub fn next(self: *Reader) !Event {
         return (try self.nextTimeout(-1)) orelse return error.EndOfStream;
     }
 
-    /// Read the next event, polling with a deadline. Returns null on
-    /// timeout without consuming input; a tail held from a previous read
-    /// survives the timeout, so a sequence split across a tick boundary
-    /// still reassembles.
+    /// The next event, waiting at most `timeout_ms` milliseconds.
+    /// `timeout_ms` of -1 waits indefinitely, 0 polls once.
+    ///
+    /// Returns null when the wait expired with no event, without consuming
+    /// input: bytes held from a previous read survive the timeout, so a
+    /// sequence split across a frame boundary still reassembles. While an
+    /// over-long sequence is being discarded the same holds — a timeout
+    /// returns null and the discard keeps dropping.
+    ///
+    /// `error.EndOfStream` and any read or parse failure mean the same as in `next`.
+    /// Everything the returned event borrows is valid until the next call.
     pub fn nextTimeout(self: *Reader, timeout_ms: i32) !?Event {
         while (true) {
+            // Bytes of one over-long sequence are being dropped: wait, drop,
+            // and watch for its terminator. Nothing here is decoded, so no
+            // payload byte can reach the caller as a key.
+            if (self.discard) |*d| {
+                if (!try self.pollFd(timeout_ms)) return null;
+                var chunk: [read_buf_len]u8 = undefined;
+                const n = try self.tty.read(&chunk);
+                if (n == 0) {
+                    // The input ended inside a discarded sequence: there is
+                    // nothing left to resynchronize on.
+                    self.discard = null;
+                    return error.EndOfStream;
+                }
+                if (d.scan(chunk[0..n])) |used| {
+                    // The terminator ended the discarded sequence. Bytes after
+                    // it arrived in the same read and are ordinary input, so
+                    // they go back to the decoder instead of being dropped.
+                    self.discard = null;
+                    const rest = chunk[used..n];
+                    self.pending_len = rest.len;
+                    @memcpy(self.pending[0..rest.len], rest);
+                }
+                continue;
+            }
+
             // Complete data already held (leftover from a previous read)
             // decodes without waiting on the tty.
             const held_is_bare_esc = self.pending_len == 1 and self.pending[0] == 0x1b;
@@ -110,19 +252,14 @@ pub const Reader = struct {
 
             // Read up to 256 fresh bytes and prepend the held tail.
             var fresh: [read_buf_len]u8 = undefined;
-            var max_fresh = @min(fresh.len, self.scratch.len - self.pending_len);
+            const max_fresh = @min(fresh.len, self.scratch.len - self.pending_len);
             if (max_fresh == 0) {
-                // The held-back data fills the assembly buffer and is still
-                // incomplete (an over-long sequence, e.g. a huge OSC 52
-                // payload). Drop the oldest bytes so the stream keeps
-                // flowing; the sequence cannot reassemble within the fixed
-                // buffers (documented graceful degradation).
-                @memmove(
-                    self.pending[0 .. self.pending_len - fresh.len],
-                    self.pending[fresh.len..self.pending_len],
-                );
-                self.pending_len -= fresh.len;
-                max_fresh = @min(fresh.len, self.scratch.len - self.pending_len);
+                // The held tail fills the assembly buffer and still has no
+                // terminator, so it can never reassemble. Drop the whole
+                // sequence and every byte up to its terminator: keeping its
+                // prefix would decode the rest of its payload as keys.
+                self.beginDiscard();
+                continue;
             }
             const n_read = try self.tty.read(fresh[0..max_fresh]);
             if (n_read == 0) {
@@ -147,6 +284,20 @@ pub const Reader = struct {
                 .consumed, .incomplete => continue,
             }
         }
+    }
+
+    /// Give up on the sequence held in `pending`: it fills the fixed
+    /// assembly buffer and cannot ever complete. Drop it and everything up
+    /// to its terminator, then carry on reading the stream behind it.
+    fn beginDiscard(self: *Reader) void {
+        const kind = DiscardKind.of(self.pending[0..self.pending_len]);
+        std.log.scoped(.notui_input).warn(
+            "input sequence exceeded {d} bytes and was dropped; its bytes " ++
+                "are ignored until the terminator",
+            .{self.pending.len},
+        );
+        self.discard = .{ .kind = kind };
+        self.pending_len = 0;
     }
 
     /// Poll the tty fd for readable input. Returns false on timeout. The
@@ -546,4 +697,141 @@ test "input: EOF on a closed pipe" {
     try expectKeyPress(try reader.next(), 'a', .{});
     pipe.closeWrite();
     try testing.expectError(error.EndOfStream, reader.next());
+}
+
+test "input: an over-long sequence drops its payload instead of typing it" {
+    var pipe = try Pipe.init();
+    defer pipe.deinit();
+    var tty = pipe.tty();
+    var reader = Reader.init(&tty);
+
+    // A clipboard payload far larger than the fixed assembly buffer, with no
+    // terminator yet: the sequence can never be assembled.
+    const head = "\x1b]52;c;";
+    var seq: [head.len + 1024]u8 = undefined;
+    @memcpy(seq[0..head.len], head[0..]);
+    @memset(seq[head.len..], 'p');
+    try pipe.write(&seq);
+
+    // Not one of those bytes arrives as a keypress; the reader is holding
+    // nothing and offering nothing.
+    try testing.expectEqual(@as(?Event, null), try reader.nextTimeout(50));
+    try testing.expect(reader.discard != null);
+
+    // The rest of the payload, then the terminator: all of it is dropped, and
+    // the reader stops discarding only at the terminator.
+    try pipe.write(&seq);
+    try pipe.write("\x1b\\");
+    try testing.expectEqual(@as(?Event, null), try reader.nextTimeout(100));
+    try testing.expect(reader.discard == null);
+
+    // The next real key is delivered normally.
+    try pipe.write("z");
+    try expectKeyPress((try reader.nextTimeout(100)).?, 'z', .{});
+}
+
+test "input: an over-long parameter run is dropped up to its final byte" {
+    var pipe = try Pipe.init();
+    defer pipe.deinit();
+    var tty = pipe.tty();
+    var reader = Reader.init(&tty);
+
+    // A CSI introducer followed by parameters and no final byte: the reader
+    // cannot know where the run ends, so it drops bytes until one is final.
+    var params: [600]u8 = undefined;
+    params[0] = 0x1b;
+    params[1] = '[';
+    @memset(params[2..], ';');
+    try pipe.write(&params);
+    try testing.expectEqual(@as(?Event, null), try reader.nextTimeout(50));
+    try testing.expect(reader.discard != null);
+
+    // The final byte ends the discarded sequence. It is consumed rather than
+    // decoded, and input resumes behind it.
+    try pipe.write("m");
+    try testing.expectEqual(@as(?Event, null), try reader.nextTimeout(100));
+    try testing.expect(reader.discard == null);
+    try pipe.write("z");
+    try expectKeyPress((try reader.nextTimeout(100)).?, 'z', .{});
+}
+
+test "input: a discarded sequence ends at the end of the input" {
+    var pipe = try Pipe.init();
+    defer pipe.deinit();
+    var tty = pipe.tty();
+    var reader = Reader.init(&tty);
+
+    // A payload with no terminator, and then the writer closes: there is
+    // nothing left to resynchronize on, and the reader says so instead of
+    // hanging on a terminator that will never arrive.
+    const head = "\x1b]52;c;";
+    var seq: [head.len + 600]u8 = undefined;
+    @memcpy(seq[0..head.len], head[0..]);
+    @memset(seq[head.len..], 'p');
+    try pipe.write(&seq);
+    try testing.expectEqual(@as(?Event, null), try reader.nextTimeout(50));
+    pipe.closeWrite();
+    try testing.expectError(error.EndOfStream, reader.next());
+
+    // The residue contract, observed instead of inspected: the end of input
+    // is final. Both entry points keep reporting it — the reader does not
+    // resume the discard and wait on a terminator that will never arrive, and
+    // no byte of the dropped payload comes back as a key.
+    try testing.expectError(error.EndOfStream, reader.next());
+    try testing.expectError(error.EndOfStream, reader.nextTimeout(10));
+}
+
+test "input: input arriving with the terminator is not discarded with it" {
+    var pipe = try Pipe.init();
+    defer pipe.deinit();
+    var tty = pipe.tty();
+    var reader = Reader.init(&tty);
+
+    // Put the reader into a discard with a control string already open.
+    const head = "\x1b]52;c;";
+    var seq: [head.len + 600]u8 = undefined;
+    @memcpy(seq[0..head.len], head[0..]);
+    @memset(seq[head.len..], 'p');
+    try pipe.write(&seq);
+    try testing.expectEqual(@as(?Event, null), try reader.nextTimeout(50));
+    try testing.expect(reader.discard != null);
+
+    // The terminator and a real key arrive in one read. Only the bytes up to
+    // the terminator belong to the discarded sequence; the key behind it is
+    // ordinary input and must still be delivered.
+    try pipe.write("\x1b\\z");
+    try expectKeyPress((try reader.nextTimeout(100)).?, 'z', .{});
+    try testing.expect(reader.discard == null);
+}
+
+test "input: a BEL inside a control string is payload, not its terminator" {
+    var pipe = try Pipe.init();
+    defer pipe.deinit();
+    var tty = pipe.tty();
+    var reader = Reader.init(&tty);
+
+    // An APC string longer than the assembly buffer. BEL ends an OSC and
+    // nothing else, so a BEL in this payload must not be mistaken for the
+    // end of the sequence and release the payload behind it as keys.
+    const head = "\x1b_Gi=9931;";
+    var seq: [head.len + 1024]u8 = undefined;
+    @memcpy(seq[0..head.len], head[0..]);
+    @memset(seq[head.len..], 'p');
+    seq[700] = 0x07; // past the assembly buffer, so the discard sees it
+    try pipe.write(&seq);
+    try testing.expectEqual(@as(?Event, null), try reader.nextTimeout(50));
+    try testing.expect(reader.discard != null);
+
+    // The reader is still discarding after the BEL, so this key is dropped
+    // with the payload it arrived inside of.
+    try pipe.write("z");
+    try testing.expectEqual(@as(?Event, null), try reader.nextTimeout(50));
+    try testing.expect(reader.discard != null);
+
+    // ST really does end it, and input resumes.
+    try pipe.write("\x1b\\");
+    try testing.expectEqual(@as(?Event, null), try reader.nextTimeout(100));
+    try testing.expect(reader.discard == null);
+    try pipe.write("z");
+    try expectKeyPress((try reader.nextTimeout(100)).?, 'z', .{});
 }

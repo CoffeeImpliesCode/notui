@@ -1,17 +1,29 @@
-//! Live capability detection: sequential terminal queries, replies decoded
-//! through the parser (kitty keyboard, OSC 11) plus tiny DECRPM/DA1
-//! splitters. No terminfo. A failed or timed-out query leaves its feature
-//! off — never an error (queries are best-effort).
+//! Live terminal capability detection: sequential queries whose replies are
+//! decoded through the parser, plus small DECRPM and DA1 splitters. No
+//! terminfo database, and nothing cached between sessions.
 //!
-//! Adapted from zigzag `terminal/terminal.zig` query fns (DA1 parse,
-//! parseMode2027Response, drainInput) and libvaxis `ctlseqs.zig` query
-//! strings. The tty parameter is duck-typed (`anytype`) so detect can be
-//! driven against a scripted fake in tests; it only needs `io`, `fd`,
-//! `read` and `writer`.
+//! Detection is best-effort by design. A query that times out or is never
+//! answered leaves its feature off and is not an error, because a terminal
+//! that answers nothing is a terminal an app must still run on. The one thing
+//! that is unconditional is the cleanup: `Capabilities.restore` disables every
+//! mode a session may have enabled, including the kitty keyboard push that
+//! detection always sends.
+//!
+//! `detect` takes the terminal as `anytype` so a scripted fake can drive it in
+//! tests; it needs `io`, `fd`, `read` and `writer`, which `Tty` provides. The
+//! queries go out through the writer, the replies are polled with
+//! `posix.poll` on the descriptor and read from it, and the deadline is
+//! measured on `io` — so the implementation behind `io` must own a real
+//! descriptor, and cancelling the surrounding `Io` does not interrupt the
+//! polls.
+//!
+//! The allocator passed to `detect` owns every clipboard payload a reply may
+//! decode. Payloads no query asked for are released before the call returns.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const posix = std.posix;
+const Event = @import("event.zig").Event;
 const Capability = @import("event.zig").Capability;
 const ColorProfile = @import("color.zig").ColorProfile;
 
@@ -22,36 +34,51 @@ const Parser = @import("Parser.zig");
 /// Per-query deadline in milliseconds.
 const query_timeout_ms: u64 = 250;
 
-/// Detected terminal capabilities.
+/// What the terminal answered when it was asked. Every field defaults to
+/// false, and a query that times out or fails leaves its feature off: a
+/// capability is claimed only on a reply that actually arrived.
+///
+/// `color` is the exception to the "off means false" reading: it names a
+/// profile, and the default is the one every terminal can render.
 pub const Capabilities = struct {
+    /// The color profile to render with. `.truecolor` only when a DA1 or
+    /// OSC 11 reply reported truecolor support; `.ansi256` otherwise.
     color: ColorProfile = .ansi256,
+    /// Whether the terminal answered the kitty keyboard push (`CSI > 1 u`).
     kitty_keyboard: bool = false,
+    /// Whether the terminal answered the kitty graphics probe with an
+    /// accepted response; an error response leaves it off.
     kitty_graphics: bool = false,
+    /// Truecolor by cell size (sixel pixels). Never queried yet, so it stays
+    /// false until a probe is added.
     sgr_pixels: bool = false,
+    /// Whether bracketed paste is enabled. Never queried yet: bracketed-paste
+    /// tags are consumed and their bytes arrive as ordinary keys.
     bracketed_paste: bool = false,
+    /// Whether synchronized output (DEC 2026) is supported. Decides whether an
+    /// interactive session wraps each frame in the envelope.
     sync_output: bool = false,
+    /// Whether the terminal reported the unicode-core mode (DEC 2027) as
+    /// supported. Recorded, never consulted: every toolkit width measurement
+    /// goes through zg's Unicode 16 tables (`src/width.zig`), so this reports
+    /// the mode and never selects a legacy-width renderer.
     unicode_core: bool = false,
+    /// Whether 24-bit color was reported, by DA1 param 24 or by an OSC 11
+    /// background reply.
     rgb: bool = false,
+    /// Whether focus reporting is enabled. Never queried yet.
     focus_events: bool = false,
 
-    /// Width measurement strategy. v0 returns `.zg_unicode` unless the
-    /// ?2027 unicode-core query reports unsupported (then
-    /// `.wcwidth_legacy`); `.no_zwj` is reserved (architecture §3 probe
-    /// hook).
-    pub const WidthPolicy = enum { zg_unicode, wcwidth_legacy, no_zwj };
-
-    pub fn widthPolicy(self: *const Capabilities) WidthPolicy {
-        return if (self.unicode_core) .zg_unicode else .wcwidth_legacy;
-    }
-
-    /// Emit the disable sequences for every terminal mode a notui session
-    /// may have enabled, returning the user's terminal to its pre-app
-    /// state. Unconditional: each sequence is a no-op on terminals where
-    /// the mode was never on, and the kitty keyboard push (`>1u`) that
-    /// `detect()` always sends must ALWAYS be popped — even when its
-    /// reply was missed, a missed reply would otherwise leave the mode
-    /// enabled (the "terminal needs a hard reset after exit" failure).
-    /// Call after `Region.exit`, before `Tty.restore`.
+    /// Write the disable sequence for every terminal mode a session may have
+    /// turned on, returning the terminal to its pre-session state.
+    ///
+    /// Unconditional: each sequence is a no-op where the mode was never on,
+    /// and the kitty keyboard push `detect` always sends must always be
+    /// popped — a missed reply would otherwise leave that mode enabled. Call
+    /// it after `Region.exit` and before `Tty.restore`.
+    ///
+    /// `w` stays the caller's; the writes stop at the first failure with
+    /// whatever the writer reports, leaving the rest of the cleanup unwritten.
     pub fn restore(self: *const Capabilities, w: anytype) !void {
         _ = self;
         try w.writeAll("\x1b[<u"); // kitty keyboard: pop
@@ -63,9 +90,27 @@ pub const Capabilities = struct {
         try w.writeAll("\x1b[?25h"); // cursor: show (idempotent with Region.exit)
     }
 
-    /// Sequential live queries (DA1, ?2026 sync, ?2027 unicode core,
-    /// kitty keyboard, kitty graphics, OSC 11 background) with a
-    /// per-query deadline.
+    /// Ask the terminal what it supports and return what it answered: the
+    /// primary device attributes, synchronized output, unicode core, the
+    /// kitty keyboard, kitty graphics and the OSC 11 background, in that order,
+    /// each with its own deadline (`query_timeout_ms`, 250 ms).
+    ///
+    /// `tty` is duck-typed and must provide `io`, `fd`, `reader`-free `read`
+    /// and `writer`; `Tty` satisfies it. Queries are written through `tty`'s
+    /// writer, replies are polled with `posix.poll` on `tty.fd.handle` and
+    /// read with `tty.read`, and the deadline is measured on `tty.io`. An
+    /// implementation whose `io` owns no real descriptor cannot drive
+    /// detection, and a cancelation request does not interrupt the polls: the
+    /// call ends on its own deadlines, at most six of them.
+    ///
+    /// `alloc` owns every clipboard payload the replies may decode; the ones
+    /// no query asked for are released before the call returns. `parser`
+    /// keeps its decode scratch for the whole call, so it must live as long.
+    ///
+    /// A query that times out or gets no reply leaves its feature off and is
+    /// not an error. Only a failed query write propagates. The kitty keyboard
+    /// push is sent even when its reply is missed, which is why `restore` pops
+    /// it unconditionally.
     pub fn detect(alloc: std.mem.Allocator, tty: anytype, parser: *Parser) !Capabilities {
         return detectWithTimeout(alloc, tty, parser, query_timeout_ms);
     }
@@ -102,8 +147,8 @@ const ScanResult = union(enum) {
 fn detectWithTimeout(alloc: std.mem.Allocator, tty: anytype, parser: *Parser, timeout_ms: u64) !Capabilities {
     var caps: Capabilities = .{};
 
-    // 1. Primary DA: truecolor (param 24) sets `rgb`. The sixel param (4)
-    //    is scanned but unused — §5 has no sixel field.
+    // 1. Primary DA: truecolor (param 24) sets `rgb`. The sixel param (4) is
+    //    left unmatched, because no capability here claims sixel.
     ttyDrainInput(tty);
     {
         const r = try queryScan(.da1, 0, alloc, tty, parser, "\x1b[c", timeout_ms);
@@ -127,7 +172,7 @@ fn detectWithTimeout(alloc: std.mem.Allocator, tty: anytype, parser: *Parser, ti
         }
     }
 
-    // 3. Unicode core (?2027) — drives WidthPolicy.
+    // 3. Unicode core (?2027) — recorded; no toolkit width depends on it.
     ttyDrainInput(tty);
     {
         const r = try queryScan(.decrpm, 2027, alloc, tty, parser, "\x1b[?2027$p", timeout_ms);
@@ -250,25 +295,42 @@ fn queryScan(
 }
 
 /// Decode a capability reply through the parser: the kitty keyboard reply
-/// (CSI > flags ; … u) parses as `Event.cap`.
+/// (`CSI > flags ; … u`) and the kitty graphics reply both parse as
+/// `Event.cap`.
+///
+/// A terminal may answer a capability query with anything at all, including
+/// a clipboard payload. The parser allocated that payload from `alloc`, and
+/// this scanner does not hand it to anyone, so it releases it here rather
+/// than letting the session leak it.
 fn scanCapEvent(alloc: std.mem.Allocator, bytes: []const u8, parser: *Parser, want: Capability) bool {
     if (bytes.len == 0) return false;
     const result = parser.parse(bytes, alloc) catch return false;
-    if (result.event) |e| {
-        if (e == .cap and e.cap == want) return true;
-    }
+    const ev = result.event orelse return false;
+    if (ev == .cap and ev.cap == want) return true;
+    releaseIgnoredPayload(alloc, ev);
     return false;
 }
 
-/// Decode an OSC 11 background-color reply through the parser: it parses
-/// as `Event.color_report` with kind osc11.
+/// Decode an OSC 11 background-color reply through the parser: it parses as
+/// `Event.color_report` with kind `osc11`. An unexpected event is released
+/// exactly as in `scanCapEvent`.
 fn scanOsc11Report(alloc: std.mem.Allocator, bytes: []const u8, parser: *Parser) bool {
     if (bytes.len == 0) return false;
     const result = parser.parse(bytes, alloc) catch return false;
-    if (result.event) |e| {
-        if (e == .color_report and e.color_report.kind == .osc11) return true;
-    }
+    const ev = result.event orelse return false;
+    if (ev == .color_report and ev.color_report.kind == .osc11) return true;
+    releaseIgnoredPayload(alloc, ev);
     return false;
+}
+
+/// Give back the memory of an event a query did not ask for. Only a clipboard
+/// payload owns anything, and the parser allocated it from `alloc` — the same
+/// allocator the caller handed to `detect`.
+fn releaseIgnoredPayload(alloc: std.mem.Allocator, ev: Event) void {
+    switch (ev) {
+        .paste => |text| alloc.free(text),
+        else => {},
+    }
 }
 
 /// True while `timeout_ms` has not elapsed since `start` (zigzag
@@ -406,13 +468,6 @@ test "caps: parser decodes OSC 11 reply as color_report (rgbFromSpec integration
     }
 }
 
-test "caps: widthPolicy" {
-    var c: Capabilities = .{};
-    try std.testing.expectEqual(Capabilities.WidthPolicy.wcwidth_legacy, c.widthPolicy());
-    c.unicode_core = true;
-    try std.testing.expectEqual(Capabilities.WidthPolicy.zg_unicode, c.widthPolicy());
-}
-
 test "caps: restore emits the full unconditional cleanup" {
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
@@ -449,7 +504,7 @@ test "caps: detect assembles capabilities from scripted replies" {
     try fake.init(io, &script);
     defer fake.deinit();
 
-    var caps = try Capabilities.detect(std.testing.allocator, &fake, &parser);
+    const caps = try Capabilities.detect(std.testing.allocator, &fake, &parser);
     try std.testing.expect(caps.rgb);
     try std.testing.expectEqual(ColorProfile.truecolor, caps.color);
     try std.testing.expect(caps.sync_output);
@@ -460,8 +515,6 @@ test "caps: detect assembles capabilities from scripted replies" {
     try std.testing.expect(!caps.sgr_pixels);
     try std.testing.expect(!caps.bracketed_paste);
     try std.testing.expect(!caps.focus_events);
-    // ?2027 said no ⇒ legacy width
-    try std.testing.expectEqual(Capabilities.WidthPolicy.wcwidth_legacy, caps.widthPolicy());
 
     // queries were written in order, one per reply
     try std.testing.expectEqualStrings(
@@ -470,7 +523,7 @@ test "caps: detect assembles capabilities from scripted replies" {
     );
 }
 
-test "caps: detect with no unicode core keeps zg_unicode off and defaults" {
+test "caps: detect reads each DECRPM reply into its own capability" {
     const io = std.testing.io;
     var parser: Parser = .{};
     const script = [_][]const u8{
@@ -485,10 +538,9 @@ test "caps: detect with no unicode core keeps zg_unicode off and defaults" {
     try fake.init(io, &script);
     defer fake.deinit();
 
-    var caps = try Capabilities.detect(std.testing.allocator, &fake, &parser);
+    const caps = try Capabilities.detect(std.testing.allocator, &fake, &parser);
     try std.testing.expect(!caps.sync_output);
     try std.testing.expect(caps.unicode_core);
-    try std.testing.expectEqual(Capabilities.WidthPolicy.zg_unicode, caps.widthPolicy());
 }
 
 test "caps: kitty-graphics error reply leaves the cap off" {
@@ -513,6 +565,32 @@ test "caps: kitty-graphics error reply leaves the cap off" {
     try std.testing.expect(caps.rgb);
 }
 
+test "caps: a stray clipboard payload in a query window is released" {
+    const io = std.testing.io;
+    var parser: Parser = .{};
+    // A terminal may answer a capability query with anything, including an
+    // OSC 52 paste. The parser allocates the decoded payload from the
+    // allocator `detect` was given, and no query asked for it, so it must be
+    // released: `std.testing.allocator` reports the leak at the end of this
+    // test if it is not.
+    const script = [_][]const u8{
+        "\x1b[?1;2;4;6;22;24c",
+        "\x1b[?2026;1$y",
+        "\x1b[?2027;1$y",
+        "\x1b]52;c;b3NjNTIgcGFzdGU=\x1b\\", // stray payload, kitty-keyboard window
+        "\x1b_Gi=9931;ENOENT:bad\x1b\\",
+        "\x1b]52;c;b3NjNTIgcGFzdGU=\x1b\\", // stray payload, OSC 11 window
+    };
+    var fake: FakeTty = undefined;
+    try fake.init(io, &script);
+    defer fake.deinit();
+
+    const caps = try detectWithTimeout(std.testing.allocator, &fake, &parser, 20);
+    // Neither window read the payload as its own reply.
+    try std.testing.expect(!caps.kitty_keyboard);
+    try std.testing.expectEqual(ColorProfile.truecolor, caps.color);
+}
+
 test "caps: timed-out queries leave defaults, no hang" {
     const io = std.testing.io;
     var parser: Parser = .{};
@@ -521,14 +599,13 @@ test "caps: timed-out queries leave defaults, no hang" {
     try fake.init(io, &script);
     defer fake.deinit();
 
-    var caps = try detectWithTimeout(std.testing.allocator, &fake, &parser, 20);
+    const caps = try detectWithTimeout(std.testing.allocator, &fake, &parser, 20);
     try std.testing.expect(!caps.rgb);
     try std.testing.expectEqual(ColorProfile.ansi256, caps.color);
     try std.testing.expect(!caps.sync_output);
     try std.testing.expect(!caps.unicode_core);
     try std.testing.expect(!caps.kitty_keyboard);
     try std.testing.expect(!caps.kitty_graphics);
-    try std.testing.expectEqual(Capabilities.WidthPolicy.wcwidth_legacy, caps.widthPolicy());
 }
 
 // ── scripted fake tty ────────────────────────────

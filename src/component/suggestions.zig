@@ -1,41 +1,45 @@
 //! Suggestions: a selectable completion-candidate list drawn below a
-//! point (suggestion-ui-contract.md §2). Rows are drawn at (x, y),
-//! (x, y+1), … up to `max_rows`, each width-truncated at a grapheme
-//! boundary with the ellipsis marker; the selected row is drawn with
-//! `selected_style` (default: reverse video). Scrolls a window around
-//! `selected` when candidates exceed `max_rows` (the zigzag
-//! `ensureVisible` rule, list.zig:341-344). Zero-alloc draw: truncation
-//! writes to the caller-owned `scratch` only (the borrow model,
-//! baseui-contract.md §3).
+//! point. Rows are drawn at (x, y), (x, y+1), … up to `max_rows`, each
+//! width-truncated at a grapheme boundary with the ellipsis marker;
+//! the selected row is drawn with `selected_style`. When candidates
+//! exceed `max_rows` the window scrolls to keep `selected` visible.
+//!
+//! A drawn cell borrows the bytes of the candidate it shows, so the
+//! visible rows are copied into `scratch`, a caller-owned
+//! `std.ArrayList(u8)`. `scratch` is REQUIRED and must not be shared
+//! between components — two popups in one frame would overwrite each
+//! other's rows — and the caller keeps it alive and unmodified until
+//! the buffer that borrows it has been rendered. `draw` allocates only
+//! to grow it, through its `alloc` argument, which is the allocator
+//! that owns the scratch's memory and must stay the same for the
+//! component's lifetime.
 //!
 //! `setItemsFuzzy` binds the list to the fuzzy matcher (fuzzy.zig): it
 //! re-ranks `items` for a query into a caller-owned buffer and points
 //! `candidates` at the filled prefix, keeping the selected ITEM pinned
-//! when the reorder moves it. The whole path is allocation-free, like
-//! the draw path — the result buffer is the caller's.
+//! when the reorder moves it. That path allocates nothing — the result
+//! buffer is the caller's — and the candidate strings stay
+//! caller-owned, so `candidates` must not point into `scratch`.
 
 const std = @import("std");
 const Buffer = @import("../buffer.zig").Buffer;
 const Style = @import("../style.zig").Style;
 const Width = @import("../width.zig");
 const Clock = @import("component.zig").Clock;
+const fitPrefixLen = Width.fitPrefixLen;
 const Fuzzy = @import("fuzzy.zig");
-
-/// Shared zero-config scratch; only written when a default-configured
-/// Suggestions truncates (single-threaded UI; callers that care pass their
-/// own scratch and allocator — the Text pattern, src/component/text.zig:11-13).
-var default_scratch: std.ArrayList(u8) = .empty;
 
 /// A selectable completion-candidate list drawn below a point. Rows are
 /// drawn at (x, y), (x, y+1), … up to `max_rows`, each width-truncated at a
 /// grapheme boundary with the ellipsis marker; the selected row is drawn
-/// with `selected_style` (default: reverse video). Scrolls a window around
-/// `selected` when candidates exceed `max_rows` (the zigzag `ensureVisible`
-/// rule, list.zig:341-344). Zero-alloc draw: truncation writes to `scratch`
-/// only. Candidates MUST NOT contain '\n' (a completion is one symbol); the
-/// draw splits scratch on '\n' to find row boundaries. When the fuzzy
-/// path runs, `candidates` is the derived view `setItemsFuzzy` points
-/// at the caller's result buffer.
+/// with `selected_style` (reverse video by default). When candidates
+/// exceed `max_rows` the window scrolls around `selected`.
+///
+/// Candidates MUST NOT contain '\n' (a completion is one symbol): the
+/// draw joins the visible rows into `scratch` with '\n' and splits on
+/// it to find the row boundaries. When the fuzzy path runs,
+/// `candidates` is the derived view `setItemsFuzzy` points at the
+/// caller's result buffer.
 pub const Suggestions = struct {
     /// The full item pool the fuzzy path filters, in its ORIGINAL
     /// order. `setItemsFuzzy` always filters this slice, so a shrinking
@@ -46,10 +50,11 @@ pub const Suggestions = struct {
     /// Knobs for the fuzzy path (case folding); see `fuzzy.Options`.
     fuzzy_options: Fuzzy.Options = .{},
     /// Candidate strings, BORROWED (never freed, never allocated). The app
-    /// owns them (e.g. the REPL's arena).
+    /// owns them (e.g. the REPL's arena), and they must outlive the draw
+    /// that shows them. They must not point into `scratch`.
     candidates: []const []const u8 = &.{},
-    /// Index of the currently-selected candidate. Clamped into range on
-    /// draw.
+    /// Index of the selected candidate. `draw` clamps it to the last candidate,
+    /// or resets it to zero when the list is empty.
     selected: usize = 0,
     /// Maximum rows the popup may draw; the window scrolls around
     /// `selected` when candidates exceeds this.
@@ -61,8 +66,9 @@ pub const Suggestions = struct {
     /// Truncation marker appended when a candidate exceeds the available
     /// width; null = no marker.
     ellipsis: ?[]const u8 = "…",
-    /// Caller-owned scratch for truncation output (the borrow model).
-    scratch: *std.ArrayList(u8) = &default_scratch,
+    /// Caller-owned storage for the visible rows the drawn cells borrow.
+    /// Required, and never shared between components.
+    scratch: *std.ArrayList(u8),
 
     /// Static component: never animates.
     pub fn advance(self: *Suggestions, now: Clock) bool {
@@ -155,8 +161,8 @@ pub const Suggestions = struct {
     }
 
     /// First visible candidate index: a window of `min(candidates.len,
-    /// max_rows)` rows scrolled so `selected` is always visible (the zigzag
-    /// `ensureVisible` rule, list.zig:341-344).
+    /// max_rows)` rows scrolled down just far enough to keep `selected`
+    /// inside it.
     fn windowStart(self: *const Suggestions) usize {
         const n = self.candidates.len;
         const win = @min(@as(usize, self.max_rows), n);
@@ -166,12 +172,15 @@ pub const Suggestions = struct {
         return 0;
     }
 
-    /// Draw the candidate window with its top-left at (x, y). `alloc` backs
-    /// `scratch` — pass the allocator that owns the scratch's memory (the
-    /// Text pattern). Returns the number of ROWS the popup would occupy
-    /// (`min(candidates.len, max_rows)`), so the caller can size the band;
-    /// 0 when there are no candidates or nothing is drawable. Never errors
-    /// for width (graceful truncation).
+    /// Draw the candidate window with its top-left at (x, y) and return
+    /// the number of ROWS the popup occupies (`min(candidates.len,
+    /// max_rows)`), so a caller can size the band; 0 when there are no
+    /// candidates or nothing is drawable.
+    ///
+    /// `alloc` grows `scratch`; it is the allocator that owns the
+    /// scratch's memory and must not change between calls. The only
+    /// error is `error.OutOfMemory` while growing the scratch.
+    /// A failed draw may change `scratch` and clamp `selected`, but leaves cells untouched.
     pub fn draw(
         self: *Suggestions,
         alloc: std.mem.Allocator,
@@ -182,6 +191,7 @@ pub const Suggestions = struct {
     ) !u16 {
         _ = now; // static component; nothing to advance
         const n = self.candidates.len;
+        self.selected = if (n == 0) 0 else @min(self.selected, n - 1);
         if (n == 0) return 0;
         const avail: usize = buf.width -| x;
         if (avail == 0 or y >= buf.height) return 0;
@@ -190,25 +200,24 @@ pub const Suggestions = struct {
         const start = self.windowStart();
         const shown: u16 = @intCast(win);
 
-        // Materialize every visible row into scratch, joined by '\n', so
-        // the cells drawn below keep a stable borrow (the wrap pattern in
-        // Text, src/component/text.zig:114-130). Candidates never contain
-        // '\n', so the join is unambiguous.
+        // Materialize every visible row into the scratch, joined by
+        // '\n', so the cells drawn below keep their bytes after this
+        // call. Candidates are the caller's own slices and never contain
+        // '\n', so the join is unambiguous, and a row that does not fit
+        // is shortened by copying its grapheme-boundary prefix straight
+        // out of the candidate — no truncated copy per row.
         self.scratch.clearRetainingCapacity();
         const ellipsis = self.ellipsis orelse "";
-        const ellipsis_w = Width.strWidth(ellipsis);
+        const budget = avail -| Width.strWidth(ellipsis);
         var first = true;
         for (0..win) |i| {
             if (!first) try self.scratch.append(alloc, '\n');
             first = false;
             const cand = self.candidates[start + i];
             if (Width.strWidth(cand) <= avail) {
-                try self.scratch.appendSlice(alloc, cand); // fits: borrow
+                try self.scratch.appendSlice(alloc, cand); // fits: copy as-is
             } else {
-                // Truncate at a grapheme boundary to avail minus the marker.
-                const t = try Width.truncate(alloc, cand, avail -| ellipsis_w);
-                defer alloc.free(t);
-                try self.scratch.appendSlice(alloc, t);
+                try self.scratch.appendSlice(alloc, cand[0..fitPrefixLen(cand, budget)]);
                 try self.scratch.appendSlice(alloc, ellipsis);
             }
         }
@@ -335,7 +344,9 @@ test "suggestions: alignment clamp truncates to avail, never past the edge" {
 }
 
 test "suggestions: draw at or past the right edge draws nothing" {
-    var s: Suggestions = .{ .candidates = &.{"abc"} };
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(test_alloc);
+    var s: Suggestions = .{ .candidates = &.{"abc"}, .scratch = &scratch };
     var buf = try Buffer.init(test_alloc, 4, 1);
     defer buf.deinit();
 
@@ -355,7 +366,7 @@ test "suggestions: return value is min(candidates, max_rows), 0 when empty" {
     var capped: Suggestions = .{ .candidates = &.{ "a", "b", "c", "d" }, .max_rows = 2, .scratch = &scratch };
     try std.testing.expectEqual(@as(u16, 2), try capped.draw(test_alloc, &buf, 0, 0, .fromNanoseconds(0)));
 
-    var empty: Suggestions = .{};
+    var empty: Suggestions = .{ .scratch = &scratch };
     try std.testing.expectEqual(@as(u16, 0), try empty.draw(test_alloc, &buf, 0, 0, .fromNanoseconds(0)));
 }
 
@@ -393,7 +404,9 @@ test "suggestions: fuzzy reorders candidates by rank" {
     // the expected output.
     const pool = [_][]const u8{ "sprint", "scribe", "printer", "print" };
     var out: [8][]const u8 = undefined;
-    var s: Suggestions = .{ .items = &pool };
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(test_alloc);
+    var s: Suggestions = .{ .items = &pool, .scratch = &scratch };
 
     try std.testing.expectEqual(@as(usize, 3), try s.setItemsFuzzy("pr", &out));
     try std.testing.expectEqual(@as(usize, 3), s.candidates.len);
@@ -409,10 +422,13 @@ test "suggestions: fuzzy reorders candidates by rank" {
 test "suggestions: fuzzy keeps the selected item pinned across the reorder" {
     const pool = [_][]const u8{ "sprint", "printer", "print" };
     var out: [8][]const u8 = undefined;
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(test_alloc);
     var s: Suggestions = .{
         .items = &pool,
         .candidates = &pool,
         .selected = 0, // "sprint", which ranks last for "pr"
+        .scratch = &scratch,
     };
 
     try std.testing.expectEqual(@as(usize, 3), try s.setItemsFuzzy("pr", &out));
@@ -425,7 +441,14 @@ test "suggestions: fuzzy keeps the selected item pinned across the reorder" {
 test "suggestions: fuzzy drops a pin the query no longer matches" {
     const pool = [_][]const u8{ "ab", "cd" };
     var out: [8][]const u8 = undefined;
-    var s: Suggestions = .{ .items = &pool, .candidates = &pool, .selected = 1 };
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(test_alloc);
+    var s: Suggestions = .{
+        .items = &pool,
+        .candidates = &pool,
+        .selected = 1,
+        .scratch = &scratch,
+    };
 
     try std.testing.expectEqual(@as(usize, 1), try s.setItemsFuzzy("ab", &out));
     try std.testing.expectEqualStrings("ab", s.candidates[0]);
@@ -436,7 +459,9 @@ test "suggestions: fuzzy drops a pin the query no longer matches" {
 test "suggestions: an empty query restores the whole pool in pool order" {
     const pool = [_][]const u8{ "b", "a", "c" };
     var out: [8][]const u8 = undefined;
-    var s: Suggestions = .{ .items = &pool };
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(test_alloc);
+    var s: Suggestions = .{ .items = &pool, .scratch = &scratch };
 
     // A narrow query first: only "a" survives.
     try std.testing.expectEqual(@as(usize, 1), try s.setItemsFuzzy("a", &out));
@@ -455,7 +480,9 @@ test "suggestions: an empty query restores the whole pool in pool order" {
 test "suggestions: the out buffer bounds the fuzzy window" {
     const pool = [_][]const u8{ "sprint", "printer", "print" };
     var out: [2][]const u8 = undefined;
-    var s: Suggestions = .{ .items = &pool };
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(test_alloc);
+    var s: Suggestions = .{ .items = &pool, .scratch = &scratch };
 
     // Three candidates match, but the window is the caller's two rows.
     try std.testing.expectEqual(@as(usize, 2), try s.setItemsFuzzy("pr", &out));
@@ -466,7 +493,13 @@ test "suggestions: the out buffer bounds the fuzzy window" {
 
 test "suggestions: a zero-length out buffer writes nothing" {
     var out: [0][]const u8 = undefined;
-    var s: Suggestions = .{ .items = &.{ "ab", "cd" }, .candidates = &.{ "ab", "cd" } };
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(test_alloc);
+    var s: Suggestions = .{
+        .items = &.{ "ab", "cd" },
+        .candidates = &.{ "ab", "cd" },
+        .scratch = &scratch,
+    };
 
     try std.testing.expectEqual(@as(usize, 0), try s.setItemsFuzzy("a", &out));
     try std.testing.expectEqual(@as(usize, 0), s.candidates.len);
@@ -477,10 +510,16 @@ test "suggestions: fuzzy_options reaches the matcher" {
     const pool = [_][]const u8{"Apple"};
     var out: [4][]const u8 = undefined;
 
-    var folded: Suggestions = .{ .items = &pool };
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(test_alloc);
+    var folded: Suggestions = .{ .items = &pool, .scratch = &scratch };
     try std.testing.expectEqual(@as(usize, 1), try folded.setItemsFuzzy("appl", &out));
 
-    var exact: Suggestions = .{ .items = &pool, .fuzzy_options = .{ .fold_case = false } };
+    var exact: Suggestions = .{
+        .items = &pool,
+        .fuzzy_options = .{ .fold_case = false },
+        .scratch = &scratch,
+    };
     try std.testing.expectEqual(@as(usize, 0), try exact.setItemsFuzzy("appl", &out));
     try std.testing.expectEqual(@as(usize, 0), exact.candidates.len);
 }
@@ -488,7 +527,9 @@ test "suggestions: fuzzy_options reaches the matcher" {
 test "suggestions: a query past the matcher bound surfaces the error" {
     const long: [Fuzzy.max_needle + 1]u8 = @splat('a');
     var out: [4][]const u8 = undefined;
-    var s: Suggestions = .{ .items = &.{"aaaa"} };
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(test_alloc);
+    var s: Suggestions = .{ .items = &.{"aaaa"}, .scratch = &scratch };
 
     try std.testing.expectError(error.NeedleTooLong, s.setItemsFuzzy(&long, &out));
 }
@@ -512,4 +553,52 @@ test "suggestions: draw renders the fuzzy order with the selection highlight" {
     // The top hit is selected: row 0 reverse-video, row 1 plain.
     try std.testing.expect(buf.get(0, 0).style.eql(.{ .attrs = .{ .reverse = true } }));
     try std.testing.expect(buf.get(0, 1).style.eql(.{}));
+}
+
+test "suggestions: two popups in one frame keep their own rows" {
+    // Each popup's rows are copied into its own scratch, so the second
+    // draw cannot rewrite the first popup's cells.
+    var a_scratch: std.ArrayList(u8) = .empty;
+    defer a_scratch.deinit(test_alloc);
+    var b_scratch: std.ArrayList(u8) = .empty;
+    defer b_scratch.deinit(test_alloc);
+
+    var a: Suggestions = .{ .candidates = &.{"AAAAA"}, .max_rows = 1, .scratch = &a_scratch };
+    var b: Suggestions = .{ .candidates = &.{"BBBBB"}, .max_rows = 1, .scratch = &b_scratch };
+    var buf = try Buffer.init(test_alloc, 3, 2);
+    defer buf.deinit();
+
+    _ = try a.draw(test_alloc, &buf, 0, 0, .fromNanoseconds(0));
+    _ = try b.draw(test_alloc, &buf, 0, 1, .fromNanoseconds(0));
+
+    var rowbuf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("AA…", rowStr(&buf, 0, &rowbuf));
+    try std.testing.expectEqualStrings("BB…", rowStr(&buf, 1, &rowbuf));
+}
+
+test "suggestions: shrinking candidates keeps the last remaining row selected" {
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(test_alloc);
+    var s: Suggestions = .{
+        .candidates = &.{ "a", "b", "c" },
+        .selected = 2,
+        .max_rows = 2,
+        .scratch = &scratch,
+    };
+    var buf = try Buffer.init(test_alloc, 4, 2);
+    defer buf.deinit();
+
+    _ = try s.draw(test_alloc, &buf, 0, 0, .fromNanoseconds(0));
+    s.candidates = &.{ "a", "b" };
+    buf.clear();
+    _ = try s.draw(test_alloc, &buf, 0, 0, .fromNanoseconds(0));
+    try std.testing.expectEqualStrings("b", buf.get(0, 1).grapheme);
+    try std.testing.expect(buf.get(0, 1).style.eql(s.selected_style));
+    try std.testing.expectEqual(@as(usize, 1), s.selected);
+
+    s.candidates = &.{};
+    buf.clear();
+    _ = try s.draw(test_alloc, &buf, 0, 0, .fromNanoseconds(0));
+    try std.testing.expectEqual(@as(usize, 0), s.selected);
+    try std.testing.expect(buf.get(0, 0).eql(.{}));
 }

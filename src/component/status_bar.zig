@@ -1,24 +1,21 @@
-//! StatusBar: a single-line status bar with left/center/right segment
-//! groups (baseui-improvements.md §2.1). Segments are BORROWED — the
-//! app rebuilds or mutates the slices each frame. `draw` never
-//! allocates: within-group truncation borrows a grapheme-boundary
-//! prefix of the segment's own text and the ellipsis marker is a
-//! constant, so no allocator parameter is needed (the `scratch` field
-//! keeps the borrow-model shape for callers that pre-size one). Static
-//! — `advance` is always false.
+//! StatusBar: a single-line status bar with left, center and right
+//! segment groups. Segments are BORROWED — the app rebuilds or mutates
+//! the slices each frame. `draw` never allocates: within-group
+//! truncation borrows a grapheme-boundary prefix of the segment's own
+//! text and the ellipsis marker is a constant, so every drawn cell
+//! borrows bytes the caller already owns. Static — `advance` is always
+//! false.
 
 const std = @import("std");
 const Buffer = @import("../buffer.zig").Buffer;
 const Style = @import("../style.zig").Style;
 const Width = @import("../width.zig");
 const Clock = @import("component.zig").Clock;
+const fitPrefixLen = Width.fitPrefixLen;
 
-/// Shared zero-config scratch (the borrow model, same shape as
-/// Text.scratch). v1 truncation borrows from the segment text itself,
-/// so this is only written when a caller pre-sizes it; kept for API
-/// symmetry with Text.
-var default_scratch: std.ArrayList(u8) = .empty;
-
+/// Allocation-free segment layout; the empty literal leaves destination cells untouched.
+/// Copies share borrowed segments, text and styles, not owned storage. Keep their
+/// payloads live through rendering and serialize access to each destination buffer.
 pub const StatusBar = struct {
     /// Left/center/right segment groups, BORROWED (never freed, never
     /// allocated) — the app rebuilds or mutates them each frame.
@@ -29,12 +26,15 @@ pub const StatusBar = struct {
     separator: ?[]const u8 = " ",
     /// Style for separator and inter-group gap cells.
     gap_style: Style = .{},
-    /// Caller-owned scratch for truncation output (the borrow model,
-    /// same as Text.scratch, src/component/text.zig:19-20).
-    scratch: *std.ArrayList(u8) = &default_scratch,
 
+    /// One label in a group, BORROWED like the group itself: `text` is
+    /// never freed or copied here, and the drawn cells keep its bytes,
+    /// so it must stay valid until the buffer that shows them has been
+    /// rendered.
     pub const Segment = struct {
+        /// The label as shown.
         text: []const u8,
+        /// Style for this segment's cells.
         style: Style = .{},
     };
 
@@ -168,34 +168,17 @@ pub const StatusBar = struct {
     }
 
     /// Draw `seg` truncated to `budget` columns with the ellipsis
-    /// marker: a grapheme-safe prefix of `seg.text` (borrowed) plus
-    /// "…" (a constant). Returns the columns consumed.
+    /// marker: a grapheme-safe prefix of `seg.text` (borrowed, so the
+    /// cells stay valid without a scratch) plus "…" (a constant).
+    /// Returns the columns consumed.
     fn drawEllipsized(self: *const StatusBar, buf: *Buffer, seg: Segment, budget: usize, x: u16, y: u16) !u16 {
         _ = self;
         const e: []const u8 = "…";
         const ell_w: usize = Width.strWidth(e);
         if (budget == 0) return 0;
-        const trunc_cols = budget -| ell_w;
 
-        var end: usize = 0;
-        var width: usize = 0;
-        var off: usize = 0;
-        while (off < seg.text.len) {
-            const glen = Width.firstGraphemeLen(seg.text[off..]);
-            if (glen == 0) break; // defensive: no progress possible
-            const gc = seg.text[off..][0..glen];
-            off += glen;
-            const w = Width.graphemeWidth(gc);
-            if (w <= 0) { // zero-width: keep glued on
-                end = off;
-                continue;
-            }
-            const wu: usize = @intCast(w);
-            if (width + wu > trunc_cols) break;
-            width += wu;
-            end = off;
-        }
-
+        const end = fitPrefixLen(seg.text, budget -| ell_w);
+        const width = Width.strWidth(seg.text[0..end]);
         var consumed: u16 = 0;
         if (end > 0) consumed += try buf.draw(seg.style, seg.text[0..end], x, y);
         if (budget > width) consumed += try buf.draw(seg.style, e, x + consumed, y);
@@ -408,20 +391,26 @@ test "status_bar: default-style render is escape-free (plain frame)" {
     try std.testing.expect(std.mem.indexOfScalar(u8, row, 0x1b) == null);
 }
 
-test "status_bar: draw never allocates (FailingAllocator guard)" {
-    var failing = std.testing.FailingAllocator.init(test_alloc, .{ .fail_index = 1 });
-    const alloc = failing.allocator();
-    // Allocation 0 (initCapacity) succeeds; any allocation during
-    // `draw` would trip the guard with OutOfMemory.
-    var scratch = try std.ArrayList(u8).initCapacity(alloc, 64);
-    defer scratch.deinit(test_alloc);
-    var bar: StatusBar = .{
-        .left = &.{.{ .text = "a very long left segment that must be ellipsized" }},
-        .right = &.{.{ .text = "tail" }},
-        .separator = " ",
-        .scratch = &scratch,
-    };
+test "status_bar: an ellipsized segment is drawn from the caller's own bytes" {
+    // The component takes no allocator and owns no scratch: the
+    // truncated prefix borrows the segment text the caller supplied, so
+    // the cells stay valid after the draw with no copy anywhere.
+    const text = "a very long left segment that must be ellipsized";
+    var bar: StatusBar = .{ .left = &.{.{ .text = text }} };
     var buf = try Buffer.init(test_alloc, 10, 1);
     defer buf.deinit();
-    _ = try bar.draw(&buf, 0, 0, .fromNanoseconds(0)); // must not fail
+    _ = try bar.draw(&buf, 0, 0, .fromNanoseconds(0));
+
+    var rowbuf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("a very lo…", rowStr(&buf, 0, &rowbuf));
+
+    // The nine kept cells point inside `text`; the tenth is the constant
+    // marker the component appends itself.
+    const lo = @intFromPtr(text.ptr);
+    for (0..9) |x| {
+        const g = buf.get(@intCast(x), 0).grapheme;
+        const at = @intFromPtr(g.ptr);
+        try std.testing.expect(at >= lo and at + g.len <= lo + text.len);
+    }
+    try std.testing.expectEqualStrings("…", buf.get(9, 0).grapheme);
 }

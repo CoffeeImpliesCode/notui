@@ -3,25 +3,20 @@
 //! clock, that the loop has gone quiet — a stuck probe or a blocked reader.
 
 const std = @import("std");
-
-/// The monotonic clock the watchdog reads: the same `std.Io.Timestamp` the
-/// component contract passes to `draw`/`advance` (component.zig:22). Tests
-/// feed synthetic values via `std.Io.Timestamp.fromNanoseconds`.
+/// The monotonic clock the watchdog reads: the same `std.Io.Timestamp` a
+/// component's `draw` and `advance` callbacks are handed. Tests feed synthetic
+/// values through `std.Io.Timestamp.fromNanoseconds`.
 pub const Clock = std.Io.Timestamp;
 
-/// Default budget between two loop pings: 2 s.
-///
-/// It protects against a stuck capability probe — the terminal capability
-/// round probes four times with a 250 ms deadline each (caps.zig:23) — and
-/// against a blocked reader that stops draining input. Either one stalls the
-/// frame loop; a loop that has not pinged within this budget is wedged, and
-/// the app can reset the terminal and degrade instead of hanging.
+/// Default heartbeat budget: 2 seconds, allowing bounded terminal-probe work.
 pub const default_budget_ns: u64 = 2 * std.time.ns_per_s;
 
 /// Liveness guard for a render loop: `ping` at the top of every iteration,
-/// then ask `tripped` from the same iteration or a supervisor. All state is
-/// plain values; the watchdog never allocates, opens a timer, or touches the
-/// clock itself — the caller injects `now`.
+/// then ask `tripped` from the same iteration or from a supervisor.
+///
+/// All state is plain values: the watchdog never allocates, opens a timer or
+/// reads the clock itself. The caller samples time and serializes access to the guard;
+/// a watchdog reports a late heartbeat only when checked, not during a blocked call.
 pub const Watchdog = struct {
     /// Budget in nanoseconds between two pings; see `default_budget_ns`.
     budget_ns: u64 = default_budget_ns,
