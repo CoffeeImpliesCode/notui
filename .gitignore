@@ -6,7 +6,8 @@
 # zig
 .zig-cache/
 zig-out/
-zig-pkg/
+# A symlink to scratch (see devenv.nix), so no trailing slash.
+/zig-pkg
 
 # tooling artifacts
 codedb.snapshot

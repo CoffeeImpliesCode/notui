@@ -420,8 +420,13 @@ Those rows are not scrollback, and notui does not erase them; see
 ## Local scratch storage
 
 Bulk temporary files and caches belong on a local scratch volume with room to
-spare, not on a small system temporary filesystem. Configure that volume outside
-this repository; the untracked `.envrc` holds only `ZIG_LOCAL_CACHE_DIR`.
+spare, not on NFS or a small system temporary filesystem. `devenv.nix` reads the
+root from `NOTUI_SCRATCH_ROOT`, falling back to `$HOST_SCRATCH_ROOT/notui`, and
+refuses to evaluate without one. Under it, the shell keeps `zig-global/`,
+`zig-local/` and `zig-pkg/`; the repository's `zig-pkg` is a symlink to the
+latter, re-pointed on every shell entry because the volume is per host. Zig 0.16
+always unpacks packages into project-local `zig-pkg/`, and on NFS that fails with
+`illegal file type 'unknown'` because readdir reports no file type there.
 
 Clean up periodically during work, after capture/build waves, and before handoff. Review
 ownership and live use first. Remove only our inactive caches and throwaway probes; preserve
@@ -433,7 +438,8 @@ source, active/shared caches, and necessary screenshots, recordings, and reports
 The devenv shell includes VHS, termshot, Freeze (`freeze`), ttyd and FFmpeg.
 VHS uses headless Chromium, supplied by its Nix package; notui does not
 require a browser. The shell supplies Fontconfig configuration with DejaVu,
-Noto CJK, and Noto color emoji fonts for reproducible captures.
+Noto CJK, and Noto color emoji fonts for reproducible captures, plus the Latin
+Modern text and math faces that the vendored ztex tests load from disk.
 
 ```bash
 devenv --no-tui shell -- zig build

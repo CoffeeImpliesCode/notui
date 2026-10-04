@@ -20,7 +20,7 @@ Zig 0.16 inline-first terminal UI toolkit. It provides cell-buffer primitives, b
 
 ## Environment and commands
 
-`.envrc` exports `ZIG_LOCAL_CACHE_DIR` (the NFS `renameat2` workaround) and nothing else; `devenv.nix` provides Zig, zlint, and the `zig-gate` script. Run `direnv allow` on first use or after changing `devenv.nix`.
+`.envrc` is `use devenv`; `devenv.nix` provides Zig, zlint, the `gate` script and fonts, and sets the Zig caches under a scratch root from `NOTUI_SCRATCH_ROOT` (fallback: `$HOST_SCRATCH_ROOT/notui`). The shell links `zig-pkg` to that root because Zig 0.16 cannot unpack packages on NFS. Run `direnv allow` on first use or after changing `devenv.nix`; without direnv, run commands through `devenv shell -- <cmd>`.
 
 ```bash
 zig build           # debug build: zig-out/bin/notui
