@@ -832,6 +832,16 @@ row 11. Three states have no PNG, so their buffer record is the only evidence; t
   passes without a production change. Placement targets keep the same band buffer row through
   logical growth and shrink, including growth that scrolls the viewport.
   No live kitty graphics UI pass covers retained placements or physical resize/width reflow.
+- **Frames in flight across a resize.** SIGWINCH reaches the app after the terminal resized,
+  so a frame composed at the old geometry can arrive at the new one. Rows are written with
+  autowrap on, so committed text soft-wraps instead of being clamped, but band placement in
+  that window rests on the next CPR. One 2026-10-13 capture
+  (`zig-out/visual/complex-2026-10-13/wave4-W4Sweep/agent_demo-burst.*`) left duplicated agent
+  band rows after 12 ms resize bursts; seven repeats and 512 seeded model bursts with late CPR
+  replies did not reproduce it, so the cause is unconfirmed.
+- **Retired rows the window never returns.** A band clipped by a short window retires the rows
+  that scrolled into scrollback; they are erased if a later growth brings them back, and stay in
+  unreachable scrollback otherwise, including after exit.
 
 ### Zwanzig baseline triage (historical)
 
