@@ -41,6 +41,8 @@ rec {
     charm-freeze
     ttyd
     ffmpeg
+    # Multiplexer captures: the erase discipline must hold inside tmux.
+    tmux
     # emscripten
   ];
 
