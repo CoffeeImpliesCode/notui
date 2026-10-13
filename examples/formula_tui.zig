@@ -448,7 +448,17 @@ pub fn main(init: std.process.Init) !void {
         const caret = @min(cursor, line.items.len);
         var col = try region.cur.draw(.{}, prompt, 0, 0);
         const err_active = hint != null and line.items.len > 0;
-        col += try drawInput(&region.cur, col, 0, 0, line.items[0..caret], err_active, err_span);
+        // Horizontal scroll: a formula wider than the band hides whole cells
+        // from the left behind `…`, so the caret always has a column.
+        const room: usize = region.width -| col;
+        var start: usize = 0;
+        while (start < caret and
+            notui.width.strWidth(line.items[start..caret]) + 1 + @intFromBool(start > 0) > room)
+        {
+            start += notui.width.firstCellLen(line.items[start..]);
+        }
+        if (start > 0) col += try region.cur.draw(.{ .attrs = .{ .dim = true } }, "…", col, 0);
+        col += try drawInput(&region.cur, col, 0, start, line.items[start..caret], err_active, err_span);
         col += try region.cur.draw(.{}, cursor_marker, col, 0);
         _ = try drawInput(&region.cur, col, 0, caret, line.items[caret..], err_active, err_span);
         if (hint) |h| _ = try region.cur.draw(.{}, h, 0, hint_row);
