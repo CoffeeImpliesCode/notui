@@ -250,7 +250,7 @@ declarations were rejected by their intended guards. All six registered roots
 generated documentation. An external caller named `Buffer.RowFootprint` and its
 `NullGap`, then called the allocator-first footprint API.
 
-**Analyzer assessment, refreshed 2026-10-13 at `f48a076049fa`:** all 141 diagnostic
+**Analyzer assessment, refreshed 2026-10-14 at `33d40219a780`:** all 141 diagnostic
 occurrences were reviewed. There are 81 false positives and 60 intentional test
 assertions. No reported finding exposed a confirmed runtime defect.
 
@@ -967,14 +967,14 @@ are counted rather than assumed.
 
 ### Unreleased performance rounds
 
-Four optimization rounds retained changes. A fifth round rejected two further candidates.
-The final comparison interleaved 0.1.0 (`6e495eec`) and the current build five times.
+Rounds one to four retained changes. The fifth round rejected two further candidates.
+The table below freezes that source at `f48a076049fa`, compared with 0.1.0 (`6e495eec`).
 Both used Zig 0.16.0, ReleaseFast and the native CPU target on a shared Xeon Gold 6134.
 Each process ran on CPU 11. `min` is the minimum across runs.
 `p50` is the median of the five per-run p50 values. All times below are nanoseconds.
 The 64-iteration probe sets an approximate 500 ms budget per case.
 
-| case | 0.1.0 min | current min | 0.1.0 p50 | current p50 |
+| case | 0.1.0 min | round 5 min | 0.1.0 p50 | round 5 p50 |
 |---|---:|---:|---:|---:|
 | static 80×24 | 21 357 | 9 418 | 53 738 | 22 927 |
 | static 200×60 | 145 030 | 48 833 | 311 437 | 125 012 |
@@ -1020,6 +1020,52 @@ Verification of the retained source (`f48a076049fa`), 2026-10-13:
   All four cross targets executed 845 tests each: x86-64, x86, AArch64 and big-endian PowerPC64.
   The gate exits 1 for the 141 reviewed analyzer occurrences above. No finding is suppressed.
 - Live `example-statusline` in tmux: 100→60→100 columns, history retained, normal exit with `q`.
+
+
+#### Round 6: retained common-script lookahead
+
+`width.SimpleIterator` replaces `simpleCluster`. Each verified BMP codepoint is decoded
+and classified once, then kept as lookahead for the next draw step. The iterator borrows
+its input and allocates nothing. `init(text)` followed by `next()` yields prefix clusters
+with byte offsets, lengths and widths. It stops before ASCII or a boundary that needs
+the full segmenter; combining marks and malformed input keep their fallback paths.
+The iterator is inlined. Cell placement and cold copying retain their earlier paths.
+
+Baseline `1110c3710081` versus retained source `33d40219a780`, five interleaved runs.
+Both used Zig 0.16.0, ReleaseFast, the native target and CPU 11 on the same shared host.
+`min` is the minimum across runs; `p50` is the median of per-run p50 values, in ns.
+
+| case | before min | after min | before p50 | after p50 |
+|---|---:|---:|---:|---:|
+| static 80×24 | 9 415 | 8 859 | 9 538 | 8 983 |
+| static 200×60 | 48 577 | 45 746 | 53 223 | 46 131 |
+| stream 80×24 | 10 280 | 9 722 | 10 677 | 10 107 |
+| stream 200×60 | 50 026 | 47 336 | 51 063 | 48 510 |
+| damage 80×24 | 7 455 | 7 381 | 8 341 | 8 336 |
+| damage 200×60 | 31 709 | 31 829 | 32 122 | 32 188 |
+| styles 80×24 | 7 862 | 7 657 | 9 912 | 10 011 |
+| region h1 | 91 | 83 | 900 | 904 |
+| region h4 | 224 | 220 | 2 570 | 2 577 |
+| region h24 | 1 007 | 1 016 | 17 232 | 17 196 |
+
+Static and streaming minima fell 5.4–5.9%. Other cases' median p50 stayed within 1%.
+The large static baseline's p50 varied from 49.9 to 53.4 µs; its minimum reduction
+is the more conservative result. Output bytes and allocations per frame did not change.
+Timing boundaries and the pre-B4 reference are unchanged.
+
+Per-cell and per-eight-cell cold bitmaps, fused copies, alternative flag scans and
+forced cell-placement inlining were tested and removed. They did not give a clean
+improvement across the case mix.
+
+Verification of `33d40219a780`, 2026-10-14:
+
+- 845/845 tests in Debug, ReleaseSafe and ReleaseFast.
+- Four cross targets executed 845 tests each, including x86 and big-endian PowerPC64.
+- `zig-gate --no-zbc`: format, build, tests, AST check and zlint passed.
+  The gate still exits 1 for 141 reviewed findings; all raw report locations match the ledger.
+- A real external consumer read two CJK clusters, then drew the combining-mark fallback:
+  five columns and unchanged copied-row equality in both width modes.
+- Live statusline: 100→60→100 columns, history retained, normal `q` exit.
 
 
 ### 0.1.0 comparison

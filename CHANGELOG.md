@@ -8,6 +8,9 @@
   `Cell` remains the interface value. The grid uses hot slots and cold side arrays.
 - `Buffer.set` and `Buffer.draw` store one-byte ASCII graphemes by value.
   Reads return static slices. Other graphemes and all hyperlinks remain caller borrows.
+- `width.simpleCluster` is replaced by `width.SimpleIterator`.
+  Use `init(text)`, then `next()` for prefix clusters with byte offsets, lengths and widths.
+  The iterator borrows its input and stops before ASCII or uncertain joining boundaries.
 
 ### Fixes
 
@@ -30,6 +33,13 @@
 - Use an occupancy mask for the SGR memo instead of clearing its full storage each frame.
 - Drop experimental vector slot construction and block copies of cold slices.
   Neither gave a repeatable gain across the benchmark cases.
+- Carry verified BMP lookahead across common-script draw steps instead of decoding it twice.
+  The iterator stays local to the draw loop and allocates nothing.
+
+The sixth round compared `1110c371` with `33d40219`, five interleaved ReleaseFast runs:
+static and streaming minima fell 5.4–5.9%; other cases' median p50 stayed within 1%.
+Bytes and allocations per frame did not change. Copy-path and placement-inline experiments
+were removed. The earlier 0.1.0 comparison below remains a historical result.
 
 ReleaseFast against 0.1.0, five interleaved runs on the same CPU:
 static 200×60 minimum 145 030 → 48 833 ns, stream 200×60 160 661 → 50 128 ns,

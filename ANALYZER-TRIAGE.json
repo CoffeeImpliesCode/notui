@@ -1,5 +1,5 @@
 {
-  "source_pin": "f48a076049fa12e037ce1a24a7c0dc6391f7f13f",
+  "source_pin": "33d40219a780b43650e4fb888f25584ebf8d9fb9",
   "scope": "All 57 explicit non-vendor Zig files in the analyzer gate at source_pin.",
   "tools": {
     "ziglint": "0.5.3-1+66709a4",
@@ -47,7 +47,7 @@
       "id": "ZL002",
       "rule": "Z012",
       "file": "src/buffer.zig",
-      "line": 740,
+      "line": 741,
       "message": "public function exposes private type 'RowFootprint'",
       "classification": "false_positive",
       "evidence": "Buffer.RowFootprint and its nested NullGap are explicitly public. paintedPrefixColumns, rowsAt and prefixRows therefore expose public types. The two reports on prefixRows are distinct diagnostic occurrences and remain separate."
@@ -56,7 +56,7 @@
       "id": "ZL003",
       "rule": "Z012",
       "file": "src/buffer.zig",
-      "line": 785,
+      "line": 786,
       "message": "public function exposes private type 'RowFootprint'",
       "classification": "false_positive",
       "evidence": "Buffer.RowFootprint and its nested NullGap are explicitly public. paintedPrefixColumns, rowsAt and prefixRows therefore expose public types. The two reports on prefixRows are distinct diagnostic occurrences and remain separate."
@@ -65,7 +65,7 @@
       "id": "ZL004",
       "rule": "Z012",
       "file": "src/buffer.zig",
-      "line": 804,
+      "line": 805,
       "message": "public function exposes private type 'RowFootprint'",
       "classification": "false_positive",
       "evidence": "Buffer.RowFootprint and its nested NullGap are explicitly public. paintedPrefixColumns, rowsAt and prefixRows therefore expose public types. The two reports on prefixRows are distinct diagnostic occurrences and remain separate."
@@ -74,7 +74,7 @@
       "id": "ZL005",
       "rule": "Z012",
       "file": "src/buffer.zig",
-      "line": 804,
+      "line": 805,
       "message": "public function exposes private type 'RowFootprint'",
       "classification": "false_positive",
       "evidence": "Buffer.RowFootprint and its nested NullGap are explicitly public. paintedPrefixColumns, rowsAt and prefixRows therefore expose public types. The two reports on prefixRows are distinct diagnostic occurrences and remain separate."
@@ -1261,18 +1261,18 @@
     {
       "id": "ZW151",
       "file": "src/width.zig",
-      "line": 659,
+      "line": 679,
       "classification": "test_assertion",
-      "evidence": "Classify: test_assertion (non-actionable). `const zg_len = iter.next().?.bytes(buf[0..2]).len;` in `test \"ascii fast path: agrees with zg for every printable byte and successor\"` (src/width.zig:497-526). The iterator runs over a non-empty test fixture (one printable ASCII byte plus a successor or tail, built at 506-516), and zg's grapheme iterator yields a first grapheme for any non-empty input. The unwrap is the oracle the comparison against firstGraphemeLen/firstCellLen rests on: a null would be a failed test, not a consumer bug.",
+      "evidence": "Classify: test_assertion (non-actionable). `const zg_len = iter.next().?.bytes(buf[0..2]).len;` in `test \"ascii fast path: agrees with zg for every printable byte and successor\"` (src/width.zig:665-694). The iterator runs over a non-empty test fixture (one printable ASCII byte plus a successor or tail, built at 673-686), and zg's grapheme iterator yields a first grapheme for any non-empty input. The unwrap is the oracle the comparison against firstGraphemeLen/firstCellLen rests on: a null would be a failed test, not a consumer bug.",
       "reviewer": "parent:2026-10-14",
       "rule": "optional-unwrap"
     },
     {
       "id": "ZW152",
       "file": "src/width.zig",
-      "line": 666,
+      "line": 686,
       "classification": "test_assertion",
-      "evidence": "Classify: test_assertion (non-actionable). `const zg_len = iter.next().?.bytes(s).len;` in `test \"ascii fast path: agrees with zg for every printable byte and successor\"` (src/width.zig:497-526). The iterator runs over a non-empty test fixture (one printable ASCII byte plus a successor or tail, built at 506-516), and zg's grapheme iterator yields a first grapheme for any non-empty input. The unwrap is the oracle the comparison against firstGraphemeLen/firstCellLen rests on: a null would be a failed test, not a consumer bug.",
+      "evidence": "Classify: test_assertion (non-actionable). `const zg_len = iter.next().?.bytes(s).len;` in `test \"ascii fast path: agrees with zg for every printable byte and successor\"` (src/width.zig:665-694). The iterator runs over a non-empty test fixture (one printable ASCII byte plus a successor or tail, built at 673-686), and zg's grapheme iterator yields a first grapheme for any non-empty input. The unwrap is the oracle the comparison against firstGraphemeLen/firstCellLen rests on: a null would be a failed test, not a consumer bug.",
       "reviewer": "parent:2026-10-14",
       "rule": "optional-unwrap"
     },
@@ -1300,7 +1300,7 @@
       "id": "ZW153",
       "rule": "identifier-style",
       "file": "src/buffer.zig",
-      "line": 1199,
+      "line": 1200,
       "classification": "false_positive",
       "evidence": "SlotMask is a type alias: @Int(.unsigned, sgr_cache_slots) produces the unsigned integer type u16. It types SgrCache.used and the bit helper return and cast. TitleCase follows the Zig type-name convention; this declaration is not a value constant.",
       "reviewer": "parent:2026-10-13"
