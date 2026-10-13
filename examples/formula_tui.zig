@@ -451,6 +451,16 @@ pub fn main(init: std.process.Init) !void {
         col += try region.cur.draw(.{}, cursor_marker, col, 0);
         _ = try drawInput(&region.cur, col, 0, caret, line.items[caret..], err_active, err_span);
         if (hint) |h| _ = try region.cur.draw(.{}, h, 0, hint_row);
+        if (!kitty) {
+            // No image protocol: say so where the preview would be, so the
+            // empty row reads as a capability limit and not a broken render.
+            _ = try region.cur.draw(
+                .{ .fg = .bright_black },
+                "(no kitty graphics: formulas are checked, preview not shown)",
+                1,
+                @intCast(preview_row),
+            );
+        }
         // Stage timings, grey, right-aligned on the same row (the error
         // hint, when present, occupies the left).
         var timing_buf: [64]u8 = undefined;
@@ -522,8 +532,9 @@ fn msSince(t0: u64) f32 {
 ///
 /// Returns `error.EmptyFormula` for a blank layout (no ink) and the
 /// ztex parse or layout error for invalid LaTeX; on any error the last good
-/// preview stays displayed. With `kitty` false the call does nothing and
-/// succeeds, so the caller treats "transmitted" as the real signal.
+/// preview stays displayed. With `kitty` false the formula is still parsed
+/// and laid out, so an invalid one is refused the same way, but nothing is
+/// rasterized or transmitted.
 ///
 /// `err_info` (when non-null) follows the ztex rule: the PARSE stage fills it
 /// on every parse failure it returns, `Info.span` is `null` for a failure
@@ -541,7 +552,6 @@ fn updatePreview(
     err_info: ?*ztex.parse.Info,
     stats: *PreviewStats,
 ) !void {
-    if (!kitty) return;
     const t0 = monoNs();
     var dl = ztex.render(gpa, src, size_pt, err_info) catch |err| {
         stats.parse_ms = msSince(t0);
@@ -550,6 +560,7 @@ fn updatePreview(
     stats.parse_ms = msSince(t0);
     defer dl.deinit();
     if (dl.width <= 0) return error.EmptyFormula;
+    if (!kitty) return;
     const t1 = monoNs();
     const bmp = rasterize(gpa, ctx, &dl, coverage.coverageRow) catch |err| {
         stats.render_ms = msSince(t1);
