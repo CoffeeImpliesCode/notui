@@ -572,6 +572,18 @@ pub fn App(comptime Model: type) type {
                     }
                 },
             };
+            // 4b. A terminal reports a resize with SIGWINCH, not on its input
+            //     stream (an in-band `winsize` is the exception), so the
+            //     signal flag is polled every tick and the band re-laid out
+            //     at the size the terminal now has.
+            if (self.tty) |*t| {
+                if (t.checkResize()) {
+                    const wsz = try t.getWinsize();
+                    if (self.region) |*r| try r.resize(wsz.cols, wsz.rows, r.height);
+                    self.render_requested = true;
+                    dispatched = true;
+                }
+            }
 
             // 5. The writer this frame's immediate effects use: the tty's
             //    buffered writer when there is a terminal, null in a degraded
@@ -2027,6 +2039,22 @@ test "app: frame_arena text repaints when the content changes (no prev aliasing)
     try setup.app.tick(); // must repaint: the diff emits "frame2"
     const n2 = setup.tty.drainOutput(&out);
     try testing.expect(std.mem.indexOf(u8, out[0..n2], "frame2") != null);
+}
+
+test "app: a SIGWINCH resizes the band on the next tick" {
+    var setup: InteractiveFixture(ArenaDrawModel) = undefined;
+    try setupInteractive(ArenaDrawModel, &setup, .{ .fps = 1000 });
+    defer setup.deinit();
+    try setup.app.region.?.resize(40, 24, 2);
+    try setup.app.send(.tick);
+    try setup.app.tick();
+    try testing.expectEqual(@as(u16, 40), setup.app.region.?.width);
+
+    // The fake tty is a socket, so `getWinsize` reports its 80x24
+    // fallback: the band must take that width without an in-band report.
+    setup.app.tty.?.markResized();
+    try setup.app.tick();
+    try testing.expectEqual(@as(u16, 80), setup.app.region.?.width);
 }
 
 test "app: an interactive teardown reaches the terminal" {

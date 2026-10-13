@@ -317,6 +317,14 @@ pub const Tty = struct {
         return resize_signaled.swap(false, .acquire);
     }
 
+    /// Record a resize as if SIGWINCH had arrived, so the next `checkResize`
+    /// returns true. For callers that learn of a resize some other way, and
+    /// for tests that cannot deliver the signal.
+    pub fn markResized(self: *Tty) void {
+        _ = self;
+        resize_signaled.store(true, .release);
+    }
+
     /// One nonblocking frame write: the bytes the terminal accepted,
     /// `0` when it would block. The caller (`OutputQueue.drain`) keeps
     /// the remainder pending, in order, and retries — a short write and
