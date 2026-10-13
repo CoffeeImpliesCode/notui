@@ -23,6 +23,7 @@
 
 const std = @import("std");
 const Buffer = @import("../buffer.zig").Buffer;
+const Cell = @import("../cell.zig").Cell;
 const Style = @import("../style.zig").Style;
 const Width = @import("../width.zig");
 const Clock = @import("component.zig").Clock;
@@ -188,16 +189,17 @@ fn rowStr(buf: *const Buffer, y: usize, out: []u8) []const u8 {
     return out[0..n];
 }
 
-/// Whether each non-default text cell borrows from `owner`. Blank grid padding
-/// has static storage and is not a component borrow. A row pointing into another
-/// component's scratch would be rewritten by its next draw.
+/// Whether each borrowed text cell borrows from `owner`. Blank grid padding
+/// and the static one-byte ASCII graphemes `Buffer.draw` stores borrow
+/// nothing, so they are skipped. A row pointing into another component's
+/// scratch would be rewritten by its next draw.
 fn rowBorrowsFrom(buf: *const Buffer, y: usize, owner: []const u8) bool {
     const lo = @intFromPtr(owner.ptr);
     const hi = lo + owner.len;
     var x: usize = 0;
     while (x < buf.width) : (x += 1) {
         const cell = buf.get(@intCast(x), @intCast(y));
-        if (cell.wide or cell.grapheme.len == 0 or cell.eql(.{})) continue;
+        if (cell.wide or cell.grapheme.len == 0 or Cell.isStaticGrapheme(cell.grapheme)) continue;
         const at = @intFromPtr(cell.grapheme.ptr);
         if (at < lo or at + cell.grapheme.len > hi) return false;
     }
@@ -502,8 +504,9 @@ test "text: two components drawn into one frame keep their own rows" {
     var b_scratch: std.ArrayList(u8) = .empty;
     defer b_scratch.deinit(test_alloc);
 
-    var a: Text = .{ .text = "AAAAA", .scratch = &a_scratch };
-    var b: Text = .{ .text = "BBBBB", .scratch = &b_scratch };
+    // Non-ASCII text: ASCII cells are static and borrow nothing.
+    var a: Text = .{ .text = "ÅÅÅÅÅ", .scratch = &a_scratch };
+    var b: Text = .{ .text = "ßßßßß", .scratch = &b_scratch };
     var buf = try Buffer.init(test_alloc, 3, 2);
     defer buf.deinit();
 
@@ -511,8 +514,8 @@ test "text: two components drawn into one frame keep their own rows" {
     _ = try b.draw(test_alloc, &buf, 0, 1, .fromNanoseconds(0));
 
     var rowbuf: [16]u8 = undefined;
-    try std.testing.expectEqualStrings("AA…", rowStr(&buf, 0, &rowbuf));
-    try std.testing.expectEqualStrings("BB…", rowStr(&buf, 1, &rowbuf));
+    try std.testing.expectEqualStrings("ÅÅ…", rowStr(&buf, 0, &rowbuf));
+    try std.testing.expectEqualStrings("ßß…", rowStr(&buf, 1, &rowbuf));
     // The rows sit in different storage: neither borrow reaches into the
     // other component's memory, so neither draw can rewrite the other.
     try std.testing.expect(rowBorrowsFrom(&buf, 0, a_scratch.items));
@@ -531,8 +534,8 @@ test "text: wrapped rows survive a second component's draw" {
     var b_scratch: std.ArrayList(u8) = .empty;
     defer b_scratch.deinit(test_alloc);
 
-    var a: Text = .{ .text = "alpha beta", .wrap = true, .scratch = &a_scratch };
-    var b: Text = .{ .text = "gamma delta", .wrap = true, .scratch = &b_scratch };
+    var a: Text = .{ .text = "álpha béta", .wrap = true, .scratch = &a_scratch };
+    var b: Text = .{ .text = "gámma délta", .wrap = true, .scratch = &b_scratch };
     var buf = try Buffer.init(test_alloc, 6, 4);
     defer buf.deinit();
 
@@ -540,10 +543,10 @@ test "text: wrapped rows survive a second component's draw" {
     _ = try b.draw(test_alloc, &buf, 0, 2, .fromNanoseconds(0));
 
     var rowbuf: [32]u8 = undefined;
-    try std.testing.expect(std.mem.startsWith(u8, rowStr(&buf, 0, &rowbuf), "alpha"));
-    try std.testing.expect(std.mem.indexOf(u8, rowStr(&buf, 1, &rowbuf), "beta") != null);
-    try std.testing.expect(std.mem.startsWith(u8, rowStr(&buf, 2, &rowbuf), "gamma"));
-    try std.testing.expect(std.mem.indexOf(u8, rowStr(&buf, 3, &rowbuf), "delta") != null);
+    try std.testing.expect(std.mem.startsWith(u8, rowStr(&buf, 0, &rowbuf), "álpha"));
+    try std.testing.expect(std.mem.indexOf(u8, rowStr(&buf, 1, &rowbuf), "béta") != null);
+    try std.testing.expect(std.mem.startsWith(u8, rowStr(&buf, 2, &rowbuf), "gámma"));
+    try std.testing.expect(std.mem.indexOf(u8, rowStr(&buf, 3, &rowbuf), "délta") != null);
     // Rows 0-1 borrow the first component's scratch and rows 2-3 the
     // second's; no row reaches into the other component's memory.
     for (0..2) |row| {
@@ -560,7 +563,7 @@ test "text: wrapped rows survive a second component's draw" {
     try buf.renderAll(&tw.w);
     const out = tw.w.buffered();
     var after: usize = 0;
-    for ([_][]const u8{ "alpha", "beta", "gamma", "delta" }) |word| {
+    for ([_][]const u8{ "álpha", "béta", "gámma", "délta" }) |word| {
         const at = std.mem.indexOf(u8, out, word).?;
         try std.testing.expect(at >= after);
         try std.testing.expectEqual(at, std.mem.lastIndexOf(u8, out, word).?);

@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const Buffer = @import("../buffer.zig").Buffer;
+const Cell = @import("../cell.zig").Cell;
 const Style = @import("../style.zig").Style;
 const Width = @import("../width.zig");
 const Clock = @import("component.zig").Clock;
@@ -404,11 +405,13 @@ test "status_bar: an ellipsized segment is drawn from the caller's own bytes" {
     var rowbuf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("a very lo…", rowStr(&buf, 0, &rowbuf));
 
-    // The nine kept cells point inside `text`; the tenth is the constant
-    // marker the component appends itself.
+    // The nine kept cells are either static ASCII graphemes (which borrow
+    // nothing) or point inside `text`: no copy anywhere. The tenth is the
+    // constant marker the component appends itself.
     const lo = @intFromPtr(text.ptr);
     for (0..9) |x| {
         const g = buf.get(@intCast(x), 0).grapheme;
+        if (Cell.isStaticGrapheme(g)) continue;
         const at = @intFromPtr(g.ptr);
         try std.testing.expect(at >= lo and at + g.len <= lo + text.len);
     }

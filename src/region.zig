@@ -3838,12 +3838,16 @@ pub const Region = struct {
         const arena = self.snapshot_scratch.allocator();
         try self.snapshot_cells.ensureTotalCapacity(self.gpa, self.cur.cells.len);
         for (self.cur.cells) |cell| {
-            if (cell.grapheme.len == 0) continue;
-            // The default blank is a comptime literal — immutable by
-            // construction, so it needs no copy, and no other slice can
-            // share that address except the same literal.
-            if (cell.grapheme.ptr == (Cell{}).grapheme.ptr) continue;
-            const owned = try arena.dupe(u8, cell.grapheme);
+            // Static graphemes (every cell `Buffer.draw` wrote from ASCII,
+            // and the default blank) are immutable, so `prev` owns them as
+            // they are; a borrowed one-byte ASCII slice maps onto the same
+            // table. Only the rest is copied, so a mostly-ASCII frame pays
+            // almost no per-cell allocation.
+            if (cell.grapheme.len == 0 or Cell.isStaticGrapheme(cell.grapheme)) continue;
+            const owned = if (cell.grapheme.len == 1 and cell.grapheme[0] < 0x80)
+                Cell.asciiGrapheme(cell.grapheme[0])
+            else
+                try arena.dupe(u8, cell.grapheme);
             self.snapshot_cells.appendAssumeCapacity(owned);
         }
     }
@@ -3862,11 +3866,11 @@ pub const Region = struct {
         }
         @memcpy(self.prev.cells, self.cur.cells);
         // Cells with no text keep `cur`'s (empty) slice, which has
-        // nothing to own; every other cell takes its prepared copy.
+        // nothing to own, and static graphemes need no copy; every other
+        // cell takes its prepared one. The skip mirrors `prepareSnapshot`.
         var next: usize = 0;
         for (self.prev.cells) |*cell| {
-            if (cell.grapheme.len == 0) continue;
-            if (cell.grapheme.ptr == (Cell{}).grapheme.ptr) continue;
+            if (cell.grapheme.len == 0 or Cell.isStaticGrapheme(cell.grapheme)) continue;
             cell.grapheme = self.snapshot_cells.items[next];
             next += 1;
         }
@@ -3908,13 +3912,10 @@ pub const Region = struct {
 
     /// Whether row `y` is unchanged. Safe because `prev` OWNS the
     /// previous frame's text (see `prepareSnapshot`): a compare can
-    /// never read bytes the app has since rewritten in place.
+    /// never read bytes the app has since rewritten in place. Shares
+    /// `Buffer.rowChanged`'s whole-row byte compare before the per-cell one.
     fn rowEqual(self: *const Region, y: usize) bool {
-        if (y >= self.prev.height or self.cur.width > self.prev.width) return false;
-        for (0..self.cur.width) |x| {
-            if (!self.cur.get(@intCast(x), @intCast(y)).eql(self.prev.get(@intCast(x), @intCast(y)))) return false;
-        }
-        return true;
+        return !self.cur.rowChanged(&self.prev, y);
     }
 
     /// Number of rows the current frame occupies: index of the last
@@ -8119,7 +8120,9 @@ test "region: a steady frame allocates nothing — the snapshot reuses its stora
         .sync_output = true,
     });
     defer r.deinit();
-    var text: [4]u8 = "aaaa".*;
+    // A non-ASCII lead: one-byte ASCII cells are static and never copied,
+    // so only a multi-byte grapheme exercises the snapshot's own storage.
+    var text: [4]u8 = "äaa".*;
     var t: TestWriter = .{};
 
     // Warm up with REAL frames: an identical redraw early-returns, and
@@ -8128,7 +8131,7 @@ test "region: a steady frame allocates nothing — the snapshot reuses its stora
     // in) and the per-cell slice list have to reach their high-water
     // mark before the steady state means anything.
     for (0..4) |i| {
-        text[0] = @intCast('a' + (i % 6));
+        text[1] = @intCast(0xa4 + (i % 6)); // ä å æ ç è é
         t.init();
         _ = try r.cur.draw(Style{}, &text, 0, 0);
         try r.render(&t.w);
@@ -8139,7 +8142,7 @@ test "region: a steady frame allocates nothing — the snapshot reuses its stora
     // Steady state with real churn: zero allocations across the whole
     // loop, measured — not inferred from an unchanged capacity.
     for (0..32) |i| {
-        text[0] = @intCast('a' + (i % 6));
+        text[1] = @intCast(0xa4 + (i % 6));
         t.init();
         _ = try r.cur.draw(Style{}, &text, 0, 0);
         try r.render(&t.w);
@@ -8148,7 +8151,7 @@ test "region: a steady frame allocates nothing — the snapshot reuses its stora
     // The snapshot OWNS the last frame's text: rewriting the app's
     // buffer in place after the commit is still real damage, so `prev`
     // never aliases the caller's bytes.
-    text[0] = 'z';
+    text[1] = 0xbc; // ä -> ü in the caller's buffer, still borrowed by `cur`
     try testing.expect(r.dirtyCells() > 0);
 }
 

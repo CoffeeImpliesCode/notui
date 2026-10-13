@@ -122,6 +122,14 @@ pub const Buffer = struct {
             _ = try self.draw(cell.style, cell.grapheme, x, y);
             return;
         }
+        const cw: u16 = if (!cell.wide and Width.graphemeWidth(cell.grapheme) >= 2) 2 else 1;
+        self.place(x, y, cell, cw);
+    }
+
+    /// Store `cell` at (x, y), in bounds, already measured as `cw` columns
+    /// (1 or 2) and segmented as one cell cluster. Shared by `set` and
+    /// `draw`, which knows both and must not pay for them twice.
+    fn place(self: *Buffer, x: u16, y: u16, cell: Cell, cw: u16) void {
         const idx = @as(usize, y) * @as(usize, self.width) + x;
 
         // Overwriting a wide continuation cell: its lead is at x - 1.
@@ -143,7 +151,7 @@ pub const Buffer = struct {
         // A wide grapheme occupies the next column too. The continuation
         // never emits text (renderers skip it) and carries the style so a
         // styled wide glyph paints both columns.
-        if (!cell.wide and x + 1 < self.width and Width.graphemeWidth(cell.grapheme) >= 2) {
+        if (cw >= 2 and x + 1 < self.width) {
             self.cells[idx + 1] = .{
                 .grapheme = "",
                 .style = cell.style,
@@ -161,6 +169,8 @@ pub const Buffer = struct {
     /// of the line (graceful truncation — never an error). Returns the
     /// number of columns consumed.
     /// Retains slices of `text` and any style hyperlink until cells are replaced or released.
+    /// Printable one-byte ASCII graphemes are stored as static slices instead, so they
+    /// borrow nothing and compare by pointer.
     /// The error set is empty for the common component drawing interface.
     pub fn draw(self: *Buffer, style: Style, text: []const u8, x: u16, y: u16) !u16 {
         if (y >= self.height or text.len == 0) return 0;
@@ -168,17 +178,21 @@ pub const Buffer = struct {
         var col: u16 = x;
         var off: usize = 0;
         while (off < text.len) {
-            const glen = Width.firstCellLen(text[off..]);
+            // Printable ASCII is one byte and one column in every mode;
+            // only other text goes through the segmenter.
+            const ascii = Width.asciiSingle(text[off..]);
+            const glen = if (ascii) 1 else Width.firstCellLen(text[off..]);
             if (glen == 0) break; // defensive: no progress possible
             const gc = text[off..][0..glen];
             off += glen;
 
-            const cw = Width.graphemeWidth(gc);
+            const cw: isize = if (ascii) 1 else Width.graphemeWidth(gc);
             if (cw <= 0) continue; // zero-width: advance no column
 
             const cwu: u16 = if (cw >= 2) 2 else 1;
             if (@as(u32, col) + cwu > self.width) break; // over-wide: drop the rest
-            try self.set(col, y, .{ .grapheme = gc, .style = style });
+            const stored = if (ascii) Cell.asciiGrapheme(gc[0]) else gc;
+            self.place(col, y, .{ .grapheme = stored, .style = style }, cwu);
             col += cwu;
         }
         return col - x;
@@ -290,7 +304,7 @@ pub const Buffer = struct {
     /// equal bytes are cells `Cell.eql` would also call equal, so it can
     /// never accept a row the exact per-cell compare would call changed.
     /// A mismatch falls through to that compare, which decides.
-    fn rowChanged(self: *const Buffer, prev: *const Buffer, y: usize) bool {
+    pub fn rowChanged(self: *const Buffer, prev: *const Buffer, y: usize) bool {
         if (y >= prev.height or self.width > prev.width) return true;
         const cur = self.rowCells(y);
         const old = prev.rowCells(y);
