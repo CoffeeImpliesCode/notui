@@ -156,12 +156,16 @@ These are clean contract changes, with no legacy aliases:
   Existing casts remain zero-copy. `FontFace.glyphOutline` accepts a const face.
 - A Markdown highlighter uses the supplied arena or static storage for replacement slices.
   Keep replacements valid through the returned block's lifetime. Hyperlinks remain caller borrows.
+- `Buffer.cells` is removed. Read cells with `get`, write them with `set` or `draw`,
+  and copy a grid with `copyFrom`. Treat `slots`, `text` and `links` as internal storage.
+  One-byte ASCII graphemes live in the grid by value. `get` returns static slices for them.
+  Non-ASCII graphemes and hyperlinks still borrow the caller's bytes.
 
 The owning declarations document callback reentry, failure residue, option
 defaults, and slice invalidation. Copies of storage owners share resources;
-they are not a second disposal obligation. `Buffer` borrows drawn graphemes
-and style hyperlinks. `Region.prev` copies graphemes but still borrows hyperlink
-bytes until a successful replacement snapshot or disposal.
+they are not a second disposal obligation. `Buffer` stores one-byte ASCII by value.
+Other graphemes and all style hyperlinks remain caller borrows. `Region.prev` owns
+its graphemes, but borrows hyperlink bytes until a successful replacement snapshot or disposal.
 
 ### API repair decisions
 
@@ -961,26 +965,58 @@ allocations per frame at 80×24 and 200×60 for static and streaming content.
 Static steady-state frames must write zero bytes. Rendering allocations
 are counted rather than assumed.
 
-Measurement for 0.1.0 on this host (`zig build bench`, ReleaseFast, Zig 0.16, pinned to
-one core; timing floor clock p50 24 ns / p99 193 ns). The host ran at load ≈26 on 25
-cores, so the p50 and p99 columns carry scheduler noise; `min` is the steadier figure.
+### Unreleased performance rounds
 
-| case | min ns | p50 ns | p99 ns | bytes/frame | allocs/frame |
-|---|---|---|---|---|---|
-| static 80×24 | 21 550 | 54 154 | 60 738 | 0 | 0.000 |
-| static 200×60 | 297 732 | 313 201 | 324 384 | 0 | 0.000 |
-| stream 80×24 | 41 858 | 62 886 | 69 637 | 230 | 0.000 |
-| stream 200×60 | 268 134 | 335 333 | 345 884 | 426 | 0.000 |
-| damage 80×24 | 68 580 | 70 820 | 77 079 | 104 | 0.000 |
-| damage 200×60 | 435 489 | 439 158 | 449 556 | 224 | 0.000 |
-| styles 80×24 | 64 278 | 65 109 | 71 701 | 170 | 0.000 |
-| region h1 | 244 | 9 544 | 12 927 | 77 | 0.667 |
-| region h4 | 1 163 | 21 491 | 32 897 | 182 | 0.667 |
-| region h24 | 6 681 | 154 827 | 296 961 | 853 | 0.666 |
+Four optimization rounds retained changes. A fifth round rejected two further candidates.
+The final comparison interleaved 0.1.0 (`6e495eec`) and the current build five times.
+Both used Zig 0.16.0, ReleaseFast and the native CPU target on a shared Xeon Gold 6134.
+Each process ran on CPU 11. `min` is the minimum across runs.
+`p50` is the median of the five per-run p50 values. All times below are nanoseconds.
+The 64-iteration probe sets an approximate 500 ms budget per case.
+
+| case | 0.1.0 min | current min | 0.1.0 p50 | current p50 |
+|---|---:|---:|---:|---:|
+| static 80×24 | 21 357 | 9 418 | 53 738 | 22 927 |
+| static 200×60 | 145 030 | 48 833 | 311 437 | 125 012 |
+| stream 80×24 | 26 403 | 10 276 | 58 147 | 25 139 |
+| stream 200×60 | 160 661 | 50 128 | 329 639 | 119 893 |
+| damage 80×24 | 30 930 | 7 462 | 65 344 | 15 040 |
+| damage 200×60 | 234 286 | 31 804 | 418 011 | 63 765 |
+| styles 80×24 | 28 222 | 7 580 | 59 980 | 15 488 |
+| region h1 | 172 | 91 | 8 273 | 1 900 |
+| region h4 | 542 | 226 | 18 487 | 5 785 |
+| region h24 | 3 093 | 1 044 | 154 608 | 35 314 |
+
+These are synthetic pipeline timings, not terminal display latency.
+The shared host adds scheduler noise, especially to p50 and p99.
+An A/A check showed about 1–8% variation in minima. Small differences did not justify extra code.
+
+Buffer cases still allocate zero times per frame. Static frames emit zero bytes.
+Stream cases average 230 / 425–426 bytes per frame, damage 104 / 224, and styles 170.
+Region cases retain about 0.667 allocations per frame and emit zero bytes in the idle phase.
+Region h24 averages range from 851 to 853 bytes because measured runs end at different cycle phases.
+
+**Timing boundary:** damage and styles time both the library renderer and the pre-B4 byte reference.
+The reference now uses `rowChanged`, rather than a cell-by-cell damage scan.
+Its byte encoder remains pinned. These rows include faster benchmark bookkeeping,
+so their ratios are not pure renderer speedups. Static, stream and Region do not run that reference.
+
+The grid now has a 16-byte hot slot instead of a 56-byte `Cell` record on this x86-64 target.
+Cold slice arrays bring total grid storage to 48 bytes per cell.
+ASCII runs use a 32-lane byte scan. Cold flags and row footprints use eight-slot scans.
+One iterator segments each non-ASCII stretch, with a checked BMP bitset for simple clusters.
+An occupancy mask removes the SGR memo's full-storage clear.
+The final profile leaves drawing, row comparison and snapshot copying as the main library costs.
+
+Explicit vector construction of ASCII slots and block copies of cold slices were tested separately
+and together. They gave no repeatable gain across cases, so the simpler paths remain.
+The sampled `Style.eql` hotspot belonged to the pinned benchmark encoder, not Region.
+
+### 0.1.0 comparison
 
 The 0.1.0 performance round compared ReleaseFast builds of the previous `main`
-(`38634f2b`) and this tree, run interleaved three times on the same core. Medians of
-the per-run `min` in ns:
+(`38634f2b`) and 0.1.0, interleaved three times on the same core.
+Medians of the per-run `min` in ns:
 
 | case | main | 0.1.0 |
 |---|---|---|

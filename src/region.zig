@@ -195,7 +195,6 @@
 
 const std = @import("std");
 const Buffer = @import("buffer.zig").Buffer;
-const Cell = @import("cell.zig").Cell;
 const Style = @import("style.zig").Style;
 const emit = @import("emit.zig");
 const markdown = @import("markdown.zig");
@@ -1698,7 +1697,9 @@ pub const Region = struct {
         var n: usize = 0;
         for (0..self.cur.height) |y| {
             for (0..self.cur.width) |x| {
-                if (!self.cur.get(@intCast(x), @intCast(y)).eql(self.prev.get(@intCast(x), @intCast(y)))) n += 1;
+                const cell = self.cur.get(@intCast(x), @intCast(y));
+                const prev = self.prev.get(@intCast(x), @intCast(y));
+                if (!cell.eql(prev)) n += 1;
             }
         }
         return n;

@@ -384,20 +384,15 @@ fn writeStylePreB4(w: *std.Io.Writer, tracked: *Style, style: Style) BenchError!
 /// Point `prev` at the frame just drawn — the sync every buffer-level case
 /// does after its encoder runs.
 ///
-/// The copy is shallow: cells keep borrowing the case's text. That is
-/// exactly right while every string a case draws is an immutable literal
-/// (`base_rows`, `row_a`/`row_b`, `style_text_*`, `style_plain_row`), since
-/// the two buffers then hold the same bytes forever and a row that did not
-/// change compares equal.
+/// Slots copy by value. Non-ASCII graphemes and hyperlinks keep borrowing
+/// the case's text. Every string here is an immutable literal (`base_rows`,
+/// `row_a`/`row_b`, `style_text_*`, `style_plain_row`), so an unchanged row
+/// compares equal in both grids.
 ///
-/// A case that draws from an arena, a scratch buffer, or any storage it
-/// rewrites in place MUST NOT use this: writing the new frame over those
-/// bytes would change `prev` too, the damage test would call the row
-/// unchanged, and the frame would never repaint — the bytes-per-frame
-/// number would quietly fall instead of failing loudly. Such a case has to
-/// own its text the way `Region.syncPrev` does (copy the graphemes into a
-/// retained arena and point the cells at the copies), or route the frame
-/// through `Region.render` instead.
+/// A case that draws borrowed graphemes from mutable storage MUST NOT use
+/// this helper. Rewriting those bytes would change `prev` too and hide
+/// damage. Such a case must own its text through the snapshot path in
+/// `Region.render`. One-byte ASCII slots already own their bytes.
 fn syncPrev(cur: *const Buffer, prev: *Buffer) void {
     prev.copyFrom(cur);
 }

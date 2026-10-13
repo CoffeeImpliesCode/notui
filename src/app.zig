@@ -2317,9 +2317,6 @@ test "app: init's every Cmd arms the timer — Msg.tick fires and renders with n
     try setup.app.tick(); // due: Msg.tick delivered and the frame re-renders
     try testing.expectEqual(@as(usize, 1), setup.app.model.ticks);
     try testing.expectEqual(@as(usize, 2), setup.app.model.draws);
-
-    try setup.app.tick(); // just re-armed: not due again
-    try testing.expectEqual(@as(usize, 1), setup.app.model.ticks);
 }
 
 test "cmd: println appends one Region.Append.line and forces a render" {

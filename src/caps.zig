@@ -131,8 +131,8 @@ const ScanKind = enum {
 
 /// The outcome of one query window.
 const ScanResult = union(enum) {
-    /// DA1 reply params ("1;2;4;6;22;24"), null when no reply arrived.
-    da1: ?[]const u8,
+    /// Whether DA1 advertised truecolor (parameter 24).
+    da1: bool,
     /// DECRPM status: 0 unrecognized, 1 set, 2 reset, 3/4 permanently set/reset.
     decrpm: ?u8,
     /// Kitty keyboard cap reply seen.
@@ -153,11 +153,7 @@ fn detectWithTimeout(alloc: std.mem.Allocator, tty: anytype, parser: *Parser, ti
     {
         const r = try queryScan(.da1, 0, alloc, tty, parser, "\x1b[c", timeout_ms);
         switch (r) {
-            .da1 => |params| {
-                if (params) |p| {
-                    if (primaryDeviceAttributesHasParam(p, 24)) caps.rgb = true;
-                }
-            },
+            .da1 => |rgb| caps.rgb = rgb,
             else => {},
         }
     }
@@ -280,7 +276,10 @@ fn queryScan(
 
         switch (kind) {
             .da1 => {
-                if (parsePrimaryDeviceAttributes(bytes)) |params| return .{ .da1 = params };
+                if (parsePrimaryDeviceAttributes(bytes)) |params| {
+                    // `params` borrows this query's stack buffer.
+                    return .{ .da1 = primaryDeviceAttributesHasParam(params, 24) };
+                }
             },
             .decrpm => {
                 if (parseDecrpmReply(bytes, mode)) |supported| return .{ .decrpm = supported };
@@ -297,7 +296,7 @@ fn queryScan(
         }
     }
     return switch (kind) {
-        .da1 => .{ .da1 = null },
+        .da1 => .{ .da1 = false },
         .decrpm => .{ .decrpm = null },
         .kitty => .{ .kitty = false },
         .kitty_graphics => .{ .kitty_graphics = false },

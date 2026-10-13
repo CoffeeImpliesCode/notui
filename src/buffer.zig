@@ -4,17 +4,16 @@
 //! Adapted from zigzag `terminal/screen.zig` (grid :70-85, resize
 //! :88-117, setCell wide handling :115-154, writeString :157-188, diff
 //! render :190-306). The structural adaptation from the copy source:
-//! `Cell.grapheme` is a borrowed `[]const u8` slice (architecture §3 —
-//! points into the app's text arena, never copied), not zigzag's `char:
-//! u21`; width comes exclusively from `width.zig` (the zg seam, plan §0
-//! grep-gate), never from zg directly. Style tracking follows the
-//! libvaxis DAM pattern: SGR is written only when the emitted style
-//! changes, and wide continuations never emit text.
+//! `Cell.grapheme` is a borrowed `[]const u8` interface, not zigzag's
+//! `char: u21`. The grid stores one-byte ASCII by value. Other graphemes
+//! borrow the caller's text. Width comes only from `width.zig`, the zg
+//! seam. Style tracking follows the libvaxis DAM pattern: SGR changes
+//! only when the emitted style changes, and wide continuations emit no text.
 //!
-//! `Cell` is the interface value, not the storage: the grid keeps a
-//! 16-byte hot slot per cell (grapheme head, flags, packed style) and the
-//! borrowed slices in cold side arrays, so the per-frame passes move a
-//! quarter of the bytes a `Cell` array would.
+//! `Cell` is the interface value, not the storage. The grid keeps a
+//! 16-byte hot slot per cell (grapheme head, flags, packed style).
+//! Borrowed slices live in cold side arrays, which hot passes read only
+//! when a slot's flags require them.
 //!
 //! ROADMAP B4: damage is row-granular and decided in a single pass (each
 //! row is compared exactly once, an unchanged row costs no bytes at all),
@@ -27,6 +26,7 @@
 //! Terminal modes, transport, and committed text snapshots belong to `Region` or the caller.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Cell = @import("cell.zig").Cell;
 const Color = @import("color.zig").Color;
 const AnsiColor = @import("color.zig").AnsiColor;
@@ -158,13 +158,26 @@ pub const Buffer = struct {
                 return self.at + k;
             }
 
+            /// Bit k set when slot k's meta has a bit of `mask`.
             fn metaHits(chunk: *const [8]Slot, mask: u32) u8 {
                 const words: @Vector(32, u32) = @as(*const [32]u32, @ptrCast(chunk)).*;
-                const metas = @shuffle(u32, words, undefined, [8]i32{ 1, 5, 9, 13, 17, 21, 25, 29 });
-                const hit = metas & @as(@Vector(8, u32), @splat(mask)) != @as(@Vector(8, u32), @splat(0));
-                return @bitCast(hit);
+                const metas = @shuffle(
+                    u32,
+                    words,
+                    undefined,
+                    [8]i32{ 1, 5, 9, 13, 17, 21, 25, 29 },
+                );
+                const hit = metas & @as(@Vector(8, u32), @splat(mask)) !=
+                    @as(@Vector(8, u32), @splat(0));
+                return Slot.maskBits(hit);
             }
         };
+
+        /// Normalize vector lanes to low-to-high bits on either byte order.
+        fn maskBits(flags: @Vector(8, bool)) u8 {
+            const raw_mask: u8 = @bitCast(flags);
+            return if (builtin.target.cpu.arch.endian() == .big) @bitReverse(raw_mask) else raw_mask;
+        }
 
         /// For eight slots, which paint (`paints()`) and which of those
         /// hold borrowed text, as bit masks, from one 128-byte load: each
@@ -179,12 +192,12 @@ pub const Buffer = struct {
             const hi = @shuffle(u32, words, undefined, [8]i32{ 3, 7, 11, 15, 19, 23, 27, 31 });
             const blank_meta: u32 = @bitCast(blank.meta);
             const zero: V = @splat(0);
-            const diff = (glyph ^ @as(V, @splat(blank.glyph))) | (meta ^ @as(V, @splat(blank_meta))) |
-                lo | hi;
-            const blank_m: u8 = @bitCast(diff == zero);
-            const wide_m: u8 = @bitCast(meta & @as(V, @splat(wide_bit)) != zero);
-            const empty_m: u8 = @bitCast(meta & @as(V, @splat(0xffff)) == zero);
-            const borrowed_m: u8 = @bitCast(meta & @as(V, @splat(borrowed_bit)) != zero);
+            const diff = (glyph ^ @as(V, @splat(blank.glyph))) |
+                (meta ^ @as(V, @splat(blank_meta))) | lo | hi;
+            const blank_m = maskBits(diff == zero);
+            const wide_m = maskBits(meta & @as(V, @splat(wide_bit)) != zero);
+            const empty_m = maskBits(meta & @as(V, @splat(0xffff)) == zero);
+            const borrowed_m = maskBits(meta & @as(V, @splat(borrowed_bit)) != zero);
             const paints_m = ~(blank_m | wide_m | empty_m);
             return .{ .paints = paints_m, .borrowed = borrowed_m & paints_m };
         }
@@ -441,7 +454,8 @@ pub const Buffer = struct {
                 while (true) {
                     const cwu: u16 = if (c.width >= 2) 2 else 1;
                     if (@as(u32, col) + cwu > self.width) break :outer; // over-wide
-                    self.place(col, y, text[off..][0..c.len], packed_style, style.hyperlink, false, cwu);
+                    const grapheme = text[off..][0..c.len];
+                    self.place(col, y, grapheme, packed_style, style.hyperlink, false, cwu);
                     col += cwu;
                     off += c.len;
                     c = Width.simpleCluster(text[off..]) orelse break;
@@ -1059,9 +1073,8 @@ fn unpackColour(bits: u64) ?Color {
 /// emitted at all (OSC 8 is deferred, emit.zig:6). Keying the memo on
 /// this view instead of on `Style.eql` is what stops a null-vs-default
 /// colour or a hyperlink swap from spending a reset that repaints the
-/// same pixels. No borrowed bytes reach this word — cell graphemes are
-/// the only borrowed data — so a key can never go stale under a caller
-/// that mutates its arena.
+/// same pixels. The key contains no borrowed slices. Changes to borrowed
+/// graphemes or hyperlinks cannot change the key.
 const Emitted = struct {
     key: u64 = 0,
 
@@ -1183,7 +1196,7 @@ const SgrCache = struct {
     lens: [sgr_cache_slots]u8,
     bytes: [sgr_cache_slots][max_sgr_bytes]u8,
 
-    const SlotMask = std.meta.Int(.unsigned, sgr_cache_slots);
+    const SlotMask = @Int(.unsigned, sgr_cache_slots);
 
     fn empty() SgrCache {
         var cache: SgrCache = undefined;
@@ -1434,6 +1447,49 @@ test "buffer: the eight-slot flag scan finds exactly the flagged slots" {
     }
 }
 
+test "buffer: copyFrom carries borrowed text and links across chunk edges" {
+    // Source rows mix by-value ASCII, borrowed clusters and hyperlinks in a
+    // pattern that lands on eight-cell chunk edges and the scalar tail; the
+    // target starts with other borrowed text. Same, wider and narrower
+    // widths take the whole-grid and the per-row copy. All clusters are one
+    // column wide, so no wide pair straddles the copied rectangle's edge.
+    const borrowed = "e\u{301}\u{301}";
+    const other = "a\u{301}\u{301}\u{301}";
+    const gpa = std.testing.allocator;
+    const link: Style = .{ .hyperlink = "https://example.com" };
+    for (5..22) |w0| {
+        const w: u16 = @intCast(w0);
+        var src = try Buffer.init(gpa, w, 3);
+        defer src.deinit();
+        for (0..3) |y| for (0..w) |x| {
+            const k = x * 3 + y;
+            const cell: Cell = if (k % 7 == 0)
+                .{ .grapheme = borrowed }
+            else if (k % 5 == 2)
+                .{ .grapheme = "x", .style = link }
+            else
+                .{ .grapheme = Cell.asciiGrapheme(@intCast('a' + k % 26)) };
+            try src.set(@intCast(x), @intCast(y), cell);
+        };
+        for ([_]u16{ w, w + 3, w - 2 }) |dw| {
+            var dst = try Buffer.init(gpa, dw, 4);
+            defer dst.deinit();
+            for (0..4) |y| for (0..dw) |x| {
+                try dst.set(@intCast(x), @intCast(y), .{ .grapheme = other });
+            };
+            dst.copyFrom(&src);
+            for (0..4) |y| for (0..dw) |x| {
+                const got = dst.get(@intCast(x), @intCast(y));
+                const want: Cell = if (y < 3 and x < w)
+                    src.get(@intCast(x), @intCast(y))
+                else
+                    .{ .grapheme = other };
+                try std.testing.expect(got.eql(want));
+            };
+        }
+    }
+}
+
 test "buffer: set/get round-trip" {
     var buf = try Buffer.init(std.testing.allocator, 6, 3);
     defer buf.deinit();
@@ -1622,30 +1678,40 @@ test "buffer: zero-width combining marks advance no column" {
 }
 
 test "buffer: an ASCII run over wide pairs matches cell-by-cell placement" {
-    // Wide pairs at columns 1-2 and 5-6; every run start and length that
-    // fits, drawn in one call, must leave the grid `set` would leave one
-    // cell at a time — including a run ending on a lead or starting on a
-    // continuation.
-    const text = "abcdefgh";
-    for (0..8) |x0| {
-        for (1..8 - x0 + 1) |len| {
-            var got = try Buffer.init(std.testing.allocator, 8, 2);
+    // Wide pairs at columns 1-2, 5-6 and 17-18; every run start and length
+    // that fits, drawn in one call, must leave the grid `set` would leave
+    // one cell at a time — including a run ending on a lead or starting on
+    // a continuation, with both short and long runs. The style carries a
+    // hyperlink, so the comparison covers both hot slots and cold data.
+    const text = "abcdefghijklmnopqrstuvwx";
+    const style: Style = .{
+        .fg = .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } },
+        .attrs = .{ .bold = true },
+        .hyperlink = "https://example.com",
+    };
+    for (0..text.len) |x0| {
+        for (1..text.len - x0 + 1) |len| {
+            var got = try Buffer.init(std.testing.allocator, text.len, 2);
             defer got.deinit();
-            var want = try Buffer.init(std.testing.allocator, 8, 2);
+            var want = try Buffer.init(std.testing.allocator, text.len, 2);
             defer want.deinit();
             for ([_]*Buffer{ &got, &want }) |b| {
                 try b.set(1, 1, .{ .grapheme = "日" });
                 try b.set(5, 1, .{ .grapheme = "本" });
+                try b.set(17, 1, .{ .grapheme = "語" });
             }
             const x: u16 = @intCast(x0);
-            _ = try got.draw(.{ .attrs = .{ .bold = true } }, text[0..len], x, 1);
+            _ = try got.draw(style, text[0..len], x, 1);
             for (text[0..len], 0..) |b, i| {
                 try want.set(x + @as(u16, @intCast(i)), 1, .{
                     .grapheme = Cell.asciiGrapheme(b),
-                    .style = .{ .attrs = .{ .bold = true } },
+                    .style = style,
                 });
             }
-            for (got.slots, want.slots) |g, w| try std.testing.expectEqual(g.bits(), w.bits());
+            for (got.slots, want.slots, 0..) |g, w, i| {
+                try std.testing.expectEqual(g.bits(), w.bits());
+                try std.testing.expect(got.cellAt(i).eql(want.cellAt(i)));
+            }
         }
     }
 }

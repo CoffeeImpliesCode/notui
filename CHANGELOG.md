@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased
+
+### Breaking changes
+
+- `Buffer.cells` is removed. Use `get`, `set`, `draw` and `copyFrom`.
+  `Cell` remains the interface value. The grid uses hot slots and cold side arrays.
+- `Buffer.set` and `Buffer.draw` store one-byte ASCII graphemes by value.
+  Reads return static slices. Other graphemes and all hyperlinks remain caller borrows.
+
+### Fixes
+
+- Preserve SIMD lane order on big-endian targets. ASCII prefix scans, cold-text
+  copies and row footprints now select the correct slots.
+- Return the DA1 truecolor flag by value. Capability detection no longer reads
+  a slice of the query function's expired stack buffer.
+- Remove the timer test's immediate second-call timing assumption.
+  Its message-delivery and render assertions remain.
+
+### Performance
+
+- Scan printable ASCII in 32-byte vectors and store each run in one pass.
+- Keep glyph heads, flags and packed styles in 16-byte hot slots.
+  Damage scans, copies and row emission read cold text only when flags require it.
+- Segment non-ASCII stretches with one iterator. A checked BMP bitset skips
+  segmentation for common Latin, Greek, Cyrillic, kana, CJK and symbol clusters.
+  Other clusters still use zg.
+- Scan cold flags and row footprints eight slots at a time.
+- Use an occupancy mask for the SGR memo instead of clearing its full storage each frame.
+- Drop experimental vector slot construction and block copies of cold slices.
+  Neither gave a repeatable gain across the benchmark cases.
+
+ReleaseFast against 0.1.0, five interleaved runs on the same CPU:
+static 200×60 minimum 145 030 → 48 833 ns, stream 200×60 160 661 → 50 128 ns,
+and Region h24 median p50 154 608 → 35 314 ns.
+Buffer cases retain zero allocations per frame. Static and Region idle frames emit zero bytes.
+See README "Measurement and verification" for all cases and the benchmark-reference timing caveat.
+
 ## 0.1.0
 
 First tagged release. Changes since `main` at `38634f2b`.

@@ -28,8 +28,8 @@ pub const Cell = struct {
     ///
     /// The default, `" "`, is the blank cell: it paints one space.
     grapheme: []const u8 = ascii_graphemes[' '..][0..1],
-    /// The style to paint the grapheme with. Its `hyperlink`, when set, is
-    /// borrowed on the same terms as `grapheme`.
+    /// The style to paint the grapheme with. Its `hyperlink`, when set,
+    /// always borrows the caller's bytes, including for ASCII cells.
     style: Style = .{},
     /// True for the continuation cell of a wide grapheme: it carries no
     /// grapheme of its own and is skipped when rendering.
