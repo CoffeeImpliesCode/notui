@@ -122,6 +122,8 @@ pub const Buffer = struct {
         pub const borrowed_bit: u32 = @bitCast(Meta{ .len = 0, .borrowed = true });
         /// Meta bit of a slot that bit equality does not settle.
         pub const deep_bit: u32 = @bitCast(Meta{ .len = 0, .deep = true });
+        /// Meta bit of a wide continuation.
+        pub const wide_bit: u32 = @bitCast(Meta{ .len = 0, .wide = true });
 
         /// The indices of `slots` whose meta has a bit of `mask`, found
         /// eight slots per step: the eight meta words are gathered from
@@ -163,6 +165,29 @@ pub const Buffer = struct {
                 return @bitCast(hit);
             }
         };
+
+        /// For eight slots, which paint (`paints()`) and which of those
+        /// hold borrowed text, as bit masks, from one 128-byte load: each
+        /// field is gathered across the slots with a shuffle and tested
+        /// in one vector compare.
+        pub fn paintHits(chunk: *const [8]Slot) struct { paints: u8, borrowed: u8 } {
+            const V = @Vector(8, u32);
+            const words: @Vector(32, u32) = @as(*const [32]u32, @ptrCast(chunk)).*;
+            const glyph = @shuffle(u32, words, undefined, [8]i32{ 0, 4, 8, 12, 16, 20, 24, 28 });
+            const meta = @shuffle(u32, words, undefined, [8]i32{ 1, 5, 9, 13, 17, 21, 25, 29 });
+            const lo = @shuffle(u32, words, undefined, [8]i32{ 2, 6, 10, 14, 18, 22, 26, 30 });
+            const hi = @shuffle(u32, words, undefined, [8]i32{ 3, 7, 11, 15, 19, 23, 27, 31 });
+            const blank_meta: u32 = @bitCast(blank.meta);
+            const zero: V = @splat(0);
+            const diff = (glyph ^ @as(V, @splat(blank.glyph))) | (meta ^ @as(V, @splat(blank_meta))) |
+                lo | hi;
+            const blank_m: u8 = @bitCast(diff == zero);
+            const wide_m: u8 = @bitCast(meta & @as(V, @splat(wide_bit)) != zero);
+            const empty_m: u8 = @bitCast(meta & @as(V, @splat(0xffff)) == zero);
+            const borrowed_m: u8 = @bitCast(meta & @as(V, @splat(borrowed_bit)) != zero);
+            const paints_m = ~(blank_m | wide_m | empty_m);
+            return .{ .paints = paints_m, .borrowed = borrowed_m & paints_m };
+        }
     };
 
     /// Bytes one cell takes across the three arrays.
@@ -406,6 +431,21 @@ pub const Buffer = struct {
                 col += n;
                 off += n;
                 if (n < run) break;
+                continue;
+            }
+            // Common scripts (box drawing, CJK, Latin letters, ...): one
+            // codepoint per cluster, decided without the segmenter, for as
+            // long as the text stays in them.
+            if (Width.simpleCluster(text[off..])) |first| {
+                var c = first;
+                while (true) {
+                    const cwu: u16 = if (c.width >= 2) 2 else 1;
+                    if (@as(u32, col) + cwu > self.width) break :outer; // over-wide
+                    self.place(col, y, text[off..][0..c.len], packed_style, style.hyperlink, false, cwu);
+                    col += cwu;
+                    off += c.len;
+                    c = Width.simpleCluster(text[off..]) orelse break;
+                }
                 continue;
             }
             const start = off;
@@ -899,26 +939,54 @@ pub const Buffer = struct {
         var x: usize = 0;
         var end: usize = 0; // past the last cell the row paints
         while (x < row.len) {
-            const s = row[x];
-            if (!s.paints()) {
-                x += 1;
-                continue;
+            // Eight cells at a time while none is borrowed: every painting
+            // cell is then one column, so the chunk's paint mask alone
+            // gives its runs and the gaps between them.
+            const chunk_end = x + 8;
+            if (chunk_end <= row.len) {
+                const hits = Slot.paintHits(row[x..][0..8]);
+                if (hits.borrowed == 0) {
+                    var p: u16 = hits.paints;
+                    while (p != 0) {
+                        const first = @ctz(p);
+                        const run = @ctz(~(p >> @intCast(first)));
+                        const at = x + first;
+                        if (at > end) try null_gaps.append(gpa, .{
+                            .start = @intCast(end),
+                            .end = @intCast(at),
+                        });
+                        end = at + run;
+                        p &= ~((@as(u16, 1) << @intCast(first + run)) - 1);
+                    }
+                    x = chunk_end;
+                    continue;
+                }
             }
+            // A chunk with borrowed text, or the row's tail: cell by cell
+            // (a wide glyph may carry `x` one past the chunk).
+            const stop = @min(chunk_end, row.len);
+            while (x < stop) {
+                const s = row[x];
+                if (!s.paints()) {
+                    x += 1;
+                    continue;
+                }
 
-            const wide = s.meta.borrowed and Width.graphemeWidth(self.text[base + x]) >= 2;
-            const wcell: usize = if (wide) 2 else 1;
-            if (x + wcell > row.len) {
-                x += 1;
-                continue; // dropped lead: nothing was painted here
+                const wide = s.meta.borrowed and Width.graphemeWidth(self.text[base + x]) >= 2;
+                const wcell: usize = if (wide) 2 else 1;
+                if (x + wcell > row.len) {
+                    x += 1;
+                    continue; // dropped lead: nothing was painted here
+                }
+
+                if (wcell == 2) try wide_columns.append(gpa, @intCast(x));
+                if (x > end) try null_gaps.append(gpa, .{
+                    .start = @intCast(end),
+                    .end = @intCast(x),
+                });
+                x += wcell;
+                end = x;
             }
-
-            if (wcell == 2) try wide_columns.append(gpa, @intCast(x));
-            if (x > end) try null_gaps.append(gpa, .{
-                .start = @intCast(end),
-                .end = @intCast(x),
-            });
-            x += wcell;
-            end = x;
         }
         return .{
             .columns = @intCast(end),
@@ -2789,6 +2857,71 @@ test "rowFootprint: removing a suffix distinguishes null gaps from printed space
         @as(u16, 0),
         painted_space.paintedPrefixColumns(null_gaps.items, 20),
     );
+}
+
+test "rowFootprint: the eight-cell walk records what a cell-by-cell walk records" {
+    // Rows mixing blanks, styled blanks, empty graphemes, narrow ASCII,
+    // borrowed narrow text and wide glyphs (some cut by the right edge),
+    // at widths around the eight-cell step. The reference is the plain
+    // per-cell rule over decoded cells.
+    const gpa = std.testing.allocator;
+    const red: Style = .{ .fg = .{ .ansi = .red } };
+    var prng = std.Random.DefaultPrng.init(0x5eed);
+    const rand = prng.random();
+    var tape: std.ArrayList(u16) = .empty;
+    defer tape.deinit(gpa);
+    var gaps: std.ArrayList(Buffer.RowFootprint.NullGap) = .empty;
+    defer gaps.deinit(gpa);
+    var want_tape: std.ArrayList(u16) = .empty;
+    defer want_tape.deinit(gpa);
+    var want_gaps: std.ArrayList(Buffer.RowFootprint.NullGap) = .empty;
+    defer want_gaps.deinit(gpa);
+    for (1..41) |width| for (0..20) |_| {
+        var buf = try Buffer.init(gpa, @intCast(width), 1);
+        defer buf.deinit();
+        for (0..width) |x| {
+            const ux: u16 = @intCast(x);
+            switch (rand.uintLessThan(u8, 8)) {
+                0, 1 => {}, // default blank
+                2 => try buf.set(ux, 0, .{ .grapheme = " ", .style = red }),
+                3 => try buf.set(ux, 0, .{ .grapheme = "" }),
+                4, 5 => _ = try buf.draw(Style{}, "a", ux, 0),
+                6 => try buf.set(ux, 0, .{ .grapheme = "é" }),
+                else => try buf.set(ux, 0, .{ .grapheme = "界" }),
+            }
+        }
+        tape.clearRetainingCapacity();
+        gaps.clearRetainingCapacity();
+        const got = try buf.rowFootprint(gpa, 0, &tape, &gaps);
+
+        want_tape.clearRetainingCapacity();
+        want_gaps.clearRetainingCapacity();
+        var x: usize = 0;
+        var end: usize = 0;
+        while (x < width) {
+            const cell = buf.get(@intCast(x), 0);
+            if (cell.wide or cell.grapheme.len == 0 or cell.eql(.{})) {
+                x += 1;
+                continue;
+            }
+            const wcell: usize = if (Width.graphemeWidth(cell.grapheme) >= 2) 2 else 1;
+            if (x + wcell > width) {
+                x += 1;
+                continue;
+            }
+            if (wcell == 2) try want_tape.append(gpa, @intCast(x));
+            if (x > end) try want_gaps.append(gpa, .{ .start = @intCast(end), .end = @intCast(x) });
+            x += wcell;
+            end = x;
+        }
+        try std.testing.expectEqual(@as(u16, @intCast(end)), got.columns);
+        try std.testing.expectEqualSlices(u16, want_tape.items, tape.items);
+        try std.testing.expectEqualSlices(
+            Buffer.RowFootprint.NullGap,
+            want_gaps.items,
+            gaps.items,
+        );
+    };
 }
 
 test "rowFootprint: gap allocation failure restores both tapes for retry" {

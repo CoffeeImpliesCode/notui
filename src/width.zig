@@ -134,6 +134,74 @@ pub const CellIterator = struct {
     }
 };
 
+/// A cell cluster that needs no segmenter: one codepoint from `simple_ranges`
+/// followed by the end of input, an ASCII byte, or another such codepoint.
+/// Those codepoints have Grapheme_Cluster_Break and Indic_Conjunct_Break
+/// `Other` and a nonzero width, so no rule joins them to a neighbour of the
+/// same kind or to ASCII: the cluster is the codepoint alone in both modes,
+/// and its width is the codepoint's. Returns null when that cannot be shown
+/// from the first two codepoints; `firstCellLen` then decides.
+pub fn simpleCluster(str: []const u8) ?CellIterator.Cluster {
+    const cp = decodeBmp(str) orelse return null;
+    if (!isSimple(cp.code)) return null;
+    const rest = str[cp.len..];
+    if (rest.len > 0 and rest[0] >= 0x80) {
+        const next = decodeBmp(rest) orelse return null;
+        if (!isSimple(next.code)) return null;
+    }
+    return .{ .offset = 0, .len = cp.len, .width = DisplayWidth.codePointWidth(cp.code) };
+}
+
+/// Script blocks whose codepoints never join a cluster (see `simpleCluster`;
+/// a test checks every codepoint against zg's tables). Combining blocks and
+/// the few joining or zero-width codepoints inside these blocks are left out.
+const simple_ranges = [_][2]u21{
+    .{ 0x00C0, 0x024F }, // Latin-1 letters, Latin Extended-A and -B
+    .{ 0x0370, 0x0377 }, // Greek
+    .{ 0x037A, 0x037F },
+    .{ 0x0384, 0x03FF },
+    .{ 0x0400, 0x0482 }, // Cyrillic, up to its combining marks
+    .{ 0x048A, 0x04FF },
+    .{ 0x2010, 0x2027 }, // General punctuation: dashes, quotes, bullets, ellipsis
+    .{ 0x2030, 0x205E },
+    .{ 0x2190, 0x21FF }, // Arrows
+    .{ 0x2500, 0x25FF }, // Box drawing, block elements, geometric shapes
+    .{ 0x3041, 0x3096 }, // Hiragana, without the combining voicing marks
+    .{ 0x30A1, 0x30FF }, // Katakana
+    .{ 0x4E00, 0x9FFF }, // CJK unified ideographs
+    .{ 0xFF01, 0xFF60 }, // Fullwidth forms
+};
+
+/// `simple_ranges` as one bit per BMP codepoint (8 KiB): a lookup is one
+/// load and a shift, whatever the block.
+const simple_bits: [0x10000 / 64]u64 = blk: {
+    @setEvalBranchQuota(200_000);
+    var bits: [0x10000 / 64]u64 = @splat(0);
+    for (simple_ranges) |r| {
+        for (r[0]..r[1] + 1) |cp| bits[cp / 64] |= @as(u64, 1) << @intCast(cp % 64);
+    }
+    break :blk bits;
+};
+
+fn isSimple(cp: u21) bool {
+    return cp < 0x10000 and simple_bits[cp >> 6] >> @intCast(cp & 63) & 1 != 0;
+}
+
+/// A two- or three-byte UTF-8 sequence (U+0080..U+FFFF, no surrogates),
+/// or null for anything else, including malformed input.
+fn decodeBmp(str: []const u8) ?Codepoint {
+    if (str.len < 2 or str[1] & 0xC0 != 0x80) return null;
+    const b0 = str[0];
+    if (b0 & 0xE0 == 0xC0) {
+        const cp = @as(u21, b0 & 0x1F) << 6 | (str[1] & 0x3F);
+        return if (cp >= 0x80) .{ .code = cp, .len = 2 } else null;
+    }
+    if (b0 & 0xF0 != 0xE0 or str.len < 3 or str[2] & 0xC0 != 0x80) return null;
+    const cp = @as(u21, b0 & 0x0F) << 12 | @as(u21, str[1] & 0x3F) << 6 | (str[2] & 0x3F);
+    if (cp < 0x800 or (cp >= 0xD800 and cp <= 0xDFFF)) return null;
+    return .{ .code = cp, .len = 3 };
+}
+
 /// Display width of `str` in terminal cells under the selected drawing policy.
 pub fn strWidth(str: []const u8) usize {
     if (allPrintableAscii(str)) return str.len;
@@ -246,10 +314,14 @@ pub fn printableAsciiPrefix(str: []const u8) usize {
 
 /// Number of leading bytes of `str` that are each a one-cell cluster on
 /// their own (see `asciiSingle`): the printable ASCII prefix, less its last
-/// byte when a non-ASCII byte follows that could extend it.
+/// byte when a non-ASCII codepoint follows that could extend it. One from
+/// `simple_ranges` never extends anything, so the byte stays.
 pub fn asciiSingleRun(str: []const u8) usize {
     const n = printableAsciiPrefix(str);
-    if (n > 0 and n < str.len and str[n] >= 0x80) return n - 1;
+    if (n > 0 and n < str.len and str[n] >= 0x80) {
+        const next = decodeBmp(str[n..]) orelse return n - 1;
+        if (!isSimple(next.code)) return n - 1;
+    }
     return n;
 }
 
@@ -612,11 +684,18 @@ test "ascii run: the vector scan stops at the first unprintable byte at any offs
             }
         }
     }
-    // A non-ASCII byte may extend the last ASCII byte, so the run gives it up.
+    // A non-ASCII codepoint may extend the last ASCII byte, so the run gives
+    // it up, unless the codepoint is a simple one that extends nothing.
     try std.testing.expectEqual(@as(usize, 1), asciiSingleRun("ae\u{301}"));
     try std.testing.expectEqual(@as(usize, 3), asciiSingleRun("abc"));
     try std.testing.expectEqual(@as(usize, 2), asciiSingleRun("ab\x01"));
     try std.testing.expectEqual(@as(usize, 0), asciiSingleRun("\u{301}"));
+    for ([_][]const u8{ "ab日", "a ─", "x→", "zé", "q\u{600}" }) |s| {
+        const n = asciiSingleRun(s);
+        var off: usize = 0;
+        while (off < n) : (off += 1) try std.testing.expectEqual(@as(usize, 1), firstCellLen(s[off..]));
+    }
+    try std.testing.expectEqual(@as(usize, 2), asciiSingleRun("ab日"));
 }
 
 test "cell iterator: one walk agrees with firstCellLen and graphemeWidth per cluster" {
@@ -648,4 +727,44 @@ test "cell iterator: one walk agrees with firstCellLen and graphemeWidth per clu
             try std.testing.expectEqual(s.len, off);
         }
     }
+}
+
+test "simple cluster: every simple codepoint is a non-joining, spacing one in zg's tables" {
+    for (simple_ranges) |r| {
+        var cp = r[0];
+        while (cp <= r[1]) : (cp += 1) {
+            try std.testing.expectEqual(Graphemes.Gbp.none, Graphemes.gbp(cp));
+            try std.testing.expectEqual(Graphemes.Indic.none, Graphemes.indic(cp));
+            try std.testing.expect(DisplayWidth.codePointWidth(cp) >= 1);
+            try std.testing.expectEqual(DisplayWidth.codePointWidth(cp), codepointWidth(cp));
+        }
+    }
+}
+
+test "simple cluster: agrees with firstCellLen and graphemeWidth wherever it answers" {
+    const saved = getMode();
+    defer setMode(saved);
+    const corpus = [_][]const u8{
+        "日本語テスト ──┌─┬─┐│└─┴─┘",
+        "Ünïcödé “quotes” — → ←…",
+        "é\u{301}ß\u{200d}x",
+        "が\u{3099}カ",
+        "‼\u{fe0f}▶\u{fe0f}◀",
+        "ąā\u{1f3fd}Ω\u{483}",
+        "\u{d7ff}\u{c0}\x01",
+        "\xc3\x28\xe2\x82",
+    };
+    var answered: usize = 0;
+    for ([_]Mode{ .grapheme, .codepoint }) |m| {
+        setMode(m);
+        for (corpus) |s| {
+            for (0..s.len) |off| {
+                const c = simpleCluster(s[off..]) orelse continue;
+                answered += 1;
+                try std.testing.expectEqual(firstCellLen(s[off..]), c.len);
+                try std.testing.expectEqual(graphemeWidth(s[off..][0..c.len]), c.width);
+            }
+        }
+    }
+    try std.testing.expect(answered > 40); // the fast path really ran
 }
