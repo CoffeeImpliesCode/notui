@@ -1990,6 +1990,72 @@ test "height restore: 97x28 to 97x6 to 97x28 reclaims only the retired popup pre
     }
 }
 
+test "height restore: returned popup prefix closes the gap above the live band" {
+    for ([_]bool{ false, true }) |native_reflow| {
+        var rig = try Rig.init(testing.allocator, .{
+            .cols = 101,
+            .rows = 32,
+            .height = 2,
+            .native_reflow = native_reflow,
+        });
+        defer rig.deinit();
+        const transcript = [_][]const u8{ "COMMITTED-input", "COMMITTED-777" };
+        const popup = [_][]const u8{
+            "skript>t",    "candidate-0", "candidate-1", "candidate-2", "candidate-3",
+            "candidate-4", "candidate-5", "candidate-6", "candidate-7", "status",
+        };
+        try rig.draw(&.{ "skript>", "status" });
+        try rig.render();
+        try rig.setHeight(10);
+        try rig.commit(1, &transcript, .append);
+        try rig.draw(&popup);
+        try rig.render();
+        const committed_bottom = (try rig.indexOfRow(transcript[1])).?;
+        try testing.expectEqual(committed_bottom + 1, try rig.rowOf(rig.bandTop()));
+
+        try rig.term.resize(28, 7);
+        try rig.region.resize(28, 7, 7);
+        try rig.draw(&.{ popup[0], popup[1], popup[2], popup[3], popup[4], popup[5], popup[9] });
+        try rig.render();
+        const archived_input = (try rig.indexOfRow(popup[0])).?;
+        try testing.expect(archived_input < rig.term.ybase);
+
+        try rig.term.resize(101, 32);
+        try testing.expect(archived_input >= rig.term.ybase);
+        try rig.region.resize(101, 32, 10);
+        try rig.draw(&popup);
+        for (0..2) |_| {
+            try rig.render();
+            try testing.expect(std.mem.indexOf(u8, rig.out.written(), "\x1b[2J") == null);
+            try testing.expect(std.mem.indexOf(u8, rig.out.written(), "\x1b[3J") == null);
+        }
+        try expectAnchored(&rig);
+        try testing.expectEqual(committed_bottom + 1, try rig.rowOf(rig.bandTop()));
+        for (transcript) |row| try expectMarkerOnce(&rig, row);
+        for (popup, 0..) |row, y| {
+            try expectMarkerOnce(&rig, row);
+            try expectBandRow(&rig, y, row);
+        }
+        try rig.render();
+        try testing.expectEqual(@as(usize, 0), rig.out.written().len);
+
+        // Escape closes the popup without leaving its old bottom rows.
+        try rig.setHeight(2);
+        try rig.draw(&.{ popup[0], popup[9] });
+        try rig.render();
+        try expectAnchored(&rig);
+        try testing.expectEqual(committed_bottom + 1, try rig.rowOf(rig.bandTop()));
+        for (transcript) |row| try expectMarkerOnce(&rig, row);
+        for (popup[1..9]) |row| try expectRetiredGone(&rig, row);
+        try expectBandRow(&rig, 0, popup[0]);
+        try expectBandRow(&rig, 1, popup[9]);
+        try testing.expect(std.mem.indexOf(u8, rig.out.written(), "\x1b[2J") == null);
+        try testing.expect(std.mem.indexOf(u8, rig.out.written(), "\x1b[3J") == null);
+        try rig.render();
+        try testing.expectEqual(@as(usize, 0), rig.out.written().len);
+    }
+}
+
 test "native: a band shrinks and grows inside the window" {
     var rig = try Rig.init(testing.allocator, .{
         .cols = 40,

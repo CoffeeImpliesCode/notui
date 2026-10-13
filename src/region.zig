@@ -82,10 +82,11 @@
 //!   taller window hands them straight back on the screen when it pulls
 //!   its scrollback in — the live popup would then read twice. Those
 //!   rows are RETIRED, tracked as runs of offsets above the current band
-//!   top, and erased (EL, bounded relative moves, cursor parked again on
-//!   the band bottom before the painter runs) as soon as the viewport
-//!   shows them. Committed history is never retired and never erased
-//!   with them: a ledger write, a `.line`, a `.text` or a `.rebuild` row
+//!   top. Once CPR measures their visibility, a contiguous retired prefix
+//!   is reclaimed by repainting the band upward over it and erasing the
+//!   unused old bottom. Distant retired rows are erased in place with EL.
+//!   Committed history is never retired, reclaimed or erased with them:
+//!   a ledger write, a `.line`, a `.text` or a `.rebuild` row
 //!   only SHIFTS the offsets past it — DECAWM is off for the whole
 //!   envelope, so every `\n` a `.text` carries is a hard row move and the
 //!   shift is computed from the bytes, never left to the terminal — and
@@ -415,6 +416,9 @@ pub const Region = struct {
         /// band top is a projection from the ledger rather than a
         /// stored number that could drift away from it.
         band_push: u32 = 0,
+        /// Visible retired rows immediately above the old band top that
+        /// this frame takes back into the band rather than leaving blank.
+        reclaimed: u32 = 0,
         /// The transform from the row the outstanding CPR query was asked
         /// about to the row the cursor is on now: a shift plus the
         /// window of rows the walk can currently be at, `low`..`high`.
@@ -1754,6 +1758,14 @@ pub const Region = struct {
         if (!owe_query and !changed) return;
         if (self.height == 0 and !release and !flush and !retiring and !owe_query) return;
         const strategy: Strategy = self.planStrategy(release, flush);
+        const reclaimed = switch (strategy) {
+            .diff, .height => self.reclaimableRows(),
+            .resize => if (self.opts.resize_mode != .rebuild)
+                self.reclaimableRows()
+            else
+                0,
+            else => 0,
+        };
         // Both prepare steps run BEFORE the first byte, and both are
         // rolled back to nothing on failure: the live snapshot, `prev`,
         // the dirty flags, the ownership ledger and the byte stream are
@@ -1792,18 +1804,14 @@ pub const Region = struct {
         }
         try emit.autowrapOff(w);
 
-        // Rows this band painted and then lost to a physical clip are
-        // back on the screen the moment a taller window pulls its
-        // scrollback in: nothing committed them, so the live popup owns
-        // those strings and the region takes them back before any painter
-        // runs. The erase walks up with bounded relative moves, erases
-        // row-scoped, and parks on the band bottom again, so the painter
-        // below still starts — and ends — exactly where it would have
-        // without them: a normal growth still reserves its own rows and
-        // the band keeps its line.
-        try self.retireErased(w, &f);
+        // Distant retired rows are erased in place. A visible retired
+        // suffix touching the band is instead repainted as part of it;
+        // neither operation can cross a committed row or a blank gap.
+        try self.retireErased(w, &f, reclaimed);
 
-        switch (strategy) {
+        if (reclaimed > 0) {
+            try self.paintReclaimed(w, &f, reclaimed);
+        } else switch (strategy) {
             .first => try self.paintFirst(w, &f),
             .collapse => try self.paintCollapse(w, &f),
             .ledger => try self.paintLedger(w, &f),
@@ -2540,7 +2548,7 @@ pub const Region = struct {
         var col: u32 = 0;
         var off: usize = 0;
         while (off < text.len) {
-            const len = Width.firstGraphemeLen(text[off..]);
+            const len = Width.firstCellLen(text[off..]);
             if (len == 0) break;
             const gc = text[off .. off + len];
             off += len;
@@ -2757,7 +2765,51 @@ pub const Region = struct {
         return null;
     }
 
-    /// Whether a retired row the measured reach shows is owed an erase.
+    /// Only the contiguous retired suffix belongs to the band's old
+    /// prefix. CPR bounds the rows that can actually be taken back.
+    fn reclaimableRows(self: *const Region) u32 {
+        if (!self.reach_known or self.height == 0 or self.painted_rows == 0) return 0;
+        if (self.bandRows() > self.term_rows or self.height > self.term_rows) return 0;
+        const ceiling = self.reach();
+        if (ceiling < 1) return 0;
+        var rows: u32 = 0;
+        var i = self.owned.items.len;
+        while (i > 0 and rows < @as(u32, @intCast(ceiling))) {
+            i -= 1;
+            const g = self.owned.items[i];
+            if (g.kind != .retired) break;
+            rows += @min(self.groupRows(g), @as(u32, @intCast(ceiling)) - rows);
+        }
+        return rows;
+    }
+
+    /// Repaint from the measured returned prefix, then erase the old
+    /// bottom's unused tail and park on the new bottom. No rows outside
+    /// the union of the retired prefix and the old/live band are erased.
+    fn paintReclaimed(self: *const Region, w: anytype, f: *Frame, rows: u32) !void {
+        const old = self.bandRows() + rows;
+        try self.moveToBandTop(w, f, old);
+        try self.cur.renderAll(w);
+        f.down(self.height -| 1);
+        const tail = old -| self.height;
+        if (tail > 0) {
+            for (0..tail) |_| {
+                try w.writeAll("\r\n");
+                f.down(1);
+                try emit.eraseLine(w);
+            }
+            try w.print("\x1b[{d}A", .{tail});
+            f.up(tail);
+        }
+        try w.writeAll("\r");
+        f.painted = self.height;
+        f.high_water = self.height;
+        f.reclaimed = rows;
+        f.clear_width_dirty = true;
+        f.clear_height_dirty = true;
+    }
+
+    /// Whether a measured retired row is owed reclamation or erasure.
     fn retireDue(self: *const Region) bool {
         return self.nearestRetired() != null;
     }
@@ -2880,8 +2932,8 @@ pub const Region = struct {
         }
     }
 
-    /// Erase the retired rows the measured reach shows, and nothing
-    /// else.
+    /// Erase visible retired rows outside the contiguous prefix this
+    /// frame reclaims. All movement is bounded by the measured reach.
     ///
     /// Entry: the cursor parked on the band bottom, where every frame
     /// starts. A group at `offset` is `cursor_off + offset` rows above
@@ -2893,7 +2945,7 @@ pub const Region = struct {
     /// stays tracked rather than guessed at, and why a frame whose reach
     /// is not measured emits no erase at all — it renders the live band
     /// relatively and the postpaint query measures it afterwards.
-    fn retireErased(self: *const Region, w: anytype, f: *Frame) !void {
+    fn retireErased(self: *const Region, w: anytype, f: *Frame, reclaimed: u32) !void {
         if (!self.reach_known) return;
         const ceiling = self.reach();
         if (ceiling < 1) return;
@@ -2907,9 +2959,11 @@ pub const Region = struct {
             // Everything further up is further out of reach, so the walk
             // ends here and no row above it is even considered.
             if (@as(i64, ceiling) < @as(i64, offset)) break;
-            if (g.kind == .retired and rows > 0) {
-                const room = @min(rows, @as(u32, @intCast(ceiling)) - offset + 1);
-                const lowest = @as(u32, @intCast(@max(self.cursor_off, 0))) + offset;
+            const first = @max(offset, reclaimed + 1);
+            const end = @min(offset + rows, @as(u32, @intCast(ceiling)) + 1);
+            if (g.kind == .retired and first < end) {
+                const room = end - first;
+                const lowest = @as(u32, @intCast(@max(self.cursor_off, 0))) + first;
                 if (lowest > walked) {
                     const step = lowest - walked;
                     try w.print("\x1b[{d}A", .{step});
@@ -2935,9 +2989,9 @@ pub const Region = struct {
         try w.writeAll("\r");
     }
 
-    /// Publish exactly the retirement walk's erases. Keep physical blank
-    /// gaps in place; a partial erase leaves its surviving prefix above
-    /// the erased suffix. Later reflow uses that prefix's source geometry.
+    /// Settle exactly the visible retirements this frame erased or
+    /// reclaimed. Keep distant blank gaps in place; a partial cleanup
+    /// leaves its surviving prefix with the original source geometry.
     ///
     /// Runs from `commit` before the frame's extent or cursor row move,
     /// off the same state the walk used, so it is exact: a frame that
@@ -3380,13 +3434,27 @@ pub const Region = struct {
         // the batches it replaces — both on the wire and in the
         // retained state.
         if (f.took_appends) self.append_queue.clearRetainingCapacity();
-        // The rows this frame erased are settled FIRST, while the state
-        // is still exactly what `retireErased` read them out of: the
-        // pre-frame ledger, extent and cursor row. Recomputing it after
-        // any of them moved would disagree with the walk that went on the
-        // wire and drop rows the frame never erased — residue a later
-        // frame could no longer reach — or keep rows it did.
+        // Settle visible retirements FIRST, from the pre-frame ledger,
+        // extent and measured reach both cleanup paths used. Recomputing
+        // after the band moved would settle rows the frame never reached.
         self.retireLedger();
+        // The reclaimed contiguous suffix is not a gap: the new band
+        // top moved over it. Remove it only at commit, after the same
+        // pre-frame reach has settled every other retirement.
+        var reclaimed = f.reclaimed;
+        while (reclaimed > 0) {
+            const i = self.owned.items.len - 1;
+            const rows = self.groupRows(self.owned.items[i]);
+            std.debug.assert(self.owned.items[i].kind == .blank);
+            if (rows <= reclaimed) {
+                self.owned.items.len = i;
+                reclaimed -= rows;
+            } else {
+                self.owned.items[i].rows = rows - reclaimed;
+                reclaimed = 0;
+            }
+            self.ledger_dirty = true;
+        }
         // The rows the band gives up join the ledger next, in band-row
         // order, which is their order on screen: band row 0 is the
         // topmost, so it is the earliest entry and the row nearest the
@@ -5505,12 +5573,9 @@ test "region: a restored viewport never shows the rows a physical shrink took fr
     // existed, on the screen again. That is the physical fact the frame
     // below has to answer, and a model that kept those rows in
     // scrollback would make every assertion after it vacuous.
-    //
-    // Nothing of the BAND'S OWN is up there, and that is the point
-    // rather than an accident: the growth to six rows already brought
-    // every retired row within reach of the viewport, and the frame
-    // under test took them back then — row-scoped, before they could
-    // come back a second time.
+    // The returned retired prefix is still directly above the band.
+    // After CPR measures it, reclamation closes that gap without moving
+    // any of the committed rows the terminal handed back.
     term.resizeRows(Term.rows);
     const transcript_back = 13; // of the pull's 18 rows, 5 were the band's own
     for (0..transcript_back) |y| {
@@ -5534,19 +5599,19 @@ test "region: a restored viewport never shows the rows a physical shrink took fr
     try r.render(&reclaimed.w);
     term.feed(reclaimed.bytes());
 
-    // The live band is the band: the same six popup rows on the screen's
-    // last rows, with the cursor parked on the row the next frame's
-    // relative moves start from.
+    // The five returned prefix rows rejoin the band, so it starts
+    // directly below the thirteen visible committed rows again.
+    const reclaimed_top = transcript_back;
     for (popup_rows, 0..) |row, y| {
-        try testing.expectEqualStrings(row, term.screenText(band_top + y));
+        try testing.expectEqualStrings(row, term.screenText(reclaimed_top + y));
     }
-    try testing.expectEqual(@as(usize, Term.rows - 1), term.screenRow());
+    try testing.expectEqual(reclaimed_top + popup_rows.len - 1, term.screenRow());
     try testing.expectEqual(@as(u16, popup_rows.len), r.painted_rows);
     // The rows the window handed back above it hold no popup text at
     // all — the archived input row and the archived selected candidate
     // the capture showed above the live band are the residue here, and
     // the live popup is the only owner of those strings.
-    try testing.expectEqual(@as(usize, 0), restoredBandRows(&term, band_top, &popup_rows));
+    try testing.expectEqual(@as(usize, 0), restoredBandRows(&term, reclaimed_top, &popup_rows));
     // The committed transcript took none of it: every row is still in
     // the terminal's buffer exactly once, so taking the band's residue
     // back did not reach a row above the band that holds history.
@@ -5562,12 +5627,12 @@ test "region: a restored viewport never shows the rows a physical shrink took fr
     edit.init();
     try r.render(&edit.w);
     term.feed(edit.bytes());
-    try testing.expectEqualStrings("skript> de", term.screenText(band_top));
+    try testing.expectEqualStrings("skript> de", term.screenText(reclaimed_top));
     for (popup_rows[1..], 0..) |row, y| {
-        try testing.expectEqualStrings(row, term.screenText(band_top + 1 + y));
+        try testing.expectEqualStrings(row, term.screenText(reclaimed_top + 1 + y));
     }
-    try testing.expectEqual(@as(usize, 0), restoredBandRows(&term, band_top, &popup_rows));
-    try testing.expectEqual(@as(usize, Term.rows - 1), term.screenRow());
+    try testing.expectEqual(@as(usize, 0), restoredBandRows(&term, reclaimed_top, &popup_rows));
+    try testing.expectEqual(reclaimed_top + popup_rows.len - 1, term.screenRow());
     for (0..committed) |y| {
         try testing.expectEqual(@as(usize, 1), rowsHolding(&term, transcriptRow(y)));
     }
@@ -5649,20 +5714,17 @@ test "region: a window restored with no scrollback left keeps the band on its li
     try r.render(&reclaimed.w);
     term.feed(reclaimed.bytes());
 
-    // The band is the six popup rows on the line the cursor kept, and the
-    // rows the window gained below it are still empty: a restoration that
-    // pulled the band down to the new bottom would have painted over rows
-    // the terminal never had.
+    // Reclaim the five returned prefix rows, directly below the history.
+    // The old band's now-unused bottom rows are empty.
     for (popup_rows, 0..) |row, y| {
-        try testing.expectEqualStrings(row, term.screenText(band_top + y));
+        try testing.expectEqualStrings(row, term.screenText(history + y));
     }
-    try testing.expectEqual(@as(usize, band_top + popup_rows.len - 1), term.screenRow());
+    try testing.expectEqual(@as(usize, history + popup_rows.len - 1), term.screenRow());
     try testing.expectEqual(@as(u16, popup_rows.len), r.painted_rows);
-    for (band_top + popup_rows.len..Term.rows) |y| {
+    for (history + popup_rows.len..Term.rows) |y| {
         try testing.expectEqualStrings("", term.screenText(y));
     }
-    // Nothing the band wrote and gave up is left above it.
-    try testing.expectEqual(@as(usize, 0), restoredBandRows(&term, band_top, &popup_rows));
+    try testing.expectEqual(@as(usize, 0), restoredBandRows(&term, history, &popup_rows));
     // The committed rows the growth handed back to the screen are
     // untouched by any of it.
     for (0..history) |y| {
@@ -7993,10 +8055,8 @@ test "region: a band the window outgrows keeps one band and leaves no residue" {
     const moved = term.row - 2;
     for (last, 0..) |row, y| try testing.expectEqualStrings(row, term.text(moved + y));
 
-    // The window comes back. The three stranded lines are on the screen
-    // again and the frame takes them back — row-scoped, so the five
-    // committed rows above them are never reached — and the band is
-    // still the band, on the rows it drifted to while it did not fit.
+    // The window returns the three stranded lines. Reclamation moves
+    // the band back over them, directly below the five committed rows.
     term.resizeRows(Term.rows);
     try r.resize(Term.cols, Term.rows, 3);
     var t3: TestWriter = .{};
@@ -8013,7 +8073,10 @@ test "region: a band the window outgrows keeps one band and leaves no residue" {
     term.feed(reclaimed.bytes());
     try testing.expectEqual(@as(u16, 3), r.painted_rows);
     try testing.expectEqual(@as(usize, 0), r.owned.items.len);
-    for (last, 0..) |row, y| try testing.expectEqualStrings(row, term.text(moved + y));
+    const reclaimed_top = moved - churn.len - 1;
+    for (last, 0..) |row, y| {
+        try testing.expectEqualStrings(row, term.text(reclaimed_top + y));
+    }
     try testing.expectEqual(@as(usize, 0), term.col);
     // Nothing of the band's is anywhere but on its own rows: not the
     // lines the window handed back, and not the churned content either.
@@ -8032,9 +8095,9 @@ test "region: a band the window outgrows keeps one band and leaves no residue" {
     t4.init();
     try r.render(&t4.w);
     term.feed(t4.bytes());
-    try testing.expectEqualStrings("hhx", term.text(moved));
-    try testing.expectEqualStrings(last[1], term.text(moved + 1));
-    try testing.expectEqualStrings(last[2], term.text(moved + 2));
+    try testing.expectEqualStrings("hhx", term.text(reclaimed_top));
+    try testing.expectEqualStrings(last[1], term.text(reclaimed_top + 1));
+    try testing.expectEqualStrings(last[2], term.text(reclaimed_top + 2));
     for (history_rows, 0..) |row, y| try testing.expectEqualStrings(row, term.text(y));
 }
 
@@ -8175,10 +8238,10 @@ test "region: a width change waits for a reply before it takes a retired row bac
     t4.init();
     try r.render(&t4.w);
     term.feed(t4.bytes());
-    try testing.expectEqualStrings("", term.text(5));
-    try testing.expectEqualStrings("", term.text(6));
-    try testing.expectEqualStrings(label('b', 0), term.text(7));
-    try testing.expectEqualStrings(label('b', 1), term.text(8));
+    try testing.expectEqualStrings(label('b', 0), term.text(5));
+    try testing.expectEqualStrings(label('b', 1), term.text(6));
+    try testing.expectEqualStrings("", term.text(7));
+    try testing.expectEqualStrings("", term.text(8));
     for (history_rows, 0..) |row, y| try testing.expectEqualStrings(row, term.text(y));
 }
 

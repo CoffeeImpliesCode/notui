@@ -142,7 +142,15 @@ These are clean contract changes, with no legacy aliases:
   Their `advance` result means an interval elapsed, including a complete frame cycle.
 - `Region.Options.width_policy`, `Capabilities.WidthPolicy`, and `widthPolicy` are removed.
   Remove those settings and calls. Toolkit widths use `zg` Unicode 16 data.
-  Terminal `unicode_core` detection remains informational.
+  `App` selects process-wide `width.setMode(.grapheme)` when DEC 2027 is active;
+  otherwise it selects `.codepoint`, matching terminals that advance separately
+  for each spacing codepoint. Detection enables supported-but-reset DEC 2027.
+  Manual terminal loops must call
+  `notui.width.setMode(if (caps.unicode_core) .grapheme else .codepoint)`
+  after detection and before layout. The default without detection is `.grapheme`.
+  Select once before drawing; concurrent terminals with different modes are unsupported.
+  `width.firstCellLen` segments drawing cells; `firstGraphemeLen` remains Unicode
+  grapheme segmentation for key text and editing motion.
 - Formula and coverage quadratic curves now have an `extern` representation:
   `p0`, `p1`, `p2`, each `[2]f32` in `[x, y]` order.
   Existing casts remain zero-copy. `FontFace.glyphOutline` accepts a const face.
@@ -369,8 +377,11 @@ strategy (`src/region.zig`) instead of diffing:
   blanked, so they cannot linger as settled content.
 - clipped prefix rows remain tracked as **retired**, not committed history. On growth they
   can return from scrollback above the live band. After a fresh CPR establishes which rows
-  are visible, a subsequent frame erases only the retired rows with EL and returns the
-  cursor to the band bottom. Committed rows and blank gaps retain their positions.
+  are visible, a subsequent frame reclaims retired rows contiguous with the band top:
+  it repaints the band upward over them, erases the unused old bottom rows with EL, and
+  parks the cursor on the new band bottom. Retired rows separated from the band by committed
+  rows or blank gaps are erased in place. Committed rows and existing blank gaps retain
+  their positions; reclaiming a returned prefix does not leave a new blank gap.
 
 The physical path does not clamp the new logical height. `resize` takes
 the band height the app asked for; how much of it fits is the app's
