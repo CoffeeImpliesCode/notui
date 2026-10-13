@@ -861,8 +861,8 @@ test "frame: a frame that changed nothing writes nothing" {
     // a transition byte, emitted once, not per frame.
     try session.harness.feed("!");
     const third = try session.frame(&model);
-    try testing.expect(std.mem.startsWith(u8, third, "\x1b[?2026h\x1b[?7l"));
-    try testing.expect(std.mem.endsWith(u8, third, "\x1b[?7h\x1b[?2026l"));
+    try testing.expect(std.mem.startsWith(u8, third, "\x1b[?2026h\x1b[?7h"));
+    try testing.expect(std.mem.endsWith(u8, third, "\x1b[?2026l"));
     try testing.expect(std.mem.indexOf(u8, third, "\x1b[?25l") == null);
     try testing.expect(std.mem.indexOf(u8, third, "hi!") != null);
     // A frame that DID change something still does not ask again: one
@@ -1053,7 +1053,7 @@ test "frame: the raw harness drains, snapshots, clears, and feeds input" {
     // The driven renderer writes through the pipe; the harness drains it.
     try region.render(harness.writer());
     const first = try harness.outputBytes();
-    try testing.expect(std.mem.endsWith(u8, first, "\x1b[?7h\x1b[?2026l"));
+    try testing.expect(std.mem.endsWith(u8, first, "\x1b[?2026l"));
 
     const snapshot = try harness.takeOutput();
     defer testing.allocator.free(snapshot);

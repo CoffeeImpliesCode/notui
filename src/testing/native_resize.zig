@@ -2525,6 +2525,123 @@ test "native: a trailing newline flushes one committed row, not two" {
     try expectBandRow(&rig, 0, "C0");
 }
 
+test "native: in flight wide band rows do not erase the preceding committed source" {
+    var rig = try Rig.init(testing.allocator, .{
+        .cols = 19,
+        .rows = 12,
+        .height = 2,
+        .append_lines = false,
+    });
+    defer rig.deinit();
+    try rig.draw(&.{ "B0", "B1" });
+    try rig.render();
+    try rig.draw(&.{ "B0-ABCDEFGHIJKLMNOP", "B1" });
+    try rig.commit(1, &.{"H-ABCDEFGHIJKLMNOPQ"}, .append);
+    rig.out.clearRetainingCapacity();
+    try rig.region.render(&rig.out.writer);
+    try rig.term.resize(12, 12);
+    try rig.term.feed(rig.out.written());
+    try expectGroup(&rig, try rig.groupStartOf("H-"), "H-ABCDEFGHIJKLMNOPQ");
+    try rig.region.resize(12, 12, 2);
+    try rig.pump();
+    try rig.draw(&.{ "B0", "B1" });
+    try rig.render();
+    try rig.render();
+    try expectAnchored(&rig);
+    try expectBandRow(&rig, 0, "B0");
+    try expectBandRow(&rig, 1, "B1");
+    try expectGroup(&rig, try rig.groupStartOf("H-"), "H-ABCDEFGHIJKLMNOPQ");
+}
+
+test "native: full width band rows clear deferred wrap at bottom right" {
+    var rig = try Rig.init(testing.allocator, .{
+        .cols = 19,
+        .rows = 2,
+        .height = 2,
+    });
+    defer rig.deinit();
+    try rig.term.feed("committed\r\n");
+    try rig.draw(&.{ "B0-ABCDEFGHIJKLMNOP", "B1-abcdefghijklmnop" });
+    try rig.render();
+    // Only the two reservation CRLFs scroll. Printing the bottom-right
+    // cell defers wrapping; the band's final CR cancels it.
+    try testing.expectEqual(@as(usize, 2), rig.term.ybase);
+    try expectMarkerOnce(&rig, "committed");
+    try expectAnchored(&rig);
+    try expectBandRow(&rig, 0, "B0-ABCDEFGHIJKLMNOP");
+    try expectBandRow(&rig, 1, "B1-abcdefghijklmnop");
+    try testing.expectEqual(@as(usize, 0), rig.term.x);
+    try rig.render();
+    try testing.expectEqual(@as(usize, 0), rig.out.written().len);
+    try testing.expectEqual(@as(usize, 2), rig.term.ybase);
+}
+
+test "native: in flight scrollback survives narrowing before the Region observes resize" {
+    const history = "H-ABCDEFGHIJKLMNOPQ"; // exactly 19 cells
+    const appended = "A-abcdefghijklmnopqTAIL";
+    const text = "T-0123456789abcdefg"; // exactly 19 cells
+    for ([_]bool{ false, true }) |native_reflow| {
+        for ([_]u16{ 12, 19 }) |arrival_width| {
+            for ([_]bool{ false, true }) |replay| {
+                var rig = try Rig.init(testing.allocator, .{
+                    .cols = 19,
+                    .rows = 12,
+                    .height = 2,
+                    .append_lines = false,
+                    .native_reflow = native_reflow,
+                });
+                defer rig.deinit();
+                try rig.draw(&.{ "B0", "B1" });
+                try rig.render();
+                try rig.commit(1, &.{history}, .append);
+                try rig.append(.{ .line = appended });
+                try rig.append(.{ .text = text });
+                if (replay) try rig.commit(2, &.{history}, .replay);
+
+                // A failed composition must retain the whole submission and
+                // retry its wrapping envelope, not release a partial batch.
+                var prefix: [35]u8 = undefined;
+                var failed: std.Io.Writer = .fixed(&prefix);
+                try testing.expectError(error.WriteFailed, rig.region.render(&failed));
+                try testing.expectEqual(@as(usize, 0), rig.region.history_written);
+                try testing.expectEqual(@as(usize, 2), rig.region.append_queue.items.len);
+
+                // Compose at the old geometry, then narrow only the terminal:
+                // these bytes were already in flight before SIGWINCH arrived.
+                rig.out.clearRetainingCapacity();
+                try rig.region.render(&rig.out.writer);
+                try rig.term.resize(arrival_width, 12);
+                try rig.term.feed(rig.out.written());
+                var got: std.ArrayList(u8) = .empty;
+                defer got.deinit(testing.allocator);
+                for (0..rig.term.lineCount()) |row| try rig.term.writeText(row, &got);
+                const expected = if (replay)
+                    history ++ "B0B1"
+                else
+                    history ++ appended ++ text ++ "B0B1";
+                try testing.expectEqualStrings(expected, got.items);
+                try testing.expect(rig.term.autowrap);
+
+                // Deliver the resize after the output. CPR must locate the
+                // actual band, including the arrival-time soft-wrapped rows.
+                try rig.region.resize(arrival_width, 12, 2);
+                try rig.pump();
+                try rig.draw(&.{ "B0", "B1" });
+                try rig.render();
+                try rig.render();
+                try expectAnchored(&rig);
+                try expectBandRow(&rig, 0, "B0");
+                try expectBandRow(&rig, 1, "B1");
+                got.clearRetainingCapacity();
+                for (0..rig.term.lineCount()) |row| try rig.term.writeText(row, &got);
+                try testing.expectEqualStrings(expected, got.items);
+                try rig.render();
+                try testing.expectEqual(@as(usize, 0), rig.out.written().len);
+            }
+        }
+    }
+}
+
 test "native: default App spinner frames preserve the counter band through width reflow" {
     const app_mod = @import("../app.zig");
     const output = @import("../output.zig");

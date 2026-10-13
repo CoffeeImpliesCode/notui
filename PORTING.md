@@ -127,9 +127,11 @@ without notice; never depend on it. (Roadmap item A2.)
 1. Hide the cursor for the interactive session (`ESC[?25l` at the first frame,
    `ESC[?25h` on exit; `Region.setCursorHidden` drives it mid-session) —
    `src/region.zig`, `src/emit.zig`.
-2. Disable autowrap, DECAWM (`ESC[?7l` … `ESC[?7h`) around the frame: a write
-   into the last column under autowrap defers a wrap and scrolls the band out
-   from under its own anchor. Bytes: `emit.autowrap_off` / `autowrap_on`
+2. Enable autowrap, DECAWM (`ESC[?7h`), before writing frame rows and leave it on.
+   A full-width row defers wrapping until the next printed glyph; the renderer's
+   following CR clears that deferred wrap without scrolling, even at bottom-right.
+   If the terminal narrowed before an in-flight row arrives, autowrap preserves
+   its source rather than clamping it at the last column. Bytes: `emit.autowrapOn`
    (`src/emit.zig`).
 3. Wrap the frame in synchronized output, DEC 2026 (`ESC[?2026h` … `ESC[?2026l`)
    when the terminal advertises it (`caps.sync_output`, `src/caps.zig`).
@@ -145,9 +147,9 @@ without notice; never depend on it. (Roadmap item A2.)
 - A settled batch is transcript. It is written above the band
   (`Region.append`, `Context.appendAbove`, `Cmd.println` — `src/region.zig`,
   `src/context.zig`, `src/command.zig`), acknowledged once its bytes are
-  accepted, and never part of a later frame. A `.line` append is one exact row
-  (known anchor shift); a `.text` append is wrapped by the terminal, so the
-  anchor is re-queried next frame.
+  accepted, and never part of a later frame. A `.line` append hard-wraps at the
+  composed band width on terminal cell boundaries (known anchor shift); a `.text`
+  append retains the caller's layout and re-queries the anchor next frame.
 - Retirement is the app's decision, never a screen-position inference (rule 2).
   A diff frame repaints only changed rows; a frame with nothing changed emits
   zero bytes (`Buffer.renderDiff`, `Region.render`).

@@ -12,10 +12,11 @@
 //! - **Paint envelope (B2).** Every interactive frame is staged as one
 //!   contiguous run of bytes — sync start (when the terminal supports
 //!   DEC 2026) → hide cursor (on the visible→hidden transition) →
-//!   autowrap off (DECAWM) → frame → autowrap on → sync end → show
-//!   cursor (on the hidden→visible transition). `interactive` gates the
-//!   whole envelope; `sync_output` only gates the 2026 pair. A frame
-//!   that changes nothing emits ZERO bytes, envelope included.
+//!   autowrap on (DECAWM) → frame → sync end → show cursor (on the
+//!   hidden→visible transition). Every row write allows a frame arriving
+//!   after a width change to soft-wrap rather than lose text. CR clears
+//!   a deferred wrap when the widths match. `interactive` gates the whole
+//!   envelope; `sync_output` only gates the 2026 pair. Idle emits ZERO bytes.
 //!   `exit()` (and the panic path in tty.zig) restores autowrap, the
 //!   cursor and the sync state.
 //!
@@ -87,12 +88,11 @@
 //!   unused old bottom. Distant retired rows are erased in place with EL.
 //!   Committed history is never retired, reclaimed or erased with them:
 //!   a ledger write, a `.line`, a `.text` or a `.rebuild` row
-//!   only SHIFTS the offsets past it — DECAWM is off for the whole
-//!   envelope, so every `\n` a `.text` carries is a hard row move and the
-//!   shift is computed from the bytes, never left to the terminal — and
-//!   a growth that appends empty rows below the cursor reveals nothing at
-//!   all, so a run the viewport cannot reach stays tracked rather than
-//!   assumed gone.
+//!   only SHIFTS the offsets past it. Newlines are emitted as hard CRLF
+//!   moves; the declared native model projects any arrival-time soft wraps
+//!   when the changed width is observed. A growth that appends empty rows
+//!   below the cursor reveals nothing at all, so a run the viewport cannot
+//!   reach stays tracked rather than assumed gone.
 //!
 //!   What bounds the erase is `reach`, the number of rows above the band
 //!   top the viewport can be showing. It is DERIVED, not accumulated:
@@ -1739,8 +1739,8 @@ pub const Region = struct {
     ///
     /// Frame flow: idle check (zero bytes) → envelope prologue (sync,
     /// cursor, autowrap) → retirement erase → strategy → postpaint CPR
-    /// query when one is owed → envelope epilogue (autowrap, sync,
-    /// cursor) → commit the frame state. After the frame the cursor
+    /// query when one is owed → envelope epilogue (sync, cursor) → commit
+    /// the frame state. After the frame the cursor
     /// sits at the band bottom (column 1 of the last row), which is
     /// exactly the row the query asks about, so a reply needs no
     /// correction for the frame that asked it. Allocation failure occurs before output.
@@ -1849,7 +1849,10 @@ pub const Region = struct {
             try emit.hideCursor(w);
             f.hide_cursor = true;
         }
-        try emit.autowrapOff(w);
+        // A staged row can arrive after the terminal narrowed. Autowrap
+        // preserves its source and matches the native reflow projection;
+        // each following CR clears a full-width row's deferred wrap.
+        try emit.autowrapOn(w);
 
         // Distant retired rows are erased in place. A visible retired
         // suffix touching the band is instead repainted as part of it;
@@ -1893,8 +1896,7 @@ pub const Region = struct {
             f.query = true;
         }
 
-        // Envelope epilogue: autowrap, sync, cursor restoration.
-        try emit.autowrapOn(w);
+        // Envelope epilogue: sync and cursor restoration; autowrap stays on.
         if (self.opts.sync_output) try emit.endSync(w);
         if (!hide_wanted and self.cursor_hidden) {
             try emit.showCursor(w);
@@ -1913,8 +1915,7 @@ pub const Region = struct {
         self.exited = true;
         if (!self.opts.interactive) return;
         if (self.cursor_hidden) try emit.showCursor(w);
-        // Autowrap first: the envelope turns it off, so teardown must
-        // turn it back on even if a frame died mid-envelope.
+        // Ensure the session's expected terminal modes on teardown.
         try emit.autowrapOn(w);
         try emit.endSync(w);
         try w.writeAll("\r\n\r");
@@ -2562,16 +2563,11 @@ pub const Region = struct {
     /// shared seam, so a reflow projection of this row and of a band
     /// row written by `Buffer` cannot disagree.
     ///
-    /// The walk stops at the window's right margin, because that is
-    /// where the terminal stops: the whole envelope runs with DECAWM
-    /// off, so a row longer than the window is ONE hard row clipped at
-    /// the margin, and recording the caller's full text width would
-    /// claim rows the screen has never held. Every offset above the
-    /// band top is a projection from the ledger, so an over-long record
-    /// would aim a later retirement erase at committed content. A
-    /// width-2 glyph with only one column left is dropped, the same
-    /// rule the band-row producer applies to a lead with no
-    /// continuation column to own.
+    /// The source is bounded by the composed width: `.line` appends are
+    /// hard-wrapped there, and exact-layout rows are supplied by the caller.
+    /// Output enables DECAWM to preserve that source if the terminal narrows
+    /// before receiving it. The declared native model then projects this
+    /// footprint at the observed width, including those soft wraps.
     fn stageTextRow(self: *Region, san: *markdown.Sanitizer, text: []const u8) !void {
         // Without a declared native model nothing ever reads this
         // geometry: the row is one physical row whatever its columns
@@ -2597,9 +2593,8 @@ pub const Region = struct {
             if (!san.acceptCluster(gc)) continue;
             const wg = Width.graphemeWidth(gc);
             if (wg <= 0) continue;
-            // The margin ends the row: whatever the caller wrote past
-            // it was never printed, and a lead that would straddle it
-            // has no continuation column to own.
+            // Exact-layout sources must fit the composed width; keep their
+            // footprint bounded by it, like the line-wrapping producer.
             if (col + @as(u32, @intCast(wg)) > cols) break;
             if (wg >= 2) try self.wide_tape.append(self.gpa, @intCast(col));
             col += if (wg >= 2) 2 else 1;
@@ -2633,6 +2628,10 @@ pub const Region = struct {
         remaining: ?[]const u8 = null,
         width: u16,
         trailing: bool,
+        /// The escape filter the terminal-visible width is measured
+        /// through: a styled line's SGR bytes take no column, so they
+        /// must not shorten its rows, and a row never ends inside one.
+        san: markdown.Sanitizer = .{},
 
         fn init(text: []const u8, columns: u16) LineRows {
             return .{
@@ -2649,11 +2648,40 @@ pub const Region = struct {
                 if (seg.len == 0 and self.segments.index == null and self.trailing) return null;
                 break :blk seg;
             };
-            var len = Width.fitPrefixLen(segment, self.width);
-            // A cluster wider than the whole band cannot be split. Consume
-            // it once, even at width zero, rather than stalling the iterator.
-            if (len == 0 and segment.len > 0) {
-                len = @max(1, Width.firstCellLen(segment));
+            // Walk cell clusters through the filter: escape bytes and
+            // zero-width clusters ride along in the current row, and the
+            // row ends before the first visible cluster that would
+            // overflow it.
+            var len: usize = 0;
+            var col: usize = 0;
+            while (len < segment.len) {
+                const n = Width.firstCellLen(segment[len..]);
+                if (n == 0) break;
+                const gc = segment[len .. len + n];
+                var trial = self.san;
+                const visible = trial.acceptCluster(gc);
+                const wg = if (visible) Width.graphemeWidth(gc) else 0;
+                const cells: usize = if (wg > 0) @intCast(wg) else 0;
+                // A cluster wider than the whole band cannot be split.
+                // Consume it alone, even at width zero, rather than
+                // stalling the iterator.
+                if (cells > 0 and col + cells > self.width and col > 0) break;
+                self.san = trial;
+                len += n;
+                col += cells;
+                if (cells > 0 and col >= self.width) {
+                    // Keep trailing escapes (an SGR reset) on this row.
+                    while (len < segment.len) {
+                        const m = Width.firstCellLen(segment[len..]);
+                        if (m == 0) break;
+                        var tail = self.san;
+                        const tail_gc = segment[len .. len + m];
+                        if (tail.acceptCluster(tail_gc) and Width.graphemeWidth(tail_gc) > 0) break;
+                        self.san = tail;
+                        len += m;
+                    }
+                    break;
+                }
             }
             self.remaining = if (len < segment.len) segment[len..] else null;
             return segment[0..len];
@@ -4016,7 +4044,6 @@ const sync_on = "\x1b[?2026h";
 const sync_off = "\x1b[?2026l";
 const hide_c = "\x1b[?25l";
 const show_c = "\x1b[?25h";
-const aw_off = "\x1b[?7l";
 const aw_on = "\x1b[?7h";
 const cpr_q = "\x1b[6n";
 
@@ -4136,7 +4163,7 @@ fn count(haystack: []const u8, needle: []const u8) usize {
 /// `comptime` because the whole frame is a string constant — every
 /// caller passes a literal.
 fn framed(comptime body: []const u8) []const u8 {
-    return sync_on ++ aw_off ++ body ++ aw_on ++ sync_off;
+    return sync_on ++ aw_on ++ body ++ sync_off;
 }
 
 /// A terminal model for the frames the Region emits: it interprets the
@@ -4540,7 +4567,7 @@ test "region: init/deinit leak nothing with a queue and a ledger" {
 
 // ── B2: the paint envelope ────────────────────────────
 
-test "region: the first frame is wrapped once: sync, hide, autowrap off, body, on, end" {
+test "region: the first frame is wrapped once: sync, hide, autowrap on, body, end" {
     var r = try makeRegion(2, .{ .append_lines = true });
     defer r.deinit();
     try drawRow(&r.cur, 0, "ab");
@@ -4550,13 +4577,11 @@ test "region: the first frame is wrapped once: sync, hide, autowrap off, body, o
     t.init();
     try r.render(&t.w);
     const frame = t.bytes();
-    // The envelope opens before the body and closes after it, once each:
-    // sync that started late could not bracket anything, and a mode
-    // toggle emitted twice (or never restored) leaks onto whatever the
-    // shell prints next.
-    try testing.expect(std.mem.startsWith(u8, frame, sync_on ++ hide_c ++ aw_off));
-    try testing.expect(std.mem.endsWith(u8, frame, aw_on ++ sync_off));
-    for ([_][]const u8{ sync_on, sync_off, hide_c, aw_off, aw_on }) |fragment| {
+    // Sync brackets the body once. Autowrap is enabled before any row
+    // write and stays on; a full-width row's final CR clears deferred wrap.
+    try testing.expect(std.mem.startsWith(u8, frame, sync_on ++ hide_c ++ aw_on));
+    try testing.expect(std.mem.endsWith(u8, frame, sync_off));
+    for ([_][]const u8{ sync_on, sync_off, hide_c, aw_on }) |fragment| {
         try testing.expectEqual(@as(usize, 1), count(frame, fragment));
     }
     // The band owns the two rows reserved below the cursor, one terminal
@@ -4581,7 +4606,7 @@ test "region: an interactive session without DEC 2026 paints normally, envelope 
     var t: TestWriter = .{};
     t.init();
     try r.render(&t.w);
-    try testing.expectEqualStrings(hide_c ++ aw_off ++ "\rhi\r" ++ cpr_q ++ aw_on, t.bytes());
+    try testing.expectEqualStrings(hide_c ++ aw_on ++ "\rhi\r" ++ cpr_q, t.bytes());
     try testing.expectEqual(@as(usize, 0), count(t.bytes(), sync_on));
     try testing.expectEqual(@as(usize, 0), count(t.bytes(), sync_off));
 
@@ -4594,7 +4619,7 @@ test "region: an interactive session without DEC 2026 paints normally, envelope 
     // `moveToBandTop` parks at the band top with a bare CR for a one-row
     // band, then the diff re-arms the column and erases the row it
     // repaints — the same `\r\r\x1b[K` shape every diff frame emits.
-    try testing.expectEqualStrings(aw_off ++ "\r\r\x1b[Kyo\r" ++ aw_on, t2.bytes());
+    try testing.expectEqualStrings(aw_on ++ "\r\r\x1b[Kyo\r", t2.bytes());
 }
 
 test "region: the envelope hides and shows the cursor on the transition frames only" {
@@ -4623,7 +4648,7 @@ test "region: the envelope hides and shows the cursor on the transition frames o
     t3.init();
     try r.render(&t3.w);
     try testing.expectEqualStrings(
-        sync_on ++ aw_off ++ "\r\r\x1b[Kb\r" ++ aw_on ++ sync_off ++ show_c,
+        sync_on ++ aw_on ++ "\r\r\x1b[Kb\r" ++ sync_off ++ show_c,
         t3.bytes(),
     );
     try testing.expect(!r.cursor_hidden);
@@ -4636,9 +4661,9 @@ test "region: the envelope hides and shows the cursor on the transition frames o
     t4.init();
     try r.render(&t4.w);
     // The prologue order is sync, cursor, autowrap: the hide lands
-    // inside the sync bracket, ahead of the autowrap-off.
+    // inside the sync bracket, ahead of autowrap-on.
     try testing.expectEqualStrings(
-        sync_on ++ hide_c ++ aw_off ++ "\r\r\x1b[Kc\r" ++ aw_on ++ sync_off,
+        sync_on ++ hide_c ++ aw_on ++ "\r\r\x1b[Kc\r" ++ sync_off,
         t4.bytes(),
     );
 }
@@ -4893,8 +4918,8 @@ test "region: a frame that does not fit the queue stages nothing" {
     t.init();
     try r.render(&t.w);
     try testing.expectEqualStrings(
-        sync_on ++ hide_c ++ aw_off ++ "queued\r\nledger\r\n" ++
-            "\rab\r\ncd\r" ++ cpr_q ++ aw_on ++ sync_off,
+        sync_on ++ hide_c ++ aw_on ++ "queued\r\nledger\r\n" ++
+            "\rab\r\ncd\r" ++ cpr_q ++ sync_off,
         t.bytes(),
     );
     try testing.expectEqual(@as(usize, 0), r.append_queue.items.len);
@@ -4956,7 +4981,7 @@ test "region: a changed middle row emits a minimal diff" {
     t1.init();
     try r.render(&t1.w);
     try testing.expectEqualStrings(
-        sync_on ++ hide_c ++ aw_off ++ "\raaa\r\nbbb\r\nccc\r" ++ cpr_q ++ aw_on ++ sync_off,
+        sync_on ++ hide_c ++ aw_on ++ "\raaa\r\nbbb\r\nccc\r" ++ cpr_q ++ sync_off,
         t1.bytes(),
     );
 
@@ -5001,7 +5026,7 @@ test "region: a queued line flushes verbatim before the first frame's rows" {
     t.init();
     try r.render(&t.w);
     try testing.expectEqualStrings(
-        sync_on ++ hide_c ++ aw_off ++ "L\r\n\rab\r\ncd\r" ++ cpr_q ++ aw_on ++ sync_off,
+        sync_on ++ hide_c ++ aw_on ++ "L\r\n\rab\r\ncd\r" ++ cpr_q ++ sync_off,
         t.bytes(),
     );
     try testing.expectEqual(@as(usize, 0), count(t.bytes(), "\x1b[J"));
@@ -5175,6 +5200,25 @@ test "region: long line appends hard wrap with exact ledger and next frame ancho
     out.init();
     try r.render(&out.w);
     try testing.expectEqualStrings("", out.bytes());
+}
+
+test "region: a styled line append wraps on visible columns, not escape bytes" {
+    var r = try makeNativeRegion(1, .{}, 100);
+    defer r.deinit();
+    try r.resize(10, Term.rows, 1);
+    try drawRow(&r.cur, 0, "band");
+    // Twenty visible cells with SGR runs inside: two full rows, the reset
+    // kept on the row it closes, no row split inside a sequence.
+    try r.append(.{ .line = "\x1b[36mABCDE\x1b[0mFGHIJ\x1b[1mKLMNOPQRST\x1b[0m" });
+    var out: TestWriter = .{};
+    out.init();
+    try r.render(&out.w);
+    var term: Term = .{};
+    term.feed(out.bytes());
+    try testing.expectEqualStrings("ABCDEFGHIJ", term.text(0));
+    try testing.expectEqualStrings("KLMNOPQRST", term.text(1));
+    try testing.expectEqualStrings("band", term.text(2));
+    try testing.expectEqual(@as(usize, 2), r.pending_rows);
 }
 
 test "region: line append newlines split rows without raw LF or phantom trailing row" {
@@ -7096,7 +7140,7 @@ test "region: a replay supersedes batches and appends staged but unwritten" {
     // thing on the wire: neither the stale batch nor the queued append
     // precedes it.
     try testing.expectEqualStrings(
-        sync_on ++ hide_c ++ aw_off ++ "fresh\r\n" ++ "\ra\r" ++ cpr_q ++ aw_on ++ sync_off,
+        sync_on ++ hide_c ++ aw_on ++ "fresh\r\n\ra\r" ++ cpr_q ++ sync_off,
         t.bytes(),
     );
     // The superseded batch is gone; the replay is the whole ledger now.
@@ -7196,7 +7240,11 @@ test "region: a ledger write failure leaves the batch unwritten" {
     defer r.deinit();
     try r.writeHistory(.{ .id = 1, .rows = &.{"rows"}, .kind = .append });
 
-    var q = try output.OutputQueue.init(testing.allocator, .{ .capacity = 40, .watermark = 32 });
+    const prologue = sync_on.len + hide_c.len + aw_on.len;
+    var q = try output.OutputQueue.init(testing.allocator, .{
+        .capacity = prologue + "rows\r\n".len - 1,
+        .watermark = prologue,
+    });
     defer q.deinit();
     q.beginFrame();
     try testing.expectError(error.WriteFailed, r.render(q.writer()));
@@ -7939,7 +7987,7 @@ test "region: a wide glyph row diff never emits the continuation" {
     t1.init();
     try r.render(&t1.w);
     try testing.expectEqualStrings(
-        sync_on ++ hide_c ++ aw_off ++ "\ra👨‍🌾b\r" ++ cpr_q ++ aw_on ++ sync_off,
+        sync_on ++ hide_c ++ aw_on ++ "\ra👨‍🌾b\r" ++ cpr_q ++ sync_off,
         t1.bytes(),
     );
 
@@ -7967,7 +8015,7 @@ test "region: prev owns the previous content, not the app's staging bytes" {
     t1.init();
     try r.render(&t1.w);
     try testing.expectEqualStrings(
-        sync_on ++ hide_c ++ aw_off ++ "\rabc\r\n\r" ++ cpr_q ++ aw_on ++ sync_off,
+        sync_on ++ hide_c ++ aw_on ++ "\rabc\r\n\r" ++ cpr_q ++ sync_off,
         t1.bytes(),
     );
 

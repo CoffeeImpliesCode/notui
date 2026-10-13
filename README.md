@@ -342,7 +342,13 @@ Allocator-first APIs:
 ## Frame and scrollback contract
 
 Every interactive paint has a cursor-hide prologue, optional DEC 2026,
-and DECAWM off/on around the band writes. Idle frames emit zero bytes.
+and DECAWM enabled before writing rows. Autowrap stays enabled throughout
+the frame, for both scrollback and band rows, and after it. If an in-flight
+frame reaches a terminal that already narrowed, its rows soft-wrap instead
+of being clamped at the right margin; the declared native model projects
+those rows when the resize is observed. At matching widths each row's
+following CR clears a deferred wrap without adding a row, including at
+the bottom-right cell. Idle frames emit zero bytes.
 `App` stages the frame into one contiguous pending byte stream before
 attempting transport output. A short write or `WouldBlock` retains the
 remaining bytes in order; it does not discard or recompose the frame.
