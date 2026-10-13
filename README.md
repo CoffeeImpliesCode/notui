@@ -246,15 +246,15 @@ declarations were rejected by their intended guards. All six registered roots
 generated documentation. An external caller named `Buffer.RowFootprint` and its
 `NullGap`, then called the allocator-first footprint API.
 
-**Analyzer assessment, refreshed 2026-10-13 at `b8b2118ef980`:** all 136 diagnostic
-occurrences were reviewed. There are 78 false positives and 58 intentional test
+**Analyzer assessment, refreshed 2026-10-13 at `c6b5b218b85f`:** all 138 diagnostic
+occurrences were reviewed. There are 78 false positives and 60 intentional test
 assertions. No reported finding exposed a confirmed runtime defect.
 
 | Analyzer report | Count | Assessment |
 |---|---:|---|
 | ziglint: public type exposure | 4 | `Buffer.RowFootprint` is public |
 | ziglint: incomplete disposal | 1 | Test fixture frees its buffer and retains its observation counter |
-| zwanzig: optional unwrap | 119 | 61 guarded or constructed values, 58 intentional test assertions |
+| zwanzig: optional unwrap | 121 | 61 guarded or constructed values, 60 intentional test assertions |
 | zwanzig: resource store | 11 | Arena-owned allocations, a loop-scoped `defer`, and test helpers closing raw descriptors |
 | zwanzig: identifier style | 1 | `View.DrawError` is a type alias |
 
@@ -961,25 +961,47 @@ allocations per frame at 80×24 and 200×60 for static and streaming content.
 Static steady-state frames must write zero bytes. Rendering allocations
 are counted rather than assumed.
 
-Historical measurement on this host (`zig build bench`, ReleaseFast, Zig 0.16;
-timing floor clock p50 73 ns / p99 80 ns):
+Measurement for 0.1.0 on this host (`zig build bench`, ReleaseFast, Zig 0.16, pinned to
+one core; timing floor clock p50 24 ns / p99 193 ns). The host ran at load ≈26 on 25
+cores, so the p50 and p99 columns carry scheduler noise; `min` is the steadier figure.
 
-| case | p50 ns | p99 ns | bytes/frame | allocs/frame |
-|---|---|---|---|---|
-| static 80×24 | 92 872 | 122 841 | 0 | 0.000 |
-| static 200×60 | 477 838 | 694 499 | 0 | 0.000 |
-| stream 80×24 | 82 459 | 251 120 | 230 | 0.000 |
-| stream 200×60 | 402 786 | 498 005 | 427 | 0.000 |
-| damage 80×24 | 26 861 | 37 720 | 104 | 0.000 |
-| damage 200×60 | 152 584 | 248 611 | 227 | 0.000 |
-| styles 80×24 | 31 493 | 39 471 | 170 | 0.000 |
-| region h1 | 3 927 | 10 363 | 81 | 0.667 |
-| region h4 | 14 546 | 21 143 | 184 | 0.667 |
-| region h24 | 88 427 | 149 200 | 851 | 0.667 |
+| case | min ns | p50 ns | p99 ns | bytes/frame | allocs/frame |
+|---|---|---|---|---|---|
+| static 80×24 | 21 550 | 54 154 | 60 738 | 0 | 0.000 |
+| static 200×60 | 297 732 | 313 201 | 324 384 | 0 | 0.000 |
+| stream 80×24 | 41 858 | 62 886 | 69 637 | 230 | 0.000 |
+| stream 200×60 | 268 134 | 335 333 | 345 884 | 426 | 0.000 |
+| damage 80×24 | 68 580 | 70 820 | 77 079 | 104 | 0.000 |
+| damage 200×60 | 435 489 | 439 158 | 449 556 | 224 | 0.000 |
+| styles 80×24 | 64 278 | 65 109 | 71 701 | 170 | 0.000 |
+| region h1 | 244 | 9 544 | 12 927 | 77 | 0.667 |
+| region h4 | 1 163 | 21 491 | 32 897 | 182 | 0.667 |
+| region h24 | 6 681 | 154 827 | 296 961 | 853 | 0.666 |
+
+The 0.1.0 performance round compared ReleaseFast builds of the previous `main`
+(`38634f2b`) and this tree, run interleaved three times on the same core. Medians of
+the per-run `min` in ns:
+
+| case | main | 0.1.0 |
+|---|---|---|
+| static 80×24 | 193 171 | 47 077 |
+| static 200×60 | 1 013 303 | 305 788 |
+| stream 80×24 | 197 313 | 61 392 |
+| stream 200×60 | 1 045 306 | 326 482 |
+| damage 80×24 | 87 146 | 68 876 |
+| damage 200×60 | 502 078 | 427 920 |
+| styles 80×24 | 81 156 | 56 850 |
+
+Region p50 dropped from 12 650 to 9 492 ns (h1), 44 474 to 21 511 (h4) and 265 984 to
+154 543 (h24). Region bytes/frame fell by 4 to 5 through the visual-pass fixes, not this
+round; allocs/frame did not change. The gains come from ASCII fast paths in
+`width.zig`, static one-byte ASCII graphemes in `Buffer.draw` (a snapshot owns them
+without copying, and equal cells compare by pointer), and one shared whole-row byte
+compare for `Buffer` and `Region` damage.
 
 The SGR memo's byte saving is measured against the pre-B4 stream: 170 vs
-206 bytes/frame on the style case (17.5%), 227 vs 231 on the 200×60 damage
-case (1.7%), and no change on 80×24 damage, where a transition is rare
+206 bytes/frame on the style case (17.5%), 224 vs 228 on the 200×60 damage
+case (1.8%), and no change on 80×24 damage, where a transition is rare
 enough that the memo never repays its bookkeeping.
 
 The same step drives a real loop with no pty: two frames through

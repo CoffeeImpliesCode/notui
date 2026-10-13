@@ -14,7 +14,7 @@
 const std = @import("std");
 
 /// Package version, mirrored from build.zig.zon.
-pub const version = "0.0.0";
+pub const version = "0.1.0";
 
 /// The zg seam — the only module allowed to import zg.
 pub const width = @import("width.zig");
