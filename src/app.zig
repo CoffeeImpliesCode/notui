@@ -1215,7 +1215,12 @@ pub fn App(comptime Model: type) type {
                     return error.FrameTooLarge;
                 }
                 q.commitFrame();
-                try q.drainAll(self.tty.?.writer());
+                // The tty writer buffers: without the flush the exit
+                // sequences stay in its buffer and the shell inherits a
+                // hidden cursor and a prompt written over the band.
+                const tw = self.tty.?.writer();
+                try q.drainAll(tw);
+                try tw.flush();
                 self.terminal_restored = true;
                 return;
             }
@@ -1980,6 +1985,29 @@ test "app: frame_arena text repaints when the content changes (no prev aliasing)
     try setup.app.tick(); // must repaint: the diff emits "frame2"
     const n2 = setup.tty.drainOutput(&out);
     try testing.expect(std.mem.indexOf(u8, out[0..n2], "frame2") != null);
+}
+
+test "app: an interactive teardown reaches the terminal" {
+    var setup: InteractiveFixture(ArenaDrawModel) = undefined;
+    try setupInteractive(ArenaDrawModel, &setup, .{ .fps = 1000 });
+    defer setup.deinit();
+
+    try setup.app.send(.tick);
+    try setup.app.tick();
+    var out: [4096]u8 = undefined;
+    _ = setup.tty.drainOutput(&out);
+
+    // The same call `run` makes after its loop: the exit sequences must be
+    // on the wire when it returns, not parked in the tty's write buffer.
+    // `Tty.writer` writes the terminal descriptor, whose far end is `b`.
+    try setup.app.emitTeardown(setup.app.tty.?.writer());
+    var pfd = [_]posix.pollfd{.{ .fd = setup.tty.b, .events = posix.POLL.IN, .revents = 0 }};
+    const ready = try posix.poll(&pfd, 0);
+    const far: std.Io.File = .{ .handle = setup.tty.b, .flags = .{ .nonblocking = false } };
+    const n = if (ready > 0) try far.readStreaming(testing.io, &.{&out}) else 0;
+    const bytes = out[0..n];
+    try testing.expect(std.mem.indexOf(u8, bytes, "\x1b[?25h") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "\r\n") != null);
 }
 
 test "app: teardown emits Region.exit then caps.restore" {
