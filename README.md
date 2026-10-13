@@ -677,8 +677,10 @@ prompt over the band (teardown never flushed); App frames keeping the previous f
 cells; App ignoring SIGWINCH; overlays showing the band through their box; a coalesced resize
 leaving a truncated row; per-grapheme widths misplacing ZWJ emoji in terminals without DEC 2027;
 rows duplicated by terminal rewrapping (the rewrapping profile is now the default); gaps and
-stale popup rows after height round trips and tmux resizes; scrollback written out of order and
-long appended lines truncated; and REPL, formula and agent-demo layout defects. Evidence is under
+stale popup rows after height round trips and tmux resizes; scrollback written out of order;
+long appended lines truncated and styled ones wrapped on escape bytes; committed rows clamped
+by a terminal that narrowed while a frame was in flight (rows are now written with autowrap on);
+and REPL, formula and agent-demo layout defects. Evidence is under
 `zig-out/visual/complex-2026-10-13/`, one directory per test campaign.
 
 ### Baseline visual findings (2026-10-01, historical, before repairs)
