@@ -42,11 +42,13 @@ pub fn View(comptime Model: type) type {
             break :blk Declared;
         };
 
-        /// Paint the frame into `buf`, the active frame `Buffer`. Compose
-        /// components through their own draw callbacks and raw `Buffer.draw`;
-        /// advance animation with a component `advance`, and set
-        /// `ctx.render_requested = true` when the frame moved so the App
-        /// repaints.
+        /// Paint the frame into `buf`, the active frame `Buffer`. `buf` is
+        /// blank when `draw` starts: the App clears it every frame, so a
+        /// model paints the whole frame and never inherits the previous
+        /// one's cells. Compose components through their own draw callbacks
+        /// and raw `Buffer.draw`; advance animation with a component
+        /// `advance`, and set `ctx.render_requested = true` when the frame
+        /// moved so the App repaints.
         ///
         /// `model` is a mutable pointer so components can advance to the
         /// current instant while they paint. `ctx` and `buf` are the session's

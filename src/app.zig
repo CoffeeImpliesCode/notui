@@ -717,6 +717,11 @@ pub fn App(comptime Model: type) type {
             _ = try view_mod.applyModeDiff(vw, w, &self.modes);
             if (vw.title) |vt| try self.stageTitle(vt, w);
             self.region.?.setCursorHidden(vw.hide_cursor);
+            // Every frame is painted from a blank buffer: `cur` still holds
+            // the previous frame's cells, and text that got shorter would
+            // otherwise keep the old tail (`count: 10` -> `count: 9` left a
+            // stale last character).
+            self.region.?.cur.clear();
             try vw.draw(&self.model, ctx, &self.region.?.cur);
             const dirty = self.region.?.dirtyCells();
             try self.retireTranscript();
@@ -881,6 +886,7 @@ pub fn App(comptime Model: type) type {
             if (vw.height != 0 and vw.height != self.region.?.height) {
                 try self.region.?.setHeight(vw.height);
             }
+            self.region.?.cur.clear();
             try vw.draw(&self.model, &ctx, &self.region.?.cur);
             try self.region.?.render(w);
             try w.flush();
@@ -1969,6 +1975,42 @@ const ArenaDrawModel = struct {
         _ = try buf.draw(.{}, text, 0, 0);
     }
 };
+
+/// Draws a long row on its first frame and a short one afterwards.
+const ShrinkModel = struct {
+    pub const Msg = union(enum) { tick };
+    frame: usize = 0,
+
+    fn init(_: std.mem.Allocator) !struct { model: ShrinkModel, cmd: Cmd(ShrinkModel.Msg) } {
+        return .{ .model = .{}, .cmd = .none };
+    }
+    fn update(self: *ShrinkModel, _: Msg, ctx: *Context) !Cmd(Msg) {
+        self.frame += 1;
+        ctx.render_requested = true;
+        return .none;
+    }
+    fn view(_: *const ShrinkModel, _: *Context) View(ShrinkModel) {
+        return .{ .draw = &draw };
+    }
+    fn draw(self: *ShrinkModel, _: *Context, buf: *Buffer) !void {
+        _ = try buf.draw(.{}, if (self.frame == 1) "count: 10 quit" else "count: 9 quit", 0, 0);
+    }
+};
+
+test "app: a frame that draws shorter text leaves no tail of the previous one" {
+    var setup: InteractiveFixture(ShrinkModel) = undefined;
+    try setupInteractive(ShrinkModel, &setup, .{ .fps = 1000 });
+    defer setup.deinit();
+
+    try setup.app.send(.tick);
+    try setup.app.tick();
+    try setup.app.send(.tick);
+    try setup.app.tick();
+    // The second frame drew 13 cells; the 14th held the first frame's `t`.
+    const cur = &setup.app.region.?.cur;
+    try testing.expectEqualStrings("t", cur.get(12, 0).grapheme);
+    try testing.expectEqualStrings(" ", cur.get(13, 0).grapheme);
+}
 
 test "app: frame_arena text repaints when the content changes (no prev aliasing)" {
     var setup: InteractiveFixture(ArenaDrawModel) = undefined;
