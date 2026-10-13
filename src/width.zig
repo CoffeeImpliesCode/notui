@@ -75,6 +75,7 @@ fn isControl(cp: u21) bool {
 /// stay on their spacing codepoint; the next spacing codepoint starts a new cell.
 /// In `.grapheme` mode this is `firstGraphemeLen`. Allocates and retains nothing.
 pub fn firstCellLen(str: []const u8) usize {
+    if (asciiSingle(str)) return 1;
     if (mode == .grapheme) return firstGraphemeLen(str);
     const first = firstCodepoint(str) orelse return 0;
     if (isControl(first.code)) return first.len;
@@ -89,6 +90,7 @@ pub fn firstCellLen(str: []const u8) usize {
 
 /// Display width of `str` in terminal cells under the selected drawing policy.
 pub fn strWidth(str: []const u8) usize {
+    if (allPrintableAscii(str)) return str.len;
     if (mode == .codepoint) return @intCast(@max(0, codepointStrWidth(str)));
     return DisplayWidth.strWidth(str);
 }
@@ -97,6 +99,7 @@ pub fn strWidth(str: []const u8) usize {
 /// mode this sums codepoint widths; use `firstCellLen` to segment drawable cells.
 /// Zero-width marks consume no cells; negative widths represent controls.
 pub fn graphemeWidth(gc: []const u8) isize {
+    if (gc.len == 1 and isPrintableAscii(gc[0])) return 1;
     if (mode == .codepoint) return codepointStrWidth(gc);
     return DisplayWidth.graphemeWidth(gc);
 }
@@ -153,9 +156,30 @@ pub fn wrap(
 ///
 /// `Parser` needs this to know how many bytes one ground-state key occupies.
 pub fn firstGraphemeLen(str: []const u8) usize {
+    if (asciiSingle(str)) return 1;
     var iter = Graphemes.iterator(str);
     const g = iter.next() orelse return 0;
     return g.bytes(str).len;
+}
+
+/// Printable ASCII (U+0020..U+007E): one cell, one byte, one codepoint.
+inline fn isPrintableAscii(b: u8) bool {
+    return b >= 0x20 and b < 0x7f;
+}
+
+/// Whether `str` starts with a printable ASCII byte that is a cell cluster on
+/// its own in both modes: one byte, one column. No ASCII byte extends a
+/// cluster (Extend, ZWJ, SpacingMark and Prepend are all non-ASCII, and the
+/// CR LF pair starts with a control), so an ASCII successor or the end of
+/// input ends it. Drawing loops call this before the general segmenter.
+pub inline fn asciiSingle(str: []const u8) bool {
+    return str.len > 0 and isPrintableAscii(str[0]) and (str.len == 1 or str[1] < 0x80);
+}
+
+/// Whether every byte of `str` is printable ASCII, so its width is its length.
+fn allPrintableAscii(str: []const u8) bool {
+    for (str) |b| if (!isPrintableAscii(b)) return false;
+    return true;
 }
 
 /// Simple (single-codepoint) uppercase mapping for `cp`. Codepoints whose
@@ -171,6 +195,7 @@ pub fn toUpper(cp: u21) u21 {
 /// Zero-width and control clusters consume no cells; an over-wide first cell yields an empty prefix.
 /// Allocates nothing and retains no storage. The caller slices its own borrowed `str`.
 pub fn fitPrefixLen(str: []const u8, columns: usize) usize {
+    if (allPrintableAscii(str)) return @min(str.len, columns);
     var width: usize = 0;
     var end: usize = 0;
     var off: usize = 0;
@@ -467,4 +492,35 @@ test "codepoint mode: prefix truncation and wrapping use cell budgets" {
     const wrapped = try wrap(std.testing.allocator, "👩‍💻 x", 4, 0);
     defer std.testing.allocator.free(wrapped);
     try std.testing.expectEqualStrings("👩‍💻\nx", wrapped);
+}
+
+test "ascii fast path: agrees with zg for every printable byte and successor" {
+    const saved = getMode();
+    defer setMode(saved);
+    // Every printable ASCII byte followed by every ASCII byte, a combining
+    // acute, a ZWJ and nothing: the shortcut must give zg's answer.
+    const tails = [_][]const u8{ "\u{301}", "\u{200d}x", "" };
+    var buf: [8]u8 = undefined;
+    var b: u8 = 0x20;
+    while (b < 0x7f) : (b += 1) {
+        buf[0] = b;
+        var next: u8 = 0;
+        while (next < 0x80) : (next += 1) {
+            buf[1] = next;
+            var iter = Graphemes.iterator(buf[0..2]);
+            const zg_len = iter.next().?.bytes(buf[0..2]).len;
+            try std.testing.expectEqual(zg_len, firstGraphemeLen(buf[0..2]));
+        }
+        for (tails) |tail| {
+            @memcpy(buf[1..][0..tail.len], tail);
+            const s = buf[0 .. 1 + tail.len];
+            var iter = Graphemes.iterator(s);
+            const zg_len = iter.next().?.bytes(s).len;
+            try std.testing.expectEqual(zg_len, firstGraphemeLen(s));
+            setMode(.grapheme);
+            try std.testing.expectEqual(zg_len, firstCellLen(s));
+            try std.testing.expectEqual(DisplayWidth.strWidth(s), strWidth(s));
+        }
+        try std.testing.expectEqual(DisplayWidth.graphemeWidth(buf[0..1]), graphemeWidth(buf[0..1]));
+    }
 }
