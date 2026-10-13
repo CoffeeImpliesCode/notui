@@ -647,6 +647,34 @@ difference is claimed or reconstructed, and nothing about the height-boundary pa
 that file. The boundary proof is `postfix-popup-*.png` and `postfix-height-evidence.json`
 only.
 
+### Interactive probes and the complex-usage pass (2026-10-13)
+
+[`examples/term_driver.js`](examples/term_driver.js) drives one ttyd terminal from a managed
+browser tab for exploratory checks: type keys, resize the viewport (xterm refits and ttyd sends
+SIGWINCH), and read back the emulator's visible rows, full buffer, per-cell attributes and the
+raw bytes the app wrote. ttyd runs inside the devenv container, which has no `/lib64`, so build
+the examples static (`-Dtarget=x86_64-linux-musl`), and use a fresh `ZIG_LOCAL_CACHE_DIR` for
+verification builds: one shared-cache build served a stale binary during this pass.
+
+```bash
+devenv --no-tui shell -- ttyd -i 127.0.0.1 -p 17851 -W -t rendererType=canvas \
+  -t 'fontFamily="DejaVu Sans Mono"' -t fontSize=16 -t cursorBlink=false \
+  -t scrollback=20000 -t disableResizeOverlay=true -t disableLeaveAlert=true \
+  -t disableReconnect=true bash --noprofile --norc
+```
+
+The 2026-10-13 pass ran every example, the new `agent_demo`, and the REPL directly in
+xterm.js and inside tmux, through width and height sweeps, rapid resize bursts, 3-row and
+12-column terminals, long sessions, Unicode input and multiplexer splits. It found and fixed:
+a first-frame gap of `height` blank rows; App sessions ending with a hidden cursor and the shell
+prompt over the band (teardown never flushed); App frames keeping the previous frame's tail
+cells; App ignoring SIGWINCH; overlays showing the band through their box; a coalesced resize
+leaving a truncated row; per-grapheme widths misplacing ZWJ emoji in terminals without DEC 2027;
+rows duplicated by terminal rewrapping (the rewrapping profile is now the default); gaps and
+stale popup rows after height round trips and tmux resizes; scrollback written out of order and
+long appended lines truncated; and REPL, formula and agent-demo layout defects. Evidence is under
+`zig-out/visual/complex-2026-10-13/`, one directory per test campaign.
+
 ### Baseline visual findings (2026-10-01, historical, before repairs)
 
 Historical: this subsection is the 2026-10-01 pass, kept as the "before" half of the
