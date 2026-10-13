@@ -1663,10 +1663,11 @@ test "repl band: a recalled multi-line entry shows the line holding the cursor" 
 test "repl input: a chord never types its letter" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
+    const aa = arena.allocator();
     var line: std.ArrayList(u8) = .empty;
     var cursor: usize = 0;
-    try insertKeyText(arena.allocator(), &line, &cursor, .{ .codepoint = 'j', .mods = .{ .ctrl = true } });
-    try insertKeyText(arena.allocator(), &line, &cursor, .{ .codepoint = 'x', .mods = .{ .alt = true } });
+    try insertKeyText(aa, &line, &cursor, .{ .codepoint = 'j', .mods = .{ .ctrl = true } });
+    try insertKeyText(aa, &line, &cursor, .{ .codepoint = 'x', .mods = .{ .alt = true } });
     try std.testing.expectEqualStrings("", line.items);
 }
 

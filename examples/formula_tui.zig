@@ -458,7 +458,8 @@ pub fn main(init: std.process.Init) !void {
             start += notui.width.firstCellLen(line.items[start..]);
         }
         if (start > 0) col += try region.cur.draw(.{ .attrs = .{ .dim = true } }, "…", col, 0);
-        col += try drawInput(&region.cur, col, 0, start, line.items[start..caret], err_active, err_span);
+        const before = line.items[start..caret];
+        col += try drawInput(&region.cur, col, 0, start, before, err_active, err_span);
         col += try region.cur.draw(.{}, cursor_marker, col, 0);
         _ = try drawInput(&region.cur, col, 0, caret, line.items[caret..], err_active, err_span);
         const hint_w: u16 = if (hint) |h| try region.cur.draw(.{}, h, 0, hint_row) else 0;

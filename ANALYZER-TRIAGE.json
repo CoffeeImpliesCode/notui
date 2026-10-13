@@ -1110,7 +1110,7 @@
       "file": "src/app.zig",
       "line": 1993,
       "classification": "false_positive",
-      "evidence": "test model draw: `allocPrint(ctx.frame_arena, ...)`; the frame arena is reset by App per frame | ranges: 1960-1965.",
+      "evidence": "test model draw: `allocPrint(ctx.frame_arena, ...)`; `frame_arena` is the session arena App releases in deinit | ranges: 1960-1965.",
       "reviewer": "parent:2026-10-13",
       "rule": "store-violations-engine"
     },
