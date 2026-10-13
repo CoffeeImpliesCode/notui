@@ -129,6 +129,7 @@ pub const Model = struct {
     hunks: std.ArrayList(C.cards.Hunk) = .empty,
     diff_layout: C.Diff.Layout = .unified,
     title_buf: [96]u8 = undefined,
+    choice_buf: [96]u8 = undefined,
     spinner: C.Spinner = .{ .label = "assistant streaming" },
 
     pub fn init(gpa: std.mem.Allocator) !struct { model: Model, cmd: Cmd(Msg) } {
@@ -534,10 +535,14 @@ pub const Model = struct {
             var popup = self.suggestions();
             const text = self.editors.items[self.focused].text();
             _ = popup.setItemsFuzzy(text, &self.matches) catch 0;
-            const y = input_top -| @as(u16, @intCast(@min(5, popup.candidates.len)));
-            _ = try popup.draw(ctx.allocator, buf, 2, y, now);
+            // The menu opens upward between the title row and the input: a
+            // short band gets fewer rows instead of a menu over both.
+            const room: u16 = input_top -| 1;
+            popup.max_rows = @min(popup.max_rows, room);
+            const shown: u16 = @intCast(@min(@as(usize, popup.max_rows), popup.candidates.len));
+            if (shown > 0) _ = try popup.draw(ctx.allocator, buf, 2, input_top - shown, now);
         }
-        if (self.approval != null) {
+        if (self.approval) |*approval| {
             var modal: C.Modal = .{
                 .title = "Allow tool run?",
                 .body = "zig build test (scripted; no execution)",
@@ -547,11 +552,29 @@ pub const Model = struct {
                 .title_style = accent,
                 .border_style = dim,
             };
+            const outer_w = @min(buf.width, modal.width);
+            const outer_h = @min(buf.height, modal.height);
+            const left = (buf.width - outer_w) / 2;
+            const top = (buf.height - outer_h) / 2;
+            // The picker sits below the title and body and above the footer
+            // and bottom border. A box too short for it shows the current
+            // choice as its body instead, so the decision stays visible.
+            const picker_top = top + 3;
+            const picker_end = top + outer_h -| 2;
+            const picker_fits = picker_end > picker_top and outer_w > 4;
+            if (!picker_fits) {
+                if (approval.selected()) |i| {
+                    modal.body = try std.fmt.bufPrint(&self.choice_buf, "> {s}", .{approval.items[i]});
+                }
+            }
             _ = try modal.draw(buf, 0, 0, now);
-            const left = (buf.width -| @min(buf.width, modal.width)) / 2;
-            const top = (buf.height -| @min(buf.height, modal.height)) / 2;
-            self.approval.?.width = @min(38, buf.width -| 4);
-            _ = try self.approval.?.draw(buf, left + 2, top + 3, now);
+            if (picker_fits) {
+                approval.width = outer_w - 4;
+                const height = buf.height;
+                buf.height = picker_end;
+                defer buf.height = height;
+                _ = try approval.draw(buf, left + 2, picker_top, now);
+            }
         } else if (self.help == .popover) {
             var popup: C.Popover = .{
                 .width = 45,
