@@ -11,6 +11,11 @@
 //! libvaxis DAM pattern: SGR is written only when the emitted style
 //! changes, and wide continuations never emit text.
 //!
+//! `Cell` is the interface value, not the storage: the grid keeps a
+//! 16-byte hot slot per cell (grapheme head, flags, packed style) and the
+//! borrowed slices in cold side arrays, so the per-frame passes move a
+//! quarter of the bytes a `Cell` array would.
+//!
 //! ROADMAP B4: damage is row-granular and decided in a single pass (each
 //! row is compared exactly once, an unchanged row costs no bytes at all),
 //! and the SGR that goes with it is memoized in a fixed-size
@@ -24,6 +29,7 @@
 const std = @import("std");
 const Cell = @import("cell.zig").Cell;
 const Color = @import("color.zig").Color;
+const AnsiColor = @import("color.zig").AnsiColor;
 const Style = @import("style.zig").Style;
 const emit = @import("emit.zig");
 const Width = @import("width.zig");
@@ -35,26 +41,98 @@ const default_style: Emitted = .{};
 
 /// A cell grid plus the delta renderer for double-buffered output.
 ///
-/// Cells are stored flat, row-major: `cells[y * self.width + x]`.
+/// Storage is split by how each pass reads it. `slots` holds one 16-byte
+/// hot record per cell, row-major (`slots[y * width + x]`): the
+/// grapheme's first bytes, its length and flags, and the exact packed
+/// style. Drawing, the damage compare, snapshot copies and row emission
+/// read `slots` alone, and two bit-equal slots are equal cells unless
+/// the slot is `deep` (a grapheme longer than the slot holds, or a
+/// hyperlink). `text` and `links` are cold, one entry per cell, valid
+/// only where the slot's `borrowed` / `link` flag is set; nothing reads
+/// them for printable one-byte ASCII.
+///
 /// Construct with `init`; zero dimensions are valid empty grids. The stored allocator
 /// stays live through one `deinit`. Copies alias the allocation and are not new owners.
 /// Cell graphemes and style hyperlinks are borrowed and must stay live and unchanged while
-/// retained or compared. A shallow previous grid does not preserve mutable text.
-/// Use serially without writer reentry. `cells` may be edited; allocator and dimensions
-/// must not be changed independently of the allocation. Cell pointers expire on resize.
+/// retained or compared, except printable one-byte ASCII graphemes, which are stored by
+/// value. A shallow previous grid does not preserve mutable text. Use serially without
+/// writer reentry. Read and write cells through `get`, `set` and `draw`; the storage
+/// fields are this module's and `Region`'s. Cell values expire on resize.
 pub const Buffer = struct {
     allocator: std.mem.Allocator,
-    cells: []Cell,
+    slots: []Slot,
+    text: [][]const u8,
+    links: [][]const u8,
     width: u16,
     height: u16,
+    /// Some slot stored since the last `clear` has cold data. Copies skip
+    /// the cold arrays while this is false.
+    any_cold: bool = false,
+    /// Some slot stored since the last `clear` is `deep`. The damage
+    /// compare trusts a bit-equal row while this is false.
+    any_deep: bool = false,
 
-    /// Allocate a `width` x `height` grid of empty cells.
+    /// One cell's hot record. `extern` fixes a padding-free layout, so two
+    /// slots compare bit for bit.
+    pub const Slot = extern struct {
+        /// The grapheme's first `@min(len, 4)` bytes, byte 0 lowest,
+        /// zero-filled.
+        glyph: u32,
+        meta: Meta,
+        /// The cell's style without its hyperlink, packed exactly
+        /// (`packStyle`).
+        style: u64,
+
+        pub const Meta = packed struct(u32) {
+            /// Grapheme byte length, saturating at 0xffff.
+            len: u16,
+            /// The continuation half of a wide grapheme.
+            wide: bool = false,
+            /// The grapheme is `text[i]`; otherwise it is empty or the
+            /// one ASCII byte in `glyph`.
+            borrowed: bool = false,
+            /// The style carries the hyperlink `links[i]`.
+            link: bool = false,
+            /// Bit equality is not enough: the grapheme is longer than
+            /// `glyph`, or there is a hyperlink to compare.
+            deep: bool = false,
+            _pad: u12 = 0,
+        };
+
+        /// The default cell, `Cell{}`: one space, default style.
+        pub const blank: Slot = .{ .glyph = ' ', .meta = .{ .len = 1 }, .style = 0 };
+
+        fn bits(self: Slot) u128 {
+            return @bitCast(self);
+        }
+
+        pub fn isBlank(self: Slot) bool {
+            return self.bits() == blank.bits();
+        }
+
+        /// What a renderer prints for this slot: nothing for a wide
+        /// continuation, an empty grapheme or a default blank.
+        pub fn paints(self: Slot) bool {
+            return !self.meta.wide and self.meta.len != 0 and !self.isBlank();
+        }
+    };
+
+    /// Bytes one cell takes across the three arrays.
+    const cell_bytes = @sizeOf(Slot) + 2 * @sizeOf([]const u8);
+
+    /// Allocate a `width` x `height` grid of empty cells, in one allocation:
+    /// the hot slots first, then the two cold arrays.
     pub fn init(allocator: std.mem.Allocator, width: u16, height: u16) !Buffer {
-        const cells = try allocator.alloc(Cell, @as(usize, width) * @as(usize, height));
-        @memset(cells, Cell{});
+        const n = @as(usize, width) * @as(usize, height);
+        const block = try allocator.alignedAlloc(u8, .of(Slot), n * cell_bytes);
+        const slots = @as([*]Slot, @ptrCast(block.ptr))[0..n];
+        const cold: [*][]const u8 = @ptrCast(@alignCast(block.ptr + n * @sizeOf(Slot)));
+        @memset(slots, Slot.blank);
         return .{
             .allocator = allocator,
-            .cells = cells,
+            .slots = slots,
+            .text = cold[0..n],
+            .links = cold[n..][0..n],
             .width = width,
             .height = height,
         };
@@ -63,44 +141,124 @@ pub const Buffer = struct {
     /// Release the grid through its stored allocator, not its borrowed strings.
     /// Invalidates all grid views; repeated disposal or disposing a copy is invalid.
     pub fn deinit(self: *Buffer) void {
-        self.allocator.free(self.cells);
+        const block: [*]align(@alignOf(Slot)) u8 = @ptrCast(self.slots.ptr);
+        self.allocator.free(block[0 .. self.slots.len * cell_bytes]);
         self.* = undefined;
     }
 
     /// Reallocate to `new_width` x `new_height`, copying the overlapping
     /// region row by row (zigzag screen.zig :88-117); the new area is
     /// empty cells.
-    /// `error.OutOfMemory` preserves the old grid. Success invalidates all cell pointers,
+    /// `error.OutOfMemory` preserves the old grid. Success invalidates all cell values,
     /// but copied cell payloads still borrow the same caller strings.
     pub fn resize(self: *Buffer, new_width: u16, new_height: u16) !void {
-        const new_size = @as(usize, new_width) * @as(usize, new_height);
-        const new_cells = try self.allocator.alloc(Cell, new_size);
-        @memset(new_cells, Cell{});
+        var next = try Buffer.init(self.allocator, new_width, new_height);
+        next.copyFrom(self);
+        self.deinit();
+        self.* = next;
+    }
 
-        const copy_height: usize = @min(self.height, new_height);
-        const copy_width: usize = @min(self.width, new_width);
-        for (0..copy_height) |y| {
-            @memcpy(
-                new_cells[y * new_width ..][0..copy_width],
-                self.cells[y * self.width ..][0..copy_width],
-            );
+    /// Copy the rectangle `self` and `src` share, cell for cell, borrows
+    /// included; cells outside it keep their content.
+    pub fn copyFrom(self: *Buffer, src: *const Buffer) void {
+        const h: usize = @min(self.height, src.height);
+        const w: usize = @min(self.width, src.width);
+        if (h == 0 or w == 0) return;
+        const whole = self.width == src.width and self.height == src.height;
+        if (self.width == src.width) {
+            self.copyRun(src, 0, 0, h * w);
+        } else for (0..h) |y| {
+            self.copyRun(src, y * self.width, y * src.width, w);
         }
+        // A whole copy holds exactly `src`'s cells; a partial one keeps
+        // some of its own, so its flags can only grow.
+        self.any_cold = src.any_cold or (!whole and self.any_cold);
+        self.any_deep = src.any_deep or (!whole and self.any_deep);
+    }
 
-        self.allocator.free(self.cells);
-        self.cells = new_cells;
-        self.width = new_width;
-        self.height = new_height;
+    fn copyRun(self: *Buffer, src: *const Buffer, at: usize, from: usize, n: usize) void {
+        @memcpy(self.slots[at..][0..n], src.slots[from..][0..n]);
+        if (!src.any_cold) return;
+        for (src.slots[from..][0..n], 0..) |s, i| {
+            if (s.meta.borrowed) self.text[at + i] = src.text[from + i];
+            if (s.meta.link) self.links[at + i] = src.links[from + i];
+        }
     }
 
     /// Reset every cell to the default empty cell.
     pub fn clear(self: *Buffer) void {
-        @memset(self.cells, Cell{});
+        @memset(self.slots, Slot.blank);
+        self.any_cold = false;
+        self.any_deep = false;
     }
 
     /// Bounds-checked read; returns the empty cell out of bounds.
+    /// A borrowed grapheme or hyperlink is the caller's slice; a one-byte
+    /// ASCII grapheme is a static one.
     pub fn get(self: *const Buffer, x: u16, y: u16) Cell {
         if (x >= self.width or y >= self.height) return .{};
-        return self.cells[@as(usize, y) * @as(usize, self.width) + x];
+        return self.cellAt(@as(usize, y) * @as(usize, self.width) + x);
+    }
+
+    fn cellAt(self: *const Buffer, i: usize) Cell {
+        const s = self.slots[i];
+        const grapheme: []const u8 = if (s.meta.borrowed)
+            self.text[i]
+        else if (s.meta.len == 0)
+            ""
+        else
+            Cell.asciiGrapheme(@truncate(s.glyph));
+        return .{ .grapheme = grapheme, .style = self.styleAt(i), .wide = s.meta.wide };
+    }
+
+    /// The full style of cell `i` (a flat index), hyperlink included.
+    pub fn styleAt(self: *const Buffer, i: usize) Style {
+        const s = self.slots[i];
+        var style = unpackStyle(s.style);
+        if (s.meta.link) style.hyperlink = self.links[i];
+        return style;
+    }
+
+    /// Write cell `i` from its parts. A one-byte ASCII grapheme is kept by
+    /// value; anything else is borrowed into `text`.
+    fn store(
+        self: *Buffer,
+        i: usize,
+        grapheme: []const u8,
+        style: u64,
+        link: ?[]const u8,
+        wide: bool,
+    ) void {
+        var glyph: u32 = 0;
+        for (grapheme[0..@min(grapheme.len, 4)], 0..) |b, k| {
+            glyph |= @as(u32, b) << @intCast(8 * k);
+        }
+        const borrowed = grapheme.len > 1 or (grapheme.len == 1 and grapheme[0] >= 0x80);
+        const deep = grapheme.len > 4 or link != null;
+        if (borrowed) self.text[i] = grapheme;
+        if (link) |l| self.links[i] = l;
+        self.any_cold = self.any_cold or borrowed or link != null;
+        self.any_deep = self.any_deep or deep;
+        self.slots[i] = .{
+            .glyph = glyph,
+            .meta = .{
+                .len = @intCast(@min(grapheme.len, 0xffff)),
+                .wide = wide,
+                .borrowed = borrowed,
+                .link = link != null,
+                .deep = deep,
+            },
+            .style = style,
+        };
+    }
+
+    /// Whether deep slots `i` of `self` and `j` of `other`, already bit
+    /// equal, also hold equal cold content.
+    fn deepEqual(self: *const Buffer, i: usize, other: *const Buffer, j: usize) bool {
+        const m = self.slots[i].meta;
+        if (m.len > 4 and !std.mem.eql(u8, self.text[i], other.text[j])) return false;
+        if (m.link and !std.mem.eql(u8, self.links[i], other.links[j])) return false;
+        return true;
     }
 
     /// Set one cell with wide-glyph handling (zigzag setCell :115-154):
@@ -113,7 +271,8 @@ pub const Buffer = struct {
     /// truncation, no throw paths).
     /// In codepoint mode a supplied Unicode grapheme is split into terminal
     /// cell clusters, truncated at the right edge as in `draw`.
-    /// Retains `cell`'s grapheme and style slices without copying; the type states their lifetime.
+    /// Retains `cell`'s non-ASCII grapheme and style hyperlink without copying; the type
+    /// states their lifetime.
     pub fn set(self: *Buffer, x: u16, y: u16, cell: Cell) error{}!void {
         if (x >= self.width or y >= self.height) return;
         if (!cell.wide and Width.getMode() == .codepoint and
@@ -123,40 +282,47 @@ pub const Buffer = struct {
             return;
         }
         const cw: u16 = if (!cell.wide and Width.graphemeWidth(cell.grapheme) >= 2) 2 else 1;
-        self.place(x, y, cell, cw);
+        self.place(x, y, cell.grapheme, packStyle(cell.style), cell.style.hyperlink, cell.wide, cw);
     }
 
-    /// Store `cell` at (x, y), in bounds, already measured as `cw` columns
+    /// Store one cell at (x, y), in bounds, already measured as `cw` columns
     /// (1 or 2) and segmented as one cell cluster. Shared by `set` and
     /// `draw`, which knows both and must not pay for them twice.
-    fn place(self: *Buffer, x: u16, y: u16, cell: Cell, cw: u16) void {
+    fn place(
+        self: *Buffer,
+        x: u16,
+        y: u16,
+        grapheme: []const u8,
+        style: u64,
+        link: ?[]const u8,
+        wide: bool,
+        cw: u16,
+    ) void {
         const idx = @as(usize, y) * @as(usize, self.width) + x;
 
         // Overwriting a wide continuation cell: its lead is at x - 1.
         // A continuation at column 0 has no lead (a width-2 glyph can
         // never start at the last column), so the subtraction is
         // defensive-only.
-        if (self.cells[idx].wide and idx > 0) {
-            self.cells[idx - 1] = Cell{};
+        if (self.slots[idx].meta.wide and idx > 0) {
+            self.slots[idx - 1] = Slot.blank;
         }
         // Overwriting the left half of a wide char: null the continuation.
         // A wide continuation is always placed at lead + 1, so a `wide`
         // cell at idx + 1 can only belong to idx.
-        if (!self.cells[idx].wide and x + 1 < self.width and self.cells[idx + 1].wide) {
-            self.cells[idx + 1] = Cell{};
+        if (!self.slots[idx].meta.wide and x + 1 < self.width and
+            self.slots[idx + 1].meta.wide)
+        {
+            self.slots[idx + 1] = Slot.blank;
         }
 
-        self.cells[idx] = cell;
+        self.store(idx, grapheme, style, link, wide);
 
         // A wide grapheme occupies the next column too. The continuation
         // never emits text (renderers skip it) and carries the style so a
         // styled wide glyph paints both columns.
         if (cw >= 2 and x + 1 < self.width) {
-            self.cells[idx + 1] = .{
-                .grapheme = "",
-                .style = cell.style,
-                .wide = true,
-            };
+            self.store(idx + 1, "", style, link, true);
         }
     }
 
@@ -169,12 +335,13 @@ pub const Buffer = struct {
     /// of the line (graceful truncation — never an error). Returns the
     /// number of columns consumed.
     /// Retains slices of `text` and any style hyperlink until cells are replaced or released.
-    /// Printable one-byte ASCII graphemes are stored as static slices instead, so they
-    /// borrow nothing and compare by pointer.
+    /// Printable one-byte ASCII graphemes are stored by value instead, so they borrow
+    /// nothing and `get` returns them as static slices.
     /// The error set is empty for the common component drawing interface.
     pub fn draw(self: *Buffer, style: Style, text: []const u8, x: u16, y: u16) !u16 {
         if (y >= self.height or text.len == 0) return 0;
 
+        const packed_style = packStyle(style);
         var col: u16 = x;
         var off: usize = 0;
         while (off < text.len) {
@@ -185,7 +352,7 @@ pub const Buffer = struct {
             if (run > 0) {
                 if (col >= self.width) break; // over-wide: drop the rest
                 const n: u16 = @intCast(@min(run, self.width - col));
-                self.fillAscii(col, y, style, text[off..][0..n]);
+                self.fillAscii(col, y, packed_style, style.hyperlink, text[off..][0..n]);
                 col += n;
                 off += n;
                 if (n < run) break;
@@ -201,7 +368,7 @@ pub const Buffer = struct {
 
             const cwu: u16 = if (cw >= 2) 2 else 1;
             if (@as(u32, col) + cwu > self.width) break; // over-wide: drop the rest
-            self.place(col, y, .{ .grapheme = gc, .style = style }, cwu);
+            self.place(col, y, gc, packed_style, style.hyperlink, false, cwu);
             col += cwu;
         }
         return col - x;
@@ -212,13 +379,28 @@ pub const Buffer = struct {
     /// the run every overwritten wide pair is overwritten whole, so only
     /// the two ends can split one: a continuation at the start loses its
     /// lead, and a continuation just past the end loses its own cell.
-    fn fillAscii(self: *Buffer, x: u16, y: u16, style: Style, bytes: []const u8) void {
+    fn fillAscii(
+        self: *Buffer,
+        x: u16,
+        y: u16,
+        style: u64,
+        link: ?[]const u8,
+        bytes: []const u8,
+    ) void {
         const start = @as(usize, y) * @as(usize, self.width) + x;
         const end = start + bytes.len;
-        if (self.cells[start].wide and start > 0) self.cells[start - 1] = Cell{};
-        if (x + bytes.len < self.width and self.cells[end].wide) self.cells[end] = Cell{};
-        for (self.cells[start..end], bytes) |*cell, b| {
-            cell.* = .{ .grapheme = Cell.asciiGrapheme(b), .style = style };
+        if (self.slots[start].meta.wide and start > 0) self.slots[start - 1] = Slot.blank;
+        if (x + bytes.len < self.width and self.slots[end].meta.wide) {
+            self.slots[end] = Slot.blank;
+        }
+        const meta: Slot.Meta = .{ .len = 1, .link = link != null, .deep = link != null };
+        for (self.slots[start..end], bytes) |*slot, b| {
+            slot.* = .{ .glyph = b, .meta = meta, .style = style };
+        }
+        if (link) |l| {
+            @memset(self.links[start..end], l);
+            self.any_cold = true;
+            self.any_deep = true;
         }
     }
 
@@ -302,10 +484,10 @@ pub const Buffer = struct {
         try styles.emit(w, &tracked, default_style);
     }
 
-    /// Flat slice of row `y`'s cells; the caller must have checked
+    /// Flat slice of row `y`'s slots; the caller must have checked
     /// `y < height`.
-    fn rowCells(self: *const Buffer, y: usize) []const Cell {
-        return self.cells[y * @as(usize, self.width) ..][0..self.width];
+    fn rowSlots(self: *const Buffer, y: usize) []const Slot {
+        return self.slots[y * @as(usize, self.width) ..][0..self.width];
     }
 
     /// Whether row `y` differs from `prev`'s row `y`: the whole
@@ -313,29 +495,27 @@ pub const Buffer = struct {
     /// once the band grew wider — is damage, because the new columns have
     /// never been painted.
     ///
-    /// The compare is by content, over the bytes each cell points at
-    /// right now. That answers the right question only when `prev` holds
-    /// the previous frame's CONTENT rather than a view of storage the app
-    /// has since rewritten: `Region` owns `prev`'s text in its own arena
-    /// for exactly that reason, and a caller that keeps a `prev` built by
-    /// shallow cell copies inherits the same defect — an in-place rewrite
-    /// looks unchanged to this test and to `Cell.eql` alike.
-    ///
-    /// Content, never pointer identity: `prev` legitimately points at
-    /// different storage holding equal bytes, so a pointer compare would
-    /// report damage on every frame and defeat the early-out. The byte
-    /// compare below is a fast path for the content test, not a hash:
-    /// equal bytes are cells `Cell.eql` would also call equal, so it can
-    /// never accept a row the exact per-cell compare would call changed.
-    /// A mismatch falls through to that compare, which decides.
+    /// The compare is by content. A slot holds every byte of a grapheme
+    /// up to four bytes long and the whole style but its hyperlink, and it
+    /// has no padding, so unequal slot bits are unequal cells and equal
+    /// bits are equal cells unless the slot is `deep`; only those read
+    /// the cold text and hyperlink. Longer graphemes and hyperlinks are
+    /// compared over the bytes they point at right now, which is right
+    /// only while `prev` holds the previous frame's CONTENT: `Region`
+    /// owns `prev`'s text for exactly that reason, and a caller whose
+    /// `prev` borrows text it rewrites in place hides that change.
     pub fn rowChanged(self: *const Buffer, prev: *const Buffer, y: usize) bool {
         if (y >= prev.height or self.width > prev.width) return true;
-        const cur = self.rowCells(y);
-        const old = prev.rowCells(y);
-        if (std.mem.eql(u8, rowBytes(cur), rowBytes(old))) return false;
-        var x: usize = 0;
-        while (x < cur.len) : (x += 1) {
-            if (!cur[x].eql(old[x])) return true;
+        const cur = self.rowSlots(y);
+        const old = prev.rowSlots(y)[0..cur.len];
+        if (!std.mem.eql(u8, std.mem.sliceAsBytes(cur), std.mem.sliceAsBytes(old))) return true;
+        // Bit-equal slots are equal cells unless deep, and a deep slot is
+        // bit-equal only to another deep slot.
+        if (!self.any_deep) return false;
+        const base = y * @as(usize, self.width);
+        const prev_base = y * @as(usize, prev.width);
+        for (cur, 0..) |s, x| {
+            if (s.meta.deep and !self.deepEqual(base + x, prev, prev_base + x)) return true;
         }
         return false;
     }
@@ -344,7 +524,8 @@ pub const Buffer = struct {
     /// and default-styled blanks never emit text; blank-cell skips
     /// advance the cursor with CUF, and a styled blank does emit so its
     /// background paints. SGR is written only when the emitted style
-    /// changes from `tracked`, through the per-frame memo.
+    /// changes from `tracked`, through the per-frame memo. Consecutive
+    /// one-byte cells in one style go out in one write.
     fn writeRow(
         self: *const Buffer,
         w: anytype,
@@ -352,26 +533,27 @@ pub const Buffer = struct {
         tracked: *Emitted,
         styles: *SgrCache,
     ) !void {
-        const row = self.rowCells(y);
+        const row = self.rowSlots(y);
+        const base = y * @as(usize, self.width);
+        // The emitted key of the last packed style seen: neighbouring
+        // cells nearly always share one, so it is derived once per run.
+        var key_style: u64 = 0;
+        var key: Emitted = default_style;
+        var run: [128]u8 = undefined;
         var x: usize = 0;
         var phys_col: usize = 0; // terminal cursor column, 0-indexed
         while (x < row.len) {
-            const cell = row[x];
-
-            // Wide continuations never emit text; their column was
-            // covered by the lead's write (which advances 2).
-            if (cell.wide or cell.grapheme.len == 0) {
-                x += 1;
-                continue;
-            }
-            // Default-styled blanks are already blank after the erase.
-            if (cell.eql(Cell{})) {
+            const s = row[x];
+            // Wide continuations never emit text (their column was
+            // covered by the lead's write, which advances 2), and default
+            // blanks are already blank after the erase.
+            if (!s.paints()) {
                 x += 1;
                 continue;
             }
 
-            const wg = Width.graphemeWidth(cell.grapheme);
-            const wcell: usize = if (wg >= 2) 2 else 1;
+            const wide = s.meta.borrowed and Width.graphemeWidth(self.text[base + x]) >= 2;
+            const wcell: usize = if (wide) 2 else 1;
             // A wide glyph at the last column has no continuation cell;
             // drop it (graceful — over-wide never errors).
             if (x + wcell > row.len) {
@@ -382,10 +564,27 @@ pub const Buffer = struct {
             if (x > phys_col) {
                 try w.print("\x1b[{d}C", .{x - phys_col});
             }
-            try styles.emit(w, tracked, Emitted.of(cell.style));
-            try w.writeAll(cell.grapheme);
-            phys_col = x + wcell;
-            x += wcell;
+            if (s.style != key_style) {
+                key_style = s.style;
+                key = Emitted.ofPacked(s.style);
+            }
+            try styles.emit(w, tracked, key);
+            if (s.meta.borrowed) {
+                try w.writeAll(self.text[base + x]);
+                x += wcell;
+            } else {
+                // A by-value slot is one byte, one column; so is every
+                // following one that prints in the same style.
+                var n: usize = 0;
+                while (x < row.len and n < run.len) : (n += 1) {
+                    const t = row[x];
+                    if (t.style != s.style or t.meta.borrowed or !t.paints()) break;
+                    run[n] = @truncate(t.glyph);
+                    x += 1;
+                }
+                try w.writeAll(run[0..n]);
+            }
+            phys_col = x;
         }
     }
 
@@ -640,22 +839,19 @@ pub const Buffer = struct {
             null_gaps.shrinkRetainingCapacity(null_start);
         }
 
-        const row = self.rowCells(y);
+        const row = self.rowSlots(y);
+        const base = @as(usize, y) * @as(usize, self.width);
         var x: usize = 0;
         var end: usize = 0; // past the last cell the row paints
         while (x < row.len) {
-            const cell = row[x];
-            if (cell.wide or cell.grapheme.len == 0) {
-                x += 1;
-                continue;
-            }
-            if (cell.eql(Cell{})) {
+            const s = row[x];
+            if (!s.paints()) {
                 x += 1;
                 continue;
             }
 
-            const wg = Width.graphemeWidth(cell.grapheme);
-            const wcell: usize = if (wg >= 2) 2 else 1;
+            const wide = s.meta.borrowed and Width.graphemeWidth(self.text[base + x]) >= 2;
+            const wcell: usize = if (wide) 2 else 1;
             if (x + wcell > row.len) {
                 x += 1;
                 continue; // dropped lead: nothing was painted here
@@ -679,12 +875,57 @@ pub const Buffer = struct {
     }
 };
 
-/// A row of cells as raw bytes, for the damage test's fast path. A cell
-/// holds no pointer the compare dereferences: equal bytes are cells that
-/// `Cell.eql` would also call equal, so the fast path can only ever
-/// accept a truly unchanged row.
-fn rowBytes(row: []const Cell) []const u8 {
-    return @as([*]const u8, @ptrCast(row.ptr))[0 .. row.len * @sizeOf(Cell)];
+/// Colour kinds in a packed style: 3 bits above a 24-bit payload. Zero is
+/// an unset (`null`) colour, which is not `Color.default`.
+const colour_bits = 27;
+const colour_mask: u64 = (1 << colour_bits) - 1;
+const payload_mask: u64 = (1 << 24) - 1;
+const kind_default: u64 = 1;
+const kind_ansi: u64 = 2;
+const kind_256: u64 = 3;
+const kind_rgb: u64 = 4;
+
+/// A `Style` without its hyperlink, packed exactly into one word:
+/// `[ attrs:7 | bg:27 | fg:27 ]`, so equal words are equal styles.
+fn packStyle(style: Style) u64 {
+    const attrs: u7 = @bitCast(style.attrs);
+    return packColour(style.fg) | packColour(style.bg) << colour_bits |
+        @as(u64, attrs) << (2 * colour_bits);
+}
+
+fn packColour(colour: ?Color) u64 {
+    const c = colour orelse return 0;
+    return switch (c) {
+        .default => kind_default << 24,
+        .ansi => |a| kind_ansi << 24 | @intFromEnum(a),
+        .ansi256 => |n| kind_256 << 24 | n,
+        .rgb => |v| kind_rgb << 24 | @as(u64, v.r) << 16 | @as(u64, v.g) << 8 | v.b,
+    };
+}
+
+/// Inverse of `packStyle`, hyperlink unset.
+fn unpackStyle(word: u64) Style {
+    return .{
+        .fg = unpackColour(word & colour_mask),
+        .bg = unpackColour(word >> colour_bits & colour_mask),
+        .attrs = @bitCast(@as(u7, @truncate(word >> (2 * colour_bits)))),
+    };
+}
+
+fn unpackColour(bits: u64) ?Color {
+    const payload = bits & payload_mask;
+    return switch (bits >> 24) {
+        0 => null,
+        kind_default => .default,
+        kind_ansi => .{ .ansi = @enumFromInt(@as(u8, @truncate(payload))) },
+        kind_256 => .{ .ansi256 = @truncate(payload) },
+        kind_rgb => .{ .rgb = .{
+            .r = @truncate(payload >> 16),
+            .g = @truncate(payload >> 8),
+            .b = @truncate(payload),
+        } },
+        else => unreachable, // only packColour writes these bits
+    };
 }
 
 /// The style a cell's `Style` actually puts on the wire, packed into one
@@ -703,7 +944,7 @@ const Emitted = struct {
 
     const bg_shift: u6 = 26;
     const attr_shift: u6 = 52;
-    const colour_mask: u64 = (1 << 26) - 1;
+    const key_colour_mask: u64 = (1 << 26) - 1;
 
     // Attribute bit order matches emit.writeStyleProfile: bold, dim,
     // italic, underline, blink, reverse, strikethrough.
@@ -721,9 +962,15 @@ const Emitted = struct {
     /// The emitted view of `style`: colours normalised to what they
     /// print, attributes to bits, hyperlink dropped.
     fn of(style: Style) Emitted {
-        return .{ .key = @as(u64, colourBits(style.fg, false)) |
-            @as(u64, colourBits(style.bg, true)) << bg_shift |
-            @as(u64, attrBits(style.attrs)) << attr_shift };
+        return ofPacked(packStyle(style));
+    }
+
+    /// The emitted view of a `packStyle` word. `Style.Attrs` is packed in
+    /// SGR attribute order, so the attribute bits carry over unchanged.
+    fn ofPacked(word: u64) Emitted {
+        return .{ .key = emittedColour(word & colour_mask, false) |
+            emittedColour(word >> colour_bits & colour_mask, true) << bg_shift |
+            (word >> (2 * colour_bits)) << attr_shift };
     }
 
     fn eql(a: Emitted, b: Emitted) bool {
@@ -735,11 +982,11 @@ const Emitted = struct {
     }
 
     fn fg(a: Emitted) u32 {
-        return @truncate(a.key & colour_mask);
+        return @truncate(a.key & key_colour_mask);
     }
 
     fn bg(a: Emitted) u32 {
-        return @truncate((a.key >> bg_shift) & colour_mask);
+        return @truncate((a.key >> bg_shift) & key_colour_mask);
     }
 
     fn attrs(a: Emitted) u8 {
@@ -747,30 +994,22 @@ const Emitted = struct {
     }
 };
 
-/// Pack a `Style` colour into 26 bits: kind in the top two, payload
+/// A packed colour as it prints, in 26 bits: kind in the top two, payload
 /// below. Kind 0 — a `null` field or `Color.default` — is the all-zero
 /// word and emits nothing. An `ansi` colour stores the SGR parameter it
 /// prints, so the encoder never has to re-derive it.
-fn colourBits(colour: ?Color, background: bool) u32 {
-    const c = colour orelse return 0;
-    return switch (c) {
-        .default => 0,
-        .ansi => |a| (1 << 24) | @as(u32, if (background) a.bgCode() else a.fgCode()),
-        .ansi256 => |n| (@as(u32, 2) << 24) | n,
-        .rgb => |rgb| (3 << 24) | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b,
+fn emittedColour(bits: u64, background: bool) u64 {
+    const payload = bits & payload_mask;
+    return switch (bits >> 24) {
+        0, kind_default => 0,
+        kind_ansi => {
+            const a: AnsiColor = @enumFromInt(@as(u8, @truncate(payload)));
+            return 1 << 24 | @as(u64, if (background) a.bgCode() else a.fgCode());
+        },
+        kind_256 => 2 << 24 | payload,
+        kind_rgb => 3 << 24 | payload,
+        else => unreachable, // only packColour writes these bits
     };
-}
-
-fn attrBits(a: Style.Attrs) u8 {
-    var bits: u8 = 0;
-    if (a.bold) bits |= Emitted.bold;
-    if (a.dim) bits |= Emitted.dim;
-    if (a.italic) bits |= 1 << 2;
-    if (a.underline) bits |= 1 << 3;
-    if (a.blink) bits |= 1 << 4;
-    if (a.reverse) bits |= 1 << 5;
-    if (a.strikethrough) bits |= 1 << 6;
-    return bits;
 }
 
 /// Transitions one frame keeps encoded. A frame repeats the same handful
@@ -1046,6 +1285,90 @@ test "buffer: set/get round-trip" {
     try std.testing.expect(buf.get(3, 2).eql(Cell{}));
 }
 
+test "buffer: every colour kind, attribute and hyperlink survives the packed slot" {
+    var buf = try Buffer.init(std.testing.allocator, 2, 1);
+    defer buf.deinit();
+    const colours = [_]?Color{
+        null,
+        .default,
+        .{ .ansi = .black },
+        .{ .ansi = .bright_white },
+        .{ .ansi256 = 0 },
+        .{ .ansi256 = 255 },
+        .{ .rgb = .{ .r = 0, .g = 0, .b = 0 } },
+        .{ .rgb = .{ .r = 255, .g = 1, .b = 254 } },
+    };
+    for (colours) |fg| for (colours) |bg| for ([_]u7{ 0, 1, 0x2a, 0x7f }) |attrs| {
+        const style: Style = .{
+            .fg = fg,
+            .bg = bg,
+            .attrs = @bitCast(attrs),
+            .hyperlink = if (attrs == 1) "https://example.com" else null,
+        };
+        _ = try buf.draw(style, "a", 0, 0);
+        try buf.set(1, 0, .{ .grapheme = "é", .style = style });
+        try std.testing.expect(buf.get(0, 0).style.eql(style));
+        try std.testing.expect(buf.get(1, 0).style.eql(style));
+        // Null and `default` differ for `eql`, but print the same.
+        try std.testing.expect(Emitted.of(buf.get(0, 0).style).eql(Emitted.of(style)));
+    };
+}
+
+test "buffer: rowChanged decides like a cell-by-cell Cell.eql" {
+    // Each pair is drawn into `cur` and `prev` from separate storage:
+    // the long grapheme and the hyperlink live outside the slot, so only
+    // their content may decide.
+    const Case = struct { a: Cell, b: Cell };
+    const long_a = "e\u{301}\u{302}"; // five bytes
+    const long_b = "e\u{301}\u{303}"; // differs only in its fifth byte
+    const cases = [_]Case{
+        .{ .a = .{ .grapheme = long_a }, .b = .{ .grapheme = long_a } },
+        .{ .a = .{ .grapheme = long_a }, .b = .{ .grapheme = long_b } },
+        .{ .a = .{ .grapheme = "é" }, .b = .{ .grapheme = "è" } },
+        .{
+            .a = .{ .grapheme = "x", .style = .{ .hyperlink = "https://a" } },
+            .b = .{ .grapheme = "x", .style = .{ .hyperlink = "https://a" } },
+        },
+        .{
+            .a = .{ .grapheme = "x", .style = .{ .hyperlink = "https://a" } },
+            .b = .{ .grapheme = "x", .style = .{ .hyperlink = "https://b" } },
+        },
+        .{
+            .a = .{ .grapheme = "x", .style = .{ .hyperlink = "https://a" } },
+            .b = .{ .grapheme = "x" },
+        },
+        .{ .a = .{ .style = .{ .fg = .default } }, .b = .{} },
+    };
+    for (cases) |c| {
+        var cur = try Buffer.init(std.testing.allocator, 3, 1);
+        defer cur.deinit();
+        var prev = try Buffer.init(std.testing.allocator, 3, 1);
+        defer prev.deinit();
+        // Copies in separate storage, so equal content never shares a pointer.
+        var a_text: [16]u8 = undefined;
+        var b_text: [16]u8 = undefined;
+        var a_link: [16]u8 = undefined;
+        var b_link: [16]u8 = undefined;
+        var a = c.a;
+        var b = c.b;
+        @memcpy(a_text[0..a.grapheme.len], a.grapheme);
+        a.grapheme = a_text[0..a.grapheme.len];
+        @memcpy(b_text[0..b.grapheme.len], b.grapheme);
+        b.grapheme = b_text[0..b.grapheme.len];
+        if (a.style.hyperlink) |l| {
+            @memcpy(a_link[0..l.len], l);
+            a.style.hyperlink = a_link[0..l.len];
+        }
+        if (b.style.hyperlink) |l| {
+            @memcpy(b_link[0..l.len], l);
+            b.style.hyperlink = b_link[0..l.len];
+        }
+        try cur.set(1, 0, a);
+        try prev.set(1, 0, b);
+        try std.testing.expectEqual(!a.eql(b), cur.rowChanged(&prev, 0));
+    }
+}
+
 test "buffer: wide glyph placement writes a styled continuation" {
     var buf = try Buffer.init(std.testing.allocator, 6, 3);
     defer buf.deinit();
@@ -1160,7 +1483,7 @@ test "buffer: an ASCII run over wide pairs matches cell-by-cell placement" {
                     .style = .{ .attrs = .{ .bold = true } },
                 });
             }
-            for (got.cells, want.cells) |g, w| try std.testing.expect(g.eql(w));
+            for (got.slots, want.slots) |g, w| try std.testing.expectEqual(g.bits(), w.bits());
         }
     }
 }

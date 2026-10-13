@@ -891,7 +891,7 @@ pub const Region = struct {
         self.append_queue.deinit(self.gpa);
         self.cur.deinit();
         self.prev.deinit();
-        if (self.prev_next) |staged| self.gpa.free(staged.cells);
+        if (self.prev_next) |*staged| staged.deinit();
         self.* = undefined;
     }
 
@@ -920,7 +920,7 @@ pub const Region = struct {
     /// an intermediate width caused. It is accounted before any frame
     /// byte is composed, so it is not repeated by a retry.
     /// `error.OutOfMemory` leaves the old grid and geometry unchanged. Success invalidates
-    /// pointers into `cur.cells`; drawn text and prior-snapshot borrows are not released.
+    /// `cur`'s storage; drawn text and prior-snapshot borrows are not released.
     pub fn resize(self: *Region, new_width: u16, terminal_rows: u16, new_height: u16) !void {
         if (new_width == self.width) return self.setSizedHeight(terminal_rows, new_height);
         try self.reshape(new_width, new_height);
@@ -3813,42 +3813,30 @@ pub const Region = struct {
         // different length. The committed `prev` is untouched on either
         // path, including the allocation that fails after a stale
         // candidate was released.
-        if (self.prev_next) |staged| {
+        if (self.prev_next) |*staged| {
             if (staged.width != self.cur.width or staged.height != self.cur.height) {
-                self.gpa.free(staged.cells);
+                staged.deinit();
                 self.prev_next = null;
             }
         }
         if (self.prev_next == null and
             (self.prev.width != self.cur.width or self.prev.height != self.cur.height))
         {
-            const next = try Buffer.init(self.gpa, self.cur.width, self.cur.height);
-            const overlap_h: usize = @min(self.prev.height, self.cur.height);
-            const overlap_w: usize = @min(self.prev.width, self.cur.width);
-            for (0..overlap_h) |y| {
-                @memcpy(
-                    next.cells[y * self.cur.width ..][0..overlap_w],
-                    self.prev.cells[y * self.prev.width ..][0..overlap_w],
-                );
-            }
+            var next = try Buffer.init(self.gpa, self.cur.width, self.cur.height);
+            next.copyFrom(&self.prev);
             self.prev_next = next;
         }
         self.snapshot_cells.clearRetainingCapacity();
         _ = self.snapshot_scratch.reset(.retain_capacity);
         const arena = self.snapshot_scratch.allocator();
-        try self.snapshot_cells.ensureTotalCapacity(self.gpa, self.cur.cells.len);
-        for (self.cur.cells) |cell| {
-            // Static graphemes (every cell `Buffer.draw` wrote from ASCII,
-            // and the default blank) are immutable, so `prev` owns them as
-            // they are; a borrowed one-byte ASCII slice maps onto the same
-            // table. Only the rest is copied, so a mostly-ASCII frame pays
-            // almost no per-cell allocation.
-            if (cell.grapheme.len == 0 or Cell.isStaticGrapheme(cell.grapheme)) continue;
-            const owned = if (cell.grapheme.len == 1 and cell.grapheme[0] < 0x80)
-                Cell.asciiGrapheme(cell.grapheme[0])
-            else
-                try arena.dupe(u8, cell.grapheme);
-            self.snapshot_cells.appendAssumeCapacity(owned);
+        try self.snapshot_cells.ensureTotalCapacity(self.gpa, self.cur.slots.len);
+        if (!self.cur.any_cold) return;
+        // Only borrowed graphemes are copied: one-byte ASCII and empty
+        // cells are stored by value, so a mostly-ASCII frame pays almost
+        // no per-cell allocation.
+        for (self.cur.slots, self.cur.text) |s, text| {
+            if (!s.meta.borrowed) continue;
+            self.snapshot_cells.appendAssumeCapacity(try arena.dupe(u8, text));
         }
     }
 
@@ -3860,20 +3848,19 @@ pub const Region = struct {
     /// prepared, never one an aborted frame left behind.
     fn publishSnapshot(self: *Region) void {
         if (self.prev_next) |next| {
-            self.gpa.free(self.prev.cells);
+            self.prev.deinit();
             self.prev = next;
             self.prev_next = null;
         }
-        @memcpy(self.prev.cells, self.cur.cells);
-        // Cells with no text keep `cur`'s (empty) slice, which has
-        // nothing to own, and static graphemes need no copy; every other
-        // cell takes its prepared one. The skip mirrors `prepareSnapshot`.
+        self.prev.copyFrom(&self.cur);
+        // Every borrowed grapheme takes its prepared copy, in the order
+        // `prepareSnapshot` made them.
         var next: usize = 0;
-        for (self.prev.cells) |*cell| {
-            if (cell.grapheme.len == 0 or Cell.isStaticGrapheme(cell.grapheme)) continue;
-            cell.grapheme = self.snapshot_cells.items[next];
+        if (self.prev.any_cold) for (self.prev.slots, self.prev.text) |s, *text| {
+            if (!s.meta.borrowed) continue;
+            text.* = self.snapshot_cells.items[next];
             next += 1;
-        }
+        };
         std.mem.swap(std.heap.ArenaAllocator, &self.prev_text, &self.snapshot_scratch);
     }
 
@@ -3930,8 +3917,9 @@ pub const Region = struct {
     }
 
     fn rowNonEmpty(self: *const Region, y: usize) bool {
-        for (0..self.cur.width) |x| {
-            if (!self.cur.get(@intCast(x), @intCast(y)).eql(Cell{})) return true;
+        const width: usize = self.cur.width;
+        for (self.cur.slots[y * width ..][0..width]) |s| {
+            if (!s.isBlank()) return true;
         }
         return false;
     }
@@ -3952,21 +3940,29 @@ pub const Region = struct {
     /// as literal garbage. `tracked` is only advanced on the
     /// interactive path.
     fn writeRow(self: *const Region, w: anytype, y: usize, tracked: *Style, plain: bool) !void {
+        const width: usize = self.cur.width;
+        const base = y * width;
+        const row = self.cur.slots[base..][0..width];
+        // The cell whose style `tracked` holds once this row has set it:
+        // a cell with the same packed style and no hyperlink then needs
+        // no SGR decision at all.
+        var known: ?Buffer.Slot = null;
+        var run: [128]u8 = undefined;
         var x: usize = 0;
         var phys_col: usize = 0; // terminal cursor column, 0-indexed
-        while (x < self.cur.width) {
-            const cell = self.cur.get(@intCast(x), @intCast(y));
+        while (x < width) {
+            const s = row[x];
 
             // Wide continuations never emit text; their column was
             // covered by the lead's write (which advances 2).
-            if (cell.wide) {
+            if (s.meta.wide) {
                 x += 1;
                 continue;
             }
             // Blank cells (default `Cell{}` carries a " " grapheme, and
             // empty-grapheme cells are blank too). Interactive rows skip
             // them; plain rows write the space byte.
-            if (cell.grapheme.len == 0 or cell.eql(Cell{})) {
+            if (!s.paints()) {
                 if (plain) {
                     try w.writeByte(' ');
                     phys_col += 1;
@@ -3975,13 +3971,14 @@ pub const Region = struct {
                 continue;
             }
 
-            const wg = Width.graphemeWidth(cell.grapheme);
-            const wcell: usize = if (wg >= 2) 2 else 1;
+            const grapheme_wide = s.meta.borrowed and
+                Width.graphemeWidth(self.cur.text[base + x]) >= 2;
+            const wcell: usize = if (grapheme_wide) 2 else 1;
             // A wide glyph at the last column has no continuation cell;
             // drop it (graceful — over-wide never errors). A plain row
             // still reserves the column as a space so the byte stream
             // stays width-aligned.
-            if (x + wcell > self.cur.width) {
+            if (x + wcell > width) {
                 if (plain) {
                     try w.writeByte(' ');
                     phys_col += 1;
@@ -3995,11 +3992,35 @@ pub const Region = struct {
             // emits the grapheme alone.
             if (!plain) {
                 if (x > phys_col) try w.print("\x1b[{d}C", .{x - phys_col});
-                try writeCellStyle(w, tracked, cell.style);
-                phys_col = x + wcell;
+                const same = if (known) |k| k.style == s.style and !s.meta.link else false;
+                if (!same) {
+                    try writeCellStyle(w, tracked, self.cur.styleAt(base + x));
+                    known = if (s.meta.link) null else s;
+                }
             }
-            try w.writeAll(cell.grapheme);
-            x += wcell;
+            if (s.meta.borrowed) {
+                try w.writeAll(self.cur.text[base + x]);
+                x += wcell;
+            } else {
+                // A by-value slot is one byte, one column; so is every
+                // following one that prints the same way, and they go
+                // out in one write.
+                var n: usize = 0;
+                while (x < width and n < run.len) : (n += 1) {
+                    const t = row[x];
+                    if (t.meta.borrowed or !t.paints()) break;
+                    if (!plain and (t.style != s.style or t.meta.link)) break;
+                    run[n] = @truncate(t.glyph);
+                    x += 1;
+                }
+                if (n == 0) { // the first cell carries a hyperlink
+                    run[0] = @truncate(s.glyph);
+                    n = 1;
+                    x += 1;
+                }
+                try w.writeAll(run[0..n]);
+            }
+            if (!plain) phys_col = x;
         }
     }
 

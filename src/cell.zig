@@ -23,8 +23,8 @@ pub const Cell = struct {
     /// copied. The bytes must stay alive and unchanged for as long as the
     /// cell is read: a `Buffer` retains the slice, so the caller's text (a
     /// component's scratch, a model arena) has to outlive the cell.
-    /// `Buffer.draw` stores single-byte ASCII graphemes as static slices
-    /// (`asciiGrapheme`), which borrow nothing.
+    /// A `Buffer` stores one-byte ASCII graphemes by value and hands them
+    /// back as static slices (`asciiGrapheme`), which borrow nothing.
     ///
     /// The default, `" "`, is the blank cell: it paints one space.
     grapheme: []const u8 = ascii_graphemes[' '..][0..1],

@@ -298,12 +298,13 @@ fn paint(buf: *Buffer) BenchError!void {
 // reduction is 0.0%; the day the encoder gets cheaper, this is where the
 // bytes-down number appears, on identical pixels.
 
+/// Row damage for the pinned encoder. What is pinned is the BYTE path
+/// below; which rows changed is the same predicate either way — every
+/// cell equal under `Cell.eql` — and `Buffer.rowChanged` decides it
+/// without decoding cells, so the reference does not swamp the timing of
+/// the cases that run it.
 fn rowEqualPreB4(cur: *const Buffer, prev: *const Buffer, y: usize) bool {
-    if (y >= prev.height or cur.width > prev.width) return false;
-    for (0..cur.width) |x| {
-        if (!cur.cells[y * cur.width + x].eql(prev.cells[y * prev.width + x])) return false;
-    }
-    return true;
+    return !cur.rowChanged(prev, y);
 }
 
 /// The pre-B4 `Buffer.renderDiff` byte path: first/last changed row, then
@@ -348,7 +349,7 @@ fn writeRowPreB4(
     var x: usize = 0;
     var phys_col: usize = 0;
     while (x < cur.width) {
-        const cell = cur.cells[y * cur.width + x];
+        const cell = cur.get(@intCast(x), @intCast(y));
         if (cell.wide or cell.grapheme.len == 0) {
             x += 1;
             continue;
@@ -398,7 +399,7 @@ fn writeStylePreB4(w: *std.Io.Writer, tracked: *Style, style: Style) BenchError!
 /// retained arena and point the cells at the copies), or route the frame
 /// through `Region.render` instead.
 fn syncPrev(cur: *const Buffer, prev: *Buffer) void {
-    @memcpy(prev.cells, cur.cells);
+    prev.copyFrom(cur);
 }
 
 /// One `bench: FAIL ...` line, with the numbers this run measured — the
