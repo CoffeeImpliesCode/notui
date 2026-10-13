@@ -49,6 +49,10 @@ rec {
     INCLUDE_DIRECTORIES = "${pkgs.lib.makeIncludePath packages}";
     # Vendored packages have separate quality gates. Check every owned source.
     GATE_EXCLUDE = "^./vendor/";
+    # At the default 50 states per CFG point, zwanzig gives up on
+    # Region.render, caps.detectWithTimeout and two coverage tests and says
+    # so instead of reporting. 2000 completes every function in about 10 s.
+    ZWANZIG_ARGS = "--max-states-per-point 2000";
     FONTCONFIG_FILE = pkgs.makeFontsConf {
       fontDirectories = [
         pkgs.dejavu_fonts

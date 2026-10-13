@@ -32,4 +32,4 @@ zig-gate            # all gates; zbc advisory unless ZBC_STRICT=1; --cov is opti
 jj st               # working-copy status
 ```
 
-`zig-gate` runs format check, build, tests, AST check, and zlint, then zbc; it exits 1 on issues. Its zbc step prints only the first 30 lines and counts `error(` lines, so a report with warnings only reads as "0 potential issue(s)" — run `zbc $(find . -name '*.zig' -not -path './zig-pkg/*' -not -path './zig-out/*')` for the full list.
+`zig-gate` runs format check, build, tests, AST check, ziglint, zlint, zbc, zwanzig and cross-test; it exits 1 on issues. zwanzig takes `ZWANZIG_ARGS` from `devenv.nix` (a state limit high enough to finish every function). cross-test follows `cross-test.profile.sh`: the full test step on x86_64, x86, aarch64 and big-endian powerpc64 Linux, the last three under qemu-user (about 80 s); `--no-cross` skips it. Its zbc step prints only the first 30 lines and counts `error(` lines, so a report with warnings only reads as "0 potential issue(s)" — run `zbc $(find . -name '*.zig' -not -path './zig-pkg/*' -not -path './zig-out/*')` for the full list.
