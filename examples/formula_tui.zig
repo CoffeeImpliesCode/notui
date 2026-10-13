@@ -461,7 +461,7 @@ pub fn main(init: std.process.Init) !void {
         col += try drawInput(&region.cur, col, 0, start, line.items[start..caret], err_active, err_span);
         col += try region.cur.draw(.{}, cursor_marker, col, 0);
         _ = try drawInput(&region.cur, col, 0, caret, line.items[caret..], err_active, err_span);
-        if (hint) |h| _ = try region.cur.draw(.{}, h, 0, hint_row);
+        const hint_w: u16 = if (hint) |h| try region.cur.draw(.{}, h, 0, hint_row) else 0;
         if (!kitty) {
             // No image protocol: say so where the preview would be, so the
             // empty row reads as a capability limit and not a broken render.
@@ -472,8 +472,9 @@ pub fn main(init: std.process.Init) !void {
                 @intCast(preview_row),
             );
         }
-        // Stage timings, grey, right-aligned on the same row (the error
-        // hint, when present, occupies the left).
+        // Stage timings, grey, right-aligned on the same row. The error
+        // hint, when present, owns the left: timings that would cover any
+        // of it are left out rather than drawn over the diagnosis.
         var timing_buf: [64]u8 = undefined;
         const timing = std.fmt.bufPrint(
             &timing_buf,
@@ -483,7 +484,7 @@ pub fn main(init: std.process.Init) !void {
         // bufPrint fills at most timing_buf.len bytes; restating that
         // bound keeps the narrowing to the region's u16 column provable.
         const tl: u16 = @intCast(@min(timing.len, timing_buf.len));
-        if (tl < region.width) {
+        if (tl < region.width and (hint_w == 0 or hint_w +| 1 +| tl <= region.width)) {
             _ = try region.cur.draw(
                 .{ .fg = .bright_black },
                 timing,
