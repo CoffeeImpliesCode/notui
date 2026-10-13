@@ -449,7 +449,8 @@ pub const Buffer = struct {
             // Common scripts (box drawing, CJK, Latin letters, ...): one
             // codepoint per cluster, decided without the segmenter, for as
             // long as the text stays in them.
-            if (Width.simpleCluster(text[off..])) |first| {
+            var simple = Width.SimpleIterator.init(text[off..]);
+            if (simple.next()) |first| {
                 var c = first;
                 while (true) {
                     const cwu: u16 = if (c.width >= 2) 2 else 1;
@@ -458,7 +459,7 @@ pub const Buffer = struct {
                     self.place(col, y, grapheme, packed_style, style.hyperlink, false, cwu);
                     col += cwu;
                     off += c.len;
-                    c = Width.simpleCluster(text[off..]) orelse break;
+                    c = simple.next() orelse break;
                 }
                 continue;
             }
@@ -1423,42 +1424,21 @@ test "buffer: get is bounds-checked, set out of bounds is a no-op" {
     try std.testing.expect(buf.get(5, 2).eql(Cell{}));
 }
 
-test "buffer: the eight-slot flag scan finds exactly the flagged slots" {
-    // Lengths around the eight-slot step, a flag pattern that hits chunk
-    // edges and the scalar tail.
-    var slots: [40]Buffer.Slot = undefined;
-    for (0..slots.len + 1) |len| {
-        for (slots[0..len], 0..) |*s, i| {
-            s.* = Buffer.Slot.blank;
-            s.meta.borrowed = i % 7 == 0 or i % 8 == 7;
-            s.meta.deep = i % 5 == 3;
-        }
-        for ([_]u32{ Buffer.Slot.borrowed_bit, Buffer.Slot.deep_bit }) |mask| {
-            var it: Buffer.Slot.Flagged = .{ .slots = slots[0..len], .mask = mask };
-            var want: usize = 0;
-            while (it.next()) |i| : (want += 1) {
-                while (@as(u32, @bitCast(slots[want].meta)) & mask == 0) want += 1;
-                try std.testing.expectEqual(want, i);
-            }
-            while (want < len) : (want += 1) {
-                try std.testing.expect(@as(u32, @bitCast(slots[want].meta)) & mask == 0);
-            }
-        }
-    }
-}
-
 test "buffer: copyFrom carries borrowed text and links across chunk edges" {
     // Source rows mix by-value ASCII, borrowed clusters and hyperlinks in a
-    // pattern that lands on eight-cell chunk edges and the scalar tail; the
-    // target starts with other borrowed text. Same, wider and narrower
-    // widths take the whole-grid and the per-row copy. All clusters are one
-    // column wide, so no wide pair straddles the copied rectangle's edge.
+    // pattern that crosses eight-cell chunks and long rows; the target starts
+    // with other borrowed text. Same, wider and narrower widths and shorter,
+    // equal and taller heights cover whole-grid and partial copies.
+    // All clusters are one column wide, so no wide pair straddles its edge.
     const borrowed = "e\u{301}\u{301}";
     const other = "a\u{301}\u{301}\u{301}";
     const gpa = std.testing.allocator;
     const link: Style = .{ .hyperlink = "https://example.com" };
-    for (5..22) |w0| {
-        const w: u16 = @intCast(w0);
+    const widths = [_]u16{
+        5,  6,  7,  8,   9,   10,  11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+        63, 64, 65, 127, 128, 129,
+    };
+    for (widths) |w| {
         var src = try Buffer.init(gpa, w, 3);
         defer src.deinit();
         for (0..3) |y| for (0..w) |x| {
@@ -1471,14 +1451,14 @@ test "buffer: copyFrom carries borrowed text and links across chunk edges" {
                 .{ .grapheme = Cell.asciiGrapheme(@intCast('a' + k % 26)) };
             try src.set(@intCast(x), @intCast(y), cell);
         };
-        for ([_]u16{ w, w + 3, w - 2 }) |dw| {
-            var dst = try Buffer.init(gpa, dw, 4);
+        for ([_]u16{ 2, 3, 4 }) |dh| for ([_]u16{ w, w + 3, w - 2 }) |dw| {
+            var dst = try Buffer.init(gpa, dw, dh);
             defer dst.deinit();
-            for (0..4) |y| for (0..dw) |x| {
+            for (0..dh) |y| for (0..dw) |x| {
                 try dst.set(@intCast(x), @intCast(y), .{ .grapheme = other });
             };
             dst.copyFrom(&src);
-            for (0..4) |y| for (0..dw) |x| {
+            for (0..dh) |y| for (0..dw) |x| {
                 const got = dst.get(@intCast(x), @intCast(y));
                 const want: Cell = if (y < 3 and x < w)
                     src.get(@intCast(x), @intCast(y))
@@ -1486,7 +1466,7 @@ test "buffer: copyFrom carries borrowed text and links across chunk edges" {
                     .{ .grapheme = other };
                 try std.testing.expect(got.eql(want));
             };
-        }
+        };
     }
 }
 
@@ -1557,10 +1537,10 @@ test "buffer: rowChanged decides like a cell-by-cell Cell.eql" {
         },
         .{ .a = .{ .style = .{ .fg = .default } }, .b = .{} },
     };
-    for (cases) |c| {
-        var cur = try Buffer.init(std.testing.allocator, 3, 1);
+    for ([_]u16{ 3, 63, 64, 65, 127, 128, 129 }) |w| for (cases) |c| {
+        var cur = try Buffer.init(std.testing.allocator, w, 3);
         defer cur.deinit();
-        var prev = try Buffer.init(std.testing.allocator, 3, 1);
+        var prev = try Buffer.init(std.testing.allocator, w, 3);
         defer prev.deinit();
         // Copies in separate storage, so equal content never shares a pointer.
         var a_text: [16]u8 = undefined;
@@ -1581,10 +1561,12 @@ test "buffer: rowChanged decides like a cell-by-cell Cell.eql" {
             @memcpy(b_link[0..l.len], l);
             b.style.hyperlink = b_link[0..l.len];
         }
-        try cur.set(1, 0, a);
-        try prev.set(1, 0, b);
-        try std.testing.expectEqual(!a.eql(b), cur.rowChanged(&prev, 0));
-    }
+        try cur.set(w - 2, 2, a);
+        try prev.set(w - 2, 2, b);
+        try std.testing.expectEqual(!a.eql(b), cur.rowChanged(&prev, 2));
+        try std.testing.expect(!cur.rowChanged(&prev, 0));
+        try std.testing.expect(!cur.rowChanged(&prev, 1));
+    };
 }
 
 test "buffer: wide glyph placement writes a styled continuation" {

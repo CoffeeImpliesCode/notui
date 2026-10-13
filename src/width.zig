@@ -135,25 +135,45 @@ pub const CellIterator = struct {
     }
 };
 
-/// A cell cluster that needs no segmenter: one codepoint from `simple_ranges`
-/// followed by the end of input, an ASCII byte, or another such codepoint.
-/// Those codepoints have Grapheme_Cluster_Break and Indic_Conjunct_Break
-/// `Other` and a nonzero width, so no rule joins them to a neighbour of the
-/// same kind or to ASCII: the cluster is the codepoint alone in both modes,
-/// and its width is the codepoint's. Returns null when that cannot be shown
-/// from the first two codepoints; `firstCellLen` then decides.
-pub fn simpleCluster(str: []const u8) ?CellIterator.Cluster {
-    const cp = decodeBmp(str) orelse return null;
-    if (!isSimple(cp.code)) return null;
-    const rest = str[cp.len..];
-    if (rest.len > 0 and rest[0] >= 0x80) {
-        const next = decodeBmp(rest) orelse return null;
-        if (!isSimple(next.code)) return null;
-    }
-    return .{ .offset = 0, .len = cp.len, .width = DisplayWidth.codePointWidth(cp.code) };
-}
+/// A prefix of single-codepoint cell clusters from `simple_ranges`.
+/// Stops before ASCII or any boundary that needs the full segmenter, including
+/// a simple codepoint followed by a joining or malformed sequence. Offsets are
+/// relative to the borrowed input, which must remain unchanged during iteration.
+/// Each lookahead is decoded and classified once, then carried to the next step.
+pub const SimpleIterator = struct {
+    str: []const u8,
+    off: usize = 0,
+    pending: ?Codepoint = null,
 
-/// Script blocks whose codepoints never join a cluster (see `simpleCluster`;
+    pub fn init(str: []const u8) SimpleIterator {
+        const cp = decodeBmp(str) orelse return .{ .str = str };
+        return .{ .str = str, .pending = if (isSimple(cp.code)) cp else null };
+    }
+
+    pub inline fn next(self: *SimpleIterator) ?CellIterator.Cluster {
+        const cp = self.pending orelse return null;
+        const after = self.off + cp.len;
+        const rest = self.str[after..];
+        var peek: ?Codepoint = null;
+        if (rest.len > 0 and rest[0] >= 0x80) {
+            const next_cp = decodeBmp(rest) orelse {
+                self.pending = null;
+                return null;
+            };
+            if (!isSimple(next_cp.code)) {
+                self.pending = null;
+                return null;
+            }
+            peek = next_cp;
+        }
+        const at = self.off;
+        self.off = after;
+        self.pending = peek;
+        return .{ .offset = at, .len = cp.len, .width = DisplayWidth.codePointWidth(cp.code) };
+    }
+};
+
+/// Script blocks whose codepoints never join a cluster (see `SimpleIterator`;
 /// a test checks every codepoint against zg's tables). Combining blocks and
 /// the few joining or zero-width codepoints inside these blocks are left out.
 const simple_ranges = [_][2]u21{
@@ -748,7 +768,7 @@ test "simple cluster: every simple codepoint is a non-joining, spacing one in zg
     }
 }
 
-test "simple cluster: agrees with firstCellLen and graphemeWidth wherever it answers" {
+test "simple iterator: agrees with firstCellLen and graphemeWidth wherever it answers" {
     const saved = getMode();
     defer setMode(saved);
     const corpus = [_][]const u8{
@@ -761,17 +781,47 @@ test "simple cluster: agrees with firstCellLen and graphemeWidth wherever it ans
         "\u{d7ff}\u{c0}\x01",
         "\xc3\x28\xe2\x82",
     };
-    var answered: usize = 0;
     for ([_]Mode{ .grapheme, .codepoint }) |m| {
         setMode(m);
         for (corpus) |s| {
             for (0..s.len) |off| {
-                const c = simpleCluster(s[off..]) orelse continue;
-                answered += 1;
-                try std.testing.expectEqual(firstCellLen(s[off..]), c.len);
-                try std.testing.expectEqual(graphemeWidth(s[off..][0..c.len]), c.width);
+                var it = SimpleIterator.init(s[off..]);
+                var consumed: usize = 0;
+                while (it.next()) |c| {
+                    try std.testing.expectEqual(consumed, c.offset);
+                    const rest = s[off + c.offset ..];
+                    try std.testing.expectEqual(firstCellLen(rest), c.len);
+                    try std.testing.expectEqual(graphemeWidth(rest[0..c.len]), c.width);
+                    consumed += c.len;
+                }
             }
         }
     }
-    try std.testing.expect(answered > 40); // the fast path really ran
+}
+
+test "simple prefix: stops before a joining or invalid boundary" {
+    const saved = getMode();
+    defer setMode(saved);
+    const cases = [_]struct { text: []const u8, prefix: []const u8 }{
+        .{ .text = "日本語", .prefix = "日本語" },
+        .{ .text = "日本a", .prefix = "日本" },
+        .{ .text = "日本\u{301}x", .prefix = "日" },
+        .{ .text = "éß\u{200d}x", .prefix = "é" },
+        .{ .text = "ΩαЀ", .prefix = "ΩαЀ" },
+        .{ .text = "‼\u{fe0f}", .prefix = "" },
+        .{ .text = "日本😀", .prefix = "日" },
+        .{ .text = "日\xff", .prefix = "" },
+        .{ .text = "日\x01", .prefix = "日" },
+        .{ .text = "\xe2\x82", .prefix = "" },
+        .{ .text = "", .prefix = "" },
+    };
+    for ([_]Mode{ .grapheme, .codepoint }) |m| {
+        setMode(m);
+        for (cases) |c| {
+            var off: usize = 0;
+            var it = SimpleIterator.init(c.text);
+            while (it.next()) |cluster| off += cluster.len;
+            try std.testing.expectEqualStrings(c.prefix, c.text[0..off]);
+        }
+    }
 }
