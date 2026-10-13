@@ -700,6 +700,8 @@ test "input: EOF on a closed pipe" {
 }
 
 test "input: an over-long sequence drops its payload instead of typing it" {
+    // The drop warning is the expected outcome here, not a test failure.
+    testing.log_level = .err;
     var pipe = try Pipe.init();
     defer pipe.deinit();
     var tty = pipe.tty();
@@ -731,6 +733,7 @@ test "input: an over-long sequence drops its payload instead of typing it" {
 }
 
 test "input: an over-long parameter run is dropped up to its final byte" {
+    testing.log_level = .err; // the drop warning is expected
     var pipe = try Pipe.init();
     defer pipe.deinit();
     var tty = pipe.tty();
@@ -756,6 +759,7 @@ test "input: an over-long parameter run is dropped up to its final byte" {
 }
 
 test "input: a discarded sequence ends at the end of the input" {
+    testing.log_level = .err; // the drop warning is expected
     var pipe = try Pipe.init();
     defer pipe.deinit();
     var tty = pipe.tty();
@@ -782,6 +786,7 @@ test "input: a discarded sequence ends at the end of the input" {
 }
 
 test "input: input arriving with the terminator is not discarded with it" {
+    testing.log_level = .err; // the drop warning is expected
     var pipe = try Pipe.init();
     defer pipe.deinit();
     var tty = pipe.tty();
@@ -805,6 +810,7 @@ test "input: input arriving with the terminator is not discarded with it" {
 }
 
 test "input: a BEL inside a control string is payload, not its terminator" {
+    testing.log_level = .err; // the drop warning is expected
     var pipe = try Pipe.init();
     defer pipe.deinit();
     var tty = pipe.tty();
