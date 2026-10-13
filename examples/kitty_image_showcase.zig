@@ -265,6 +265,7 @@ pub fn main(init: std.process.Init) !void {
             const wsz = try tty.getWinsize();
             screen_rows = wsz.rows;
             try region.resize(wsz.cols, wsz.rows, band_height);
+            region.repaintAll();
         }
 
         // The moving ball: bounce horizontally across the row width.

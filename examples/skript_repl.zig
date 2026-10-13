@@ -435,6 +435,7 @@ pub fn main(init: std.process.Init) !void {
             const wsz = try tty.getWinsize();
             term_rows = wsz.rows;
             try region.resize(wsz.cols, wsz.rows, bandHeight(term_rows, popup_rows));
+            region.repaintAll();
         }
 
         // Poll the eval slot; append the finished submission when ready.

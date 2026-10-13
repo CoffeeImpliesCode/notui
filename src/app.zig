@@ -579,7 +579,12 @@ pub fn App(comptime Model: type) type {
             if (self.tty) |*t| {
                 if (t.checkResize()) {
                     const wsz = try t.getWinsize();
-                    if (self.region) |*r| try r.resize(wsz.cols, wsz.rows, r.height);
+                    if (self.region) |*r| {
+                        try r.resize(wsz.cols, wsz.rows, r.height);
+                        // The signal may stand for several sizes; the
+                        // terminal may have cut rows at one of them.
+                        r.repaintAll();
+                    }
                     self.render_requested = true;
                     dispatched = true;
                 }

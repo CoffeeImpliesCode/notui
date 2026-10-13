@@ -1353,8 +1353,20 @@ pub const Region = struct {
     /// Force a full redraw on the next render.
     /// On error the full redraw remains requested; `render` states writer-prefix recovery.
     pub fn renderFull(self: *Region, w: anytype) !void {
-        self.width_dirty = true;
+        self.repaintAll();
         try self.render(w);
+    }
+
+    /// Make the next render repaint every band row, as a width change does.
+    ///
+    /// A resize signal that ends on the geometry the band already has still
+    /// means the terminal was some other size in between: SIGWINCH
+    /// coalesces, and a window dragged narrow and back truncates the
+    /// cursor's row on the way. `resize` with an unchanged size records
+    /// nothing, so a host that saw a resize signal calls this as well.
+    /// Allocates and emits nothing.
+    pub fn repaintAll(self: *Region) void {
+        self.width_dirty = true;
     }
 
     /// Mark the anchor as suspect; the next render re-queries CPR (the
@@ -8255,4 +8267,33 @@ test "region: automatic history ids report exhaustion after the maximum accepted
     try testing.expectError(error.HistoryIdExhausted, r.writeTranscript(&.{"not admitted"}));
     try testing.expectEqual(std.math.maxInt(u64), r.historyWatermark());
     try testing.expectEqual(@as(usize, 1), (try r.historyPending()).len);
+}
+
+test "region: repaintAll repaints a band whose geometry did not change" {
+    // A resize signal that ends on the size the band already has (a window
+    // dragged narrow and back between two polls) records nothing through
+    // `resize`, yet the terminal cut the cursor's row on the way. The
+    // repaint request is what brings the row back.
+    var r = try makeRegion(2, .{});
+    defer r.deinit();
+    try drawRow(&r.cur, 0, "header");
+    try drawRow(&r.cur, 1, "the quick brown fox");
+    var t1: TestWriter = .{};
+    t1.init();
+    try r.render(&t1.w);
+
+    try r.resize(r.width, Term.rows, 2);
+    var idle: TestWriter = .{};
+    idle.init();
+    try r.render(&idle.w);
+    try testing.expectEqualStrings("", idle.bytes());
+
+    try r.resize(r.width, Term.rows, 2);
+    r.repaintAll();
+    var t2: TestWriter = .{};
+    t2.init();
+    try r.render(&t2.w);
+    try testing.expectEqual(@as(usize, 1), count(t2.bytes(), "header"));
+    // Spaces go out as cursor moves, so match a single word.
+    try testing.expectEqual(@as(usize, 1), count(t2.bytes(), "brown"));
 }

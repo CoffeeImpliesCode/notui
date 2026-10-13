@@ -105,6 +105,7 @@ pub fn main(init: std.process.Init) !void {
         if (tty.checkResize()) {
             const wsz = try tty.getWinsize();
             try region.resize(wsz.cols, wsz.rows, band_height);
+            region.repaintAll();
         }
 
         region.cur.clear();

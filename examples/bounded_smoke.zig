@@ -122,6 +122,7 @@ pub fn main(init: std.process.Init) !void {
         if (tty.checkResize()) {
             const ws = try tty.getWinsize();
             try region.resize(ws.cols, ws.rows, clipped_height);
+            region.repaintAll();
         }
         if (try reader.nextTimeout(50)) |event| switch (event) {
             .cpr => |pos| try region.applyCpr(pos.row, pos.col),

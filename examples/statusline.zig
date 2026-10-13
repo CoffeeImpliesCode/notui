@@ -153,6 +153,7 @@ fn runInteractive(
         if (tty.checkResize()) {
             const nws = try tty.getWinsize();
             try region.resize(nws.cols, nws.rows, region_height);
+            region.repaintAll();
             need_redraw = true;
         }
 
