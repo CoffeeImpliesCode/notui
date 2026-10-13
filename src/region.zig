@@ -7526,6 +7526,96 @@ test "region: placeAt CUP's to the cell and parks at the painted band bottom" {
     );
 }
 
+test "region: graphic placement follows the band buffer row through height changes" {
+    // Exact CUP/APC bytes guard the old accumulated-anchor failure, both
+    // with room below the band and when CRLF growth scrolls the viewport.
+    // The text model tracks buffer rows; it does not render kitty images.
+    for ([_]u16{ 8, Term.rows }) |visible| {
+        for ([_]bool{ false, true }) |use_resize| {
+            var r = try makeRegion(2, .{});
+            defer r.deinit();
+            var term: Term = .{ .visible = visible };
+            feedHistory(&term);
+            try r.resize(Term.cols, visible, 2);
+            try tagRows(&r.cur, 2, 'a');
+            var t: TestWriter = .{};
+            t.init();
+            try r.render(&t.w);
+            term.feed(t.bytes());
+            try answerQuery(&r, &term);
+
+            const opts: Region.PlaceAtOptions = .{
+                .id = 42,
+                .placement = 7,
+                .size = .{ .width = 1, .height = 1 },
+            };
+            const before = "\x1b[7;2H\x1b_Ga=p,q=1,i=42,p=7,c=1,r=1\x1b\\\x1b[7;1H";
+            t.init();
+            try r.placeAt(&t.w, 1, 2, opts);
+            try testing.expectEqualStrings(before, t.bytes());
+
+            if (use_resize) {
+                try r.resize(Term.cols, visible, 6);
+            } else {
+                try r.setHeight(6);
+            }
+            // Placement before this tick's render still uses the extent
+            // actually on screen, not the new drawing-buffer height.
+            t.init();
+            try r.placeAt(&t.w, 1, 2, opts);
+            try testing.expectEqualStrings(before, t.bytes());
+            t.init();
+            try r.render(&t.w);
+            term.feed(t.bytes());
+            try testing.expectEqual(@as(usize, 0), count(t.bytes(), "\x1b[J"));
+            try testing.expectEqual(@as(usize, 0), count(t.bytes(), "\x1b[2J"));
+            try testing.expectEqual(@as(usize, 0), count(t.bytes(), "\x1b[3J"));
+            try testing.expectEqual(@as(usize, 10), term.row);
+            const buffer_row = history_rows.len + 1;
+            try expectLabel(&term, buffer_row, 'a', 1);
+            const screen_row: u16 = if (visible == 8) 4 else 7;
+            try testing.expectEqual(@as(usize, screen_row), buffer_row - term.top + 1);
+
+            t.init();
+            try r.placeAt(&t.w, 1, 2, opts);
+            try testing.expectEqualStrings(
+                if (visible == 8)
+                    "\x1b[4;2H\x1b_Ga=p,q=1,i=42,p=7,c=1,r=1\x1b\\\x1b[8;1H"
+                else
+                    "\x1b[7;2H\x1b_Ga=p,q=1,i=42,p=7,c=1,r=1\x1b\\\x1b[11;1H",
+                t.bytes(),
+            );
+
+            if (use_resize) {
+                try r.resize(Term.cols, visible, 2);
+            } else {
+                try r.setHeight(2);
+            }
+            t.init();
+            try r.render(&t.w);
+            term.feed(t.bytes());
+            try testing.expectEqual(@as(usize, 4), count(t.bytes(), "\x1b[K"));
+            try testing.expectEqual(@as(usize, 0), count(t.bytes(), "\x1b[J"));
+            try expectLabel(&term, buffer_row, 'a', 1);
+            for (history_rows, 0..) |row, y| {
+                try testing.expectEqualStrings(row, term.text(y));
+            }
+            t.init();
+            try r.placeAt(&t.w, 1, 2, opts);
+            try testing.expectEqualStrings(
+                if (visible == 8)
+                    "\x1b[4;2H\x1b_Ga=p,q=1,i=42,p=7,c=1,r=1\x1b\\\x1b[4;1H"
+                else
+                    before,
+                t.bytes(),
+            );
+            t.init();
+            try r.render(&t.w);
+            try testing.expectEqualStrings("", t.bytes());
+        }
+    }
+}
+
 test "region: a wide glyph row diff never emits the continuation" {
     var r = try makeRegion(1, .{});
     defer r.deinit();

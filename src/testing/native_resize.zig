@@ -203,8 +203,9 @@ const Model = struct {
     }
 
     /// Rows the buffer may hold: the declared scrollback plus the screen.
+    /// Saturates: a 32-bit `usize` cannot hold `maxInt(u32)` plus the rows.
     fn capacity(self: *const Model) usize {
-        return self.scrollback + self.rows;
+        return @as(usize, self.scrollback) +| self.rows;
     }
 
     /// Highest row the window may start on while still showing `rows`.
@@ -785,6 +786,7 @@ const Rig = struct {
         height: u16 = 2,
         mode: ResizeMode = .preserve,
         append_lines: bool = true,
+        native_reflow: bool = true,
     };
 
     gpa: Allocator,
@@ -799,7 +801,10 @@ const Rig = struct {
             .height = o.height,
             .append_lines = o.append_lines,
             .resize_mode = o.mode,
-            .terminal_reflow = .{ .non_cursor_rows = .{ .scrollback_rows = o.scrollback } },
+            .terminal_reflow = if (o.native_reflow)
+                .{ .non_cursor_rows = .{ .scrollback_rows = o.scrollback } }
+            else
+                .none,
         });
         errdefer region.deinit();
         try region.resize(o.cols, o.rows, o.height);
@@ -1924,6 +1929,65 @@ test "native: a right-aligned statusbar row leaves no old ASCII prefix above the
         rig.region.anchorRow(),
     );
     for (lines) |line| try expectMarkerOnce(&rig, line);
+}
+
+test "height restore: 97x28 to 97x6 to 97x28 reclaims only the retired popup prefix" {
+    // Same height-only geometry as the historical live REPL capture.
+    // The eight-candidate popup owns ten rows at full height and six when
+    // clipped. Its four old prefix rows leave the viewport, then return
+    // above the live band when xterm pulls scrollback back on growth.
+    for ([_]bool{ false, true }) |native_reflow| {
+        var rig = try Rig.init(testing.allocator, .{
+            .cols = 97,
+            .rows = 28,
+            .height = 10,
+            .native_reflow = native_reflow,
+        });
+        defer rig.deinit();
+        const popup = [_][]const u8{
+            "skript>d",    "candidate-0", "candidate-1", "candidate-2", "candidate-3",
+            "candidate-4", "candidate-5", "candidate-6", "candidate-7", "status",
+        };
+        const transcript = [_][]const u8{ "COMMITTED-0", "COMMITTED-1", "COMMITTED-2" };
+        // Put the cursor at the bottom, as a transcript overflowing the
+        // initial viewport does, without relying on Region's bookkeeping.
+        for (0..36) |_| try rig.term.feed("prelaunch-history\r\n");
+        try rig.commit(1, &transcript, .append);
+        try rig.draw(&popup);
+        try rig.render();
+        try expectAnchored(&rig);
+
+        try rig.term.resize(97, 6);
+        try rig.region.resize(97, 6, 6);
+        try rig.draw(&.{ popup[0], popup[1], popup[2], popup[3], popup[4], popup[9] });
+        try rig.render();
+        try expectAnchored(&rig);
+        for (transcript) |row| try expectMarkerOnce(&rig, row);
+        // Independent terminal evidence: the clipped prefix is still
+        // in scrollback, not magically deleted by the resize.
+        try testing.expectEqual(@as(usize, 2), try rig.countRows(popup[0]));
+        const archived_input = (try rig.indexOfRow(popup[0])).?;
+        try testing.expect(archived_input < rig.term.ybase);
+
+        try rig.term.resize(97, 28);
+        // The model must actually reveal the archived rows; otherwise a
+        // no-residue assertion after rendering would be vacuous.
+        try testing.expect(archived_input >= rig.term.ybase);
+        try rig.region.resize(97, 28, 10);
+        try rig.draw(&popup);
+        try rig.render(); // asks CPR; no guessed erase above the band
+        try rig.render(); // uses the reply to reclaim the visible prefix
+        try expectAnchored(&rig);
+        for (popup, 0..) |row, y| {
+            try expectMarkerOnce(&rig, row);
+            try expectBandRow(&rig, y, row);
+        }
+        for (transcript) |row| try expectMarkerOnce(&rig, row);
+        try testing.expect(std.mem.indexOf(u8, rig.out.written(), "\x1b[2J") == null);
+        try testing.expect(std.mem.indexOf(u8, rig.out.written(), "\x1b[3J") == null);
+        try rig.render();
+        try testing.expectEqual(@as(usize, 0), rig.out.written().len);
+    }
 }
 
 test "native: a band shrinks and grows inside the window" {

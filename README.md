@@ -363,6 +363,10 @@ strategy (`src/region.zig`) instead of diffing:
   not just the ones `prev` disagrees about;
 - the rows the band gives up while the screen still shows them are
   blanked, so they cannot linger as settled content.
+- clipped prefix rows remain tracked as **retired**, not committed history. On growth they
+  can return from scrollback above the live band. After a fresh CPR establishes which rows
+  are visible, a subsequent frame erases only the retired rows with EL and returns the
+  cursor to the band bottom. Committed rows and blank gaps retain their positions.
 
 The physical path does not clamp the new logical height. `resize` takes
 the band height the app asked for; how much of it fits is the app's
@@ -409,12 +413,36 @@ The cursor-relative band anchor can then miss old live rows, leaving stale conte
 The native probe in `zig-out/visual/stress/native-reflow-evidence.json` reproduces that movement
 without notui. It establishes the emulator behavior; it does not excuse the renderer's anchor
 assumption. Height-only coalescing is repaired separately from this width-reflow limitation.
-Height restoration carries its own open risk, which is a different thing:
-after a live REPL round trip 97×28 → 97×6 → 97×28 the restored screen shows
-the archived 4-row popup group above the live band
-([`postfix-height-evidence.json`](zig-out/visual/final-qa-complete-1790888329357/postfix-height-evidence.json)).
-Those rows are not scrollback, and notui does not erase them; see
-[Remaining risks](#remaining-risks).
+Height restoration is repaired independently of width reflow. The old
+[`postfix-height-evidence.json`](zig-out/visual/final-qa-complete-1790888329357/postfix-height-evidence.json)
+shows four uncommitted popup-prefix rows that the shrink moved into scrollback and the
+growth returned above the live band. The existing retirement ledger now reclaims them,
+without ED2/ED3 or erasing committed transcript. The independent native model exercises
+97×28 → 97×6 → 97×28 with both default and declared-native profiles, proves that the
+archived prefix actually returns to the viewport, and checks one copy of every live row
+and committed marker after cleanup.
+
+The 2026-10-13 ttyd/Chromium capture validates that same round trip with the current static
+REPL in both profiles:
+[`resize-evidence.json`](zig-out/visual/height-restore-2026-10-13/resize-evidence.json)
+records the declared-native run;
+[`default-height-evidence.json`](zig-out/visual/height-restore-2026-10-13/default-height-evidence.json)
+records the default run, all 36 history markers exactly once at every checkpoint, the
+third candidate still selected, one restored input/popup/status group, and exit `rc=0`.
+[`height-summary.json`](zig-out/visual/height-restore-2026-10-13/height-summary.json)
+identifies the default run's archived input at buffer row 41, four rows above the short
+viewport, and its removal on restore while the live input remains at buffer row 45.
+The cleanup is not instantaneous: until a fresh post-resize CPR arrives, the renderer
+cannot safely address those rows and leaves them tracked rather than guessing.
+
+Logical band-height changes do not have the same graphics-anchor risk.
+`Region.anchorRow()` derives the band top from the tracked cursor and the painted band extent.
+The byte regression `region: graphic placement follows the band buffer row through height changes`
+checks `placeAt` before and after growth and shrink through both `setHeight` and same-width `resize`.
+It checks exact CUP/APC bytes with and without viewport scrolling, cursor restoration,
+row-scoped shrink erasure, preserved history, and a byte-empty idle frame.
+Existing placements [scroll with the text](https://sw.kovidgoyal.net/kitty/graphics-protocol/)
+under the kitty protocol. This byte test does not replace a live graphics-terminal UI pass.
 
 
 ## Local scratch storage
@@ -722,12 +750,20 @@ row 11. Three states have no PNG, so their buffer record is the only evidence; t
 #### Remaining risks
 
 - **Width reflow.** xterm splits and merges hard rows when the width changes, so the cursor-relative band anchor can miss old live rows and they survive above it. The emulator half is reproduced without notui in `zig-out/visual/stress/native-reflow-evidence.json`. No width round trip was captured after the physical-height repair, so its status is untested, and `consumer-evidence-summary.json` lists it under `knownFailures`.
-- **Height restore archives uncommitted rows.** The archived group in the 28-row state above is on-screen residue, not scrollback, and nothing in this pass claims it is erased. `postfix-live-band-summary.json` records the archived and live input, candidate and selection rows per state.
+- **Height-restore cleanup waits for CPR.** The historical archived-popup residue is repaired
+  by the existing retirement ledger, validated by the 2026-10-13 model and live captures
+  above. A geometry change invalidates the old measured reach; retired rows can be visible
+  until the fresh CPR is applied and the next frame runs. If a consumer never routes that
+  reply through `Region.applyCpr`, cleanup cannot safely erase above the band. This is a
+  bounded addressing requirement, not an emulator limitation requiring transcript erasure.
 - **`postfix-height-boundaries.webm` proves nothing, and a render event is not an app write.** The 577 figure is a floor on observed frames. See [Temporal capture](#temporal-capture).
 - **Analyzer coverage is bounded.** 27 unresolved import lookups limit what zbc could check, as [Gate diagnostics and zbc triage](#gate-diagnostics-and-zbc-triage) records.
-- **A graphic anchors to a screen row, not a buffer row.** Source review: `Region.settleExtent`
-  re-bases the anchor with `f.anchor_add +=`, so a graphic anchored before a dynamic height growth
-  ends on the wrong row. Pre-existing and outside the CRLF repair; no UI pass covers it.
+- **Graphics UI coverage.** The earlier height-growth claim cited `f.anchor_add +=`,
+  which the current `Region.settleExtent` does not contain.
+  The byte regression `region: graphic placement follows the band buffer row through height changes`
+  passes without a production change. Placement targets keep the same band buffer row through
+  logical growth and shrink, including growth that scrolls the viewport.
+  No live kitty graphics UI pass covers retained placements or physical resize/width reflow.
 
 ### Zwanzig baseline triage (historical)
 
