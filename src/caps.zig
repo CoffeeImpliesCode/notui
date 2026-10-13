@@ -250,7 +250,11 @@ fn queryScan(
     var collected: [1024]u8 = undefined;
     var collected_len: usize = 0;
     const start = std.Io.Clock.Timestamp.now(tty.io, .boot);
-    while (withinDeadline(tty.io, start, timeout_ms)) {
+    // The first poll runs whatever the clock says: a reply already waiting
+    // when the window opens belongs to this query, even when the process was
+    // descheduled past the deadline between the write and the first read.
+    var first = true;
+    while (first or withinDeadline(tty.io, start, timeout_ms)) : (first = false) {
         var pollfds = [_]posix.pollfd{
             .{ .fd = tty.fd.handle, .events = posix.POLL.IN, .revents = 0 },
         };
@@ -589,6 +593,33 @@ test "caps: a stray clipboard payload in a query window is released" {
     // Neither window read the payload as its own reply.
     try std.testing.expect(!caps.kitty_keyboard);
     try std.testing.expectEqual(ColorProfile.truecolor, caps.color);
+}
+
+test "caps: a reply waiting when the window opens is read past the deadline" {
+    const io = std.testing.io;
+    var parser: Parser = .{};
+    // The fake writes each reply as its query goes out, so every reply is
+    // already waiting. A zero deadline stands in for a process descheduled
+    // between the write and the first poll (seen under qemu-user on a busy
+    // host): the window must still read what is there.
+    const script = [_][]const u8{
+        "\x1b[?1;2;4;6;22;24c",
+        "\x1b[?2026;1$y",
+        "\x1b[?2027;1$y",
+        "\x1b[>1;1;0u",
+        "\x1b_Gi=9931;OK\x1b\\",
+        "\x1b]11;rgb:aaaa/bbbb/cccc\x1b\\",
+    };
+    var fake: FakeTty = undefined;
+    try fake.init(io, &script);
+    defer fake.deinit();
+
+    const caps = try detectWithTimeout(std.testing.allocator, &fake, &parser, 0);
+    try std.testing.expectEqual(ColorProfile.truecolor, caps.color);
+    try std.testing.expect(caps.sync_output);
+    try std.testing.expect(caps.unicode_core);
+    try std.testing.expect(caps.kitty_keyboard);
+    try std.testing.expect(caps.kitty_graphics);
 }
 
 test "caps: timed-out queries leave defaults, no hang" {
