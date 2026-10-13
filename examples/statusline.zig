@@ -130,6 +130,7 @@ fn runInteractive(
 
     var parser: notui.parser = .{};
     const caps = try notui.caps.Capabilities.detect(gpa, &tty, &parser);
+    notui.width.setMode(if (caps.unicode_core) .grapheme else .codepoint);
 
     var region = try Region.init(gpa, .{
         .height = region_height,

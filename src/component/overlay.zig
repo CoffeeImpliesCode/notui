@@ -600,7 +600,7 @@ fn drawBounded(
     var off: usize = 0;
     var cut = false;
     while (off < text.len) {
-        const glen = Width.firstGraphemeLen(text[off..]);
+        const glen = Width.firstCellLen(text[off..]);
         // No cluster here at all (an unformable byte): step one byte so
         // the rest of the field still draws, and let the machine drop
         // it — the same verdict `sanitize` gives that byte.
@@ -657,7 +657,7 @@ fn textWidth(text: []const u8, x0: u16, cap: usize) usize {
     var width: usize = 0;
     var off: usize = 0;
     while (off < text.len and width < cap) {
-        const glen = Width.firstGraphemeLen(text[off..]);
+        const glen = Width.firstCellLen(text[off..]);
         const gc = if (glen == 0) text[off..][0..1] else text[off..][0..glen];
         off += gc.len;
         if (!san.acceptCluster(gc)) continue;

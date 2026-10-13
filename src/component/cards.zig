@@ -652,7 +652,7 @@ const Pen = struct {
         var col = used;
         var off: usize = 0;
         while (off < text.len) {
-            const glen = Width.firstGraphemeLen(text[off..]);
+            const glen = Width.firstCellLen(text[off..]);
             if (glen == 0) break; // defensive: no progress possible
             const gc = text[off..][0..glen];
             off += glen;
@@ -699,7 +699,7 @@ fn textWidthParts(parts: []const []const u8, x0: u16, cap: usize) usize {
     for (parts) |text| {
         var off: usize = 0;
         while (off < text.len) {
-            const glen = Width.firstGraphemeLen(text[off..]);
+            const glen = Width.firstCellLen(text[off..]);
             if (glen == 0) break;
             const gc = text[off..][0..glen];
             off += glen;

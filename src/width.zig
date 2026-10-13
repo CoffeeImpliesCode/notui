@@ -3,6 +3,8 @@
 //! This is the `notui` toolkit's only `zg`, `DisplayWidth`, and `Graphemes` importer.
 //! Other toolkit namespaces use the functions below. The separate `ztex` modules
 //! have their own Unicode imports.
+//! Drawing uses a process-wide mode selected before layout with `setMode`; its
+//! default is Unicode graphemes. Semantic key/edit segmentation is independent.
 //!
 //! `wrap` and `truncate` allocate their result with the caller's allocator
 //! and hand ownership to the caller; the other functions allocate nothing.
@@ -13,14 +15,89 @@ const zg = @import("zg");
 const DisplayWidth = @import("DisplayWidth");
 const Graphemes = @import("Graphemes");
 
-/// Display width of `str` in terminal cells: the sum of its grapheme widths.
+/// Terminal cell segmentation and width policy.
+pub const Mode = enum {
+    /// Default: Unicode grapheme clusters, for terminals with DEC 2027 enabled.
+    grapheme,
+    /// One spacing codepoint plus following zero-width codepoints, as in wcwidth terminals.
+    codepoint,
+};
+
+var mode: Mode = .grapheme;
+
+/// Select the process-wide drawing policy before measuring or constructing cell grids.
+/// The default is `.grapheme`; App selects it from terminal capabilities at startup.
+/// Change only while no drawing or measurement is running, and discard existing grids
+/// before using a different mode. Concurrent terminals with different policies are unsupported.
+/// Semantic grapheme segmentation (`firstGraphemeLen`, Parser and editing motion) is unchanged.
+pub fn setMode(selected: Mode) void {
+    mode = selected;
+}
+
+/// Current process-wide drawing policy; allocates nothing.
+pub fn getMode() Mode {
+    return mode;
+}
+
+const Codepoint = struct { code: u21, len: usize };
+
+fn firstCodepoint(str: []const u8) ?Codepoint {
+    if (str.len == 0) return null;
+    const len = std.unicode.utf8ByteSequenceLength(str[0]) catch return null;
+    if (len > str.len) return null;
+    return .{ .code = std.unicode.utf8Decode(str[0..len]) catch return null, .len = len };
+}
+
+fn codepointWidth(cp: u21) isize {
+    // zg widens regional indicators for grapheme flags. Legacy terminals render
+    // each indicator as one cell; pairing them must not widen each half.
+    if (cp >= 0x1f1e6 and cp <= 0x1f1ff) return 1;
+    return DisplayWidth.codePointWidth(cp);
+}
+
+fn codepointStrWidth(str: []const u8) isize {
+    var total: isize = 0;
+    var off: usize = 0;
+    while (off < str.len) {
+        const cp = firstCodepoint(str[off..]) orelse break;
+        total += codepointWidth(cp.code);
+        off += cp.len;
+    }
+    return total;
+}
+
+fn isControl(cp: u21) bool {
+    return cp < 0x20 or (cp >= 0x7f and cp <= 0x9f);
+}
+
+/// Byte length of the first terminal cell cluster, or 0 for empty/invalid input.
+/// In `.codepoint` mode, trailing combining marks, ZWJ and variation selectors
+/// stay on their spacing codepoint; the next spacing codepoint starts a new cell.
+/// In `.grapheme` mode this is `firstGraphemeLen`. Allocates and retains nothing.
+pub fn firstCellLen(str: []const u8) usize {
+    if (mode == .grapheme) return firstGraphemeLen(str);
+    const first = firstCodepoint(str) orelse return 0;
+    if (isControl(first.code)) return first.len;
+    var end = first.len;
+    while (end < str.len) {
+        const next = firstCodepoint(str[end..]) orelse break;
+        if (isControl(next.code) or codepointWidth(next.code) != 0) break;
+        end += next.len;
+    }
+    return end;
+}
+
+/// Display width of `str` in terminal cells under the selected drawing policy.
 pub fn strWidth(str: []const u8) usize {
+    if (mode == .codepoint) return @intCast(@max(0, codepointStrWidth(str)));
     return DisplayWidth.strWidth(str);
 }
 
-/// Display width of one grapheme cluster `gc` in terminal cells: 0 for a
-/// combining mark, 2 for a wide or emoji grapheme, negative for a control.
+/// Display width of `gc` under the selected drawing policy. In `.codepoint`
+/// mode this sums codepoint widths; use `firstCellLen` to segment drawable cells.
+/// Zero-width marks consume no cells; negative widths represent controls.
 pub fn graphemeWidth(gc: []const u8) isize {
+    if (mode == .codepoint) return codepointStrWidth(gc);
     return DisplayWidth.graphemeWidth(gc);
 }
 
@@ -90,16 +167,19 @@ pub fn toUpper(cp: u21) u21 {
 
 /// Byte length of the longest prefix of `str` that fits `columns` terminal cells.
 ///
-/// The prefix ends at a grapheme boundary. Zero-width and control clusters do not
-/// consume cells. A first grapheme wider than the budget yields an empty prefix.
+/// The prefix ends at a terminal cell-cluster boundary under the selected mode.
+/// Zero-width and control clusters consume no cells; an over-wide first cell yields an empty prefix.
 /// Allocates nothing and retains no storage. The caller slices its own borrowed `str`.
 pub fn fitPrefixLen(str: []const u8, columns: usize) usize {
     var width: usize = 0;
     var end: usize = 0;
-    var iter = Graphemes.iterator(str);
-    while (iter.next()) |g| {
-        const gc = g.bytes(str);
-        const w = DisplayWidth.graphemeWidth(gc);
+    var off: usize = 0;
+    while (off < str.len) {
+        const len = firstCellLen(str[off..]);
+        if (len == 0) break;
+        const gc = str[off..][0..len];
+        off += len;
+        const w = graphemeWidth(gc);
         if (w <= 0) {
             end += gc.len;
             continue;
@@ -113,10 +193,10 @@ pub fn fitPrefixLen(str: []const u8, columns: usize) usize {
 }
 
 /// The longest prefix of `str` that fits in `columns` cells, cut only at
-/// grapheme boundaries; possibly empty.
+/// terminal cell-cluster boundaries under the selected mode; possibly empty.
 ///
 /// Zero-width and control clusters stay glued to the cluster they follow and
-/// advance no column. A grapheme wider than `columns` ends the prefix, so
+/// advance no column. A cell cluster wider than `columns` ends the prefix, so
 /// the result is never wider than `columns`. The caller owns the returned
 /// slice and frees it with `allocator`.
 pub fn truncate(
@@ -317,4 +397,74 @@ test "toUpper: unicode simple mapping, unmapped codepoints unchanged" {
     // No case at all.
     try std.testing.expectEqual(@as(u21, '1'), toUpper('1'));
     try std.testing.expectEqual(@as(u21, '+'), toUpper('+'));
+}
+
+test "codepoint mode: widths match xterm.js measured marker columns" {
+    setMode(.codepoint);
+    defer setMode(.grapheme);
+    const samples = [_][]const u8{
+        "👩‍💻",
+        "👍🏽",
+        "❤️",
+        "☺️",
+        "🇩🇪",
+        "e\u{301}",
+        "日本",
+        "#️⃣",
+    };
+    const widths = [_]usize{ 4, 4, 1, 1, 2, 1, 4, 1 };
+    for (samples, widths) |text, expected| {
+        try std.testing.expectEqual(expected, strWidth(text));
+        try std.testing.expectEqual(@as(isize, @intCast(expected)), graphemeWidth(text));
+    }
+}
+
+test "codepoint mode: cell segmentation retains zero-width suffixes" {
+    setMode(.codepoint);
+    defer setMode(.grapheme);
+    const samples = [_][]const u8{
+        "👩‍💻",
+        "👍🏽",
+        "❤️",
+        "☺️",
+        "🇩🇪",
+        "e\u{301}",
+        "日本",
+        "#️⃣",
+    };
+    const first = [_][]const u8{
+        "👩‍",
+        "👍",
+        "❤️",
+        "☺️",
+        "🇩",
+        "e\u{301}",
+        "日",
+        "#️⃣",
+    };
+    for (samples, first) |text, expected| {
+        try std.testing.expectEqualStrings(expected, text[0..firstCellLen(text)]);
+    }
+    try std.testing.expectEqual(@as(usize, 0), firstCellLen(""));
+    try std.testing.expectEqual(@as(usize, 0), firstCellLen("\xff"));
+    try std.testing.expectEqual(@as(usize, 0), firstCellLen("\xf0"));
+    // Zero-width control bytes must remain separate so draw/sanitizers can drop them.
+    try std.testing.expectEqual(@as(usize, 1), firstCellLen("a\nb"));
+    try std.testing.expectEqual(@as(usize, 1), firstCellLen("\n\u{301}"));
+    // Key text and semantic editing must still see the complete Unicode grapheme.
+    try std.testing.expectEqual(@as(usize, "👩‍💻".len), firstGraphemeLen("👩‍💻x"));
+}
+
+test "codepoint mode: prefix truncation and wrapping use cell budgets" {
+    setMode(.codepoint);
+    defer setMode(.grapheme);
+    const text = "👩‍💻x";
+    try std.testing.expectEqualStrings("👩‍", text[0..fitPrefixLen(text, 2)]);
+    try std.testing.expectEqualStrings("👩‍💻", text[0..fitPrefixLen(text, 4)]);
+    const truncated = try truncate(std.testing.allocator, text, 2);
+    defer std.testing.allocator.free(truncated);
+    try std.testing.expectEqualStrings("👩‍", truncated);
+    const wrapped = try wrap(std.testing.allocator, "👩‍💻 x", 4, 0);
+    defer std.testing.allocator.free(wrapped);
+    try std.testing.expectEqualStrings("👩‍💻\nx", wrapped);
 }

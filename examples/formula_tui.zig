@@ -148,6 +148,7 @@ pub fn main(init: std.process.Init) !void {
 
     var parser: notui.parser = .{};
     const caps = try notui.caps.Capabilities.detect(gpa, &tty, &parser);
+    notui.width.setMode(if (caps.unicode_core) .grapheme else .codepoint);
     const kitty = caps.kitty_graphics;
 
     var region = try Region.init(gpa, .{ .height = band_height });

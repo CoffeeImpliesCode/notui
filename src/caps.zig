@@ -58,10 +58,9 @@ pub const Capabilities = struct {
     /// Whether synchronized output (DEC 2026) is supported. Decides whether an
     /// interactive session wraps each frame in the envelope.
     sync_output: bool = false,
-    /// Whether the terminal reported the unicode-core mode (DEC 2027) as
-    /// supported. Recorded, never consulted: every toolkit width measurement
-    /// goes through zg's Unicode 16 tables (`src/width.zig`), so this reports
-    /// the mode and never selects a legacy-width renderer.
+    /// Whether DEC 2027 grapheme clustering is active after detection.
+    /// A supported reset mode is enabled before `detect` returns. App and the
+    /// examples select grapheme widths when true, per-codepoint widths otherwise.
     unicode_core: bool = false,
     /// Whether 24-bit color was reported, by DA1 param 24 or by an OSC 11
     /// background reply.
@@ -134,8 +133,8 @@ const ScanKind = enum {
 const ScanResult = union(enum) {
     /// DA1 reply params ("1;2;4;6;22;24"), null when no reply arrived.
     da1: ?[]const u8,
-    /// DECRPM reply value (pm 1-3 ⇒ set), null when no reply arrived.
-    decrpm: ?bool,
+    /// DECRPM status: 0 unrecognized, 1 set, 2 reset, 3/4 permanently set/reset.
+    decrpm: ?u8,
     /// Kitty keyboard cap reply seen.
     kitty: bool,
     /// Kitty graphics cap reply seen.
@@ -146,6 +145,7 @@ const ScanResult = union(enum) {
 
 fn detectWithTimeout(alloc: std.mem.Allocator, tty: anytype, parser: *Parser, timeout_ms: u64) !Capabilities {
     var caps: Capabilities = .{};
+    var enable_unicode_core = false;
 
     // 1. Primary DA: truecolor (param 24) sets `rgb`. The sixel param (4) is
     //    left unmatched, because no capability here claims sixel.
@@ -167,17 +167,20 @@ fn detectWithTimeout(alloc: std.mem.Allocator, tty: anytype, parser: *Parser, ti
     {
         const r = try queryScan(.decrpm, 2026, alloc, tty, parser, "\x1b[?2026$p", timeout_ms);
         switch (r) {
-            .decrpm => |supported| caps.sync_output = supported orelse false,
+            .decrpm => |status| caps.sync_output = status == 1 or status == 3,
             else => {},
         }
     }
 
-    // 3. Unicode core (?2027) — recorded; no toolkit width depends on it.
+    // 3. Unicode core (?2027): select grapheme drawing only if it can be active.
     ttyDrainInput(tty);
     {
         const r = try queryScan(.decrpm, 2027, alloc, tty, parser, "\x1b[?2027$p", timeout_ms);
         switch (r) {
-            .decrpm => |supported| caps.unicode_core = supported orelse false,
+            .decrpm => |status| {
+                caps.unicode_core = status == 1 or status == 2 or status == 3;
+                enable_unicode_core = status == 2;
+            },
             else => {},
         }
     }
@@ -227,6 +230,10 @@ fn detectWithTimeout(alloc: std.mem.Allocator, tty: anytype, parser: *Parser, ti
         }
     }
 
+    if (enable_unicode_core) {
+        try tty.writer().writeAll("\x1b[?2027h");
+        try tty.writer().flush();
+    }
     if (caps.rgb) caps.color = .truecolor;
     return caps;
 }
@@ -392,10 +399,9 @@ fn primaryDeviceAttributesHasParam(params: []const u8, needle: u16) bool {
     return false;
 }
 
-/// Parse a DECRPM reply for `mode` (CSI ? {mode} ; {pm} $ y). Returns
-/// whether the mode is set (pm != 0), or null when no complete reply is
-/// present (generalized zigzag parseMode2027Response).
-fn parseDecrpmReply(bytes: []const u8, mode: u16) ?bool {
+/// Parse the DECRPM status for `mode` (CSI ? {mode} ; {pm} $ y), or null
+/// when no complete recognized status reply is present.
+fn parseDecrpmReply(bytes: []const u8, mode: u16) ?u8 {
     var prefix_buf: [16]u8 = undefined;
     const prefix = std.fmt.bufPrint(&prefix_buf, "\x1b[?{d};", .{mode}) catch return null;
     var search_from: usize = 0;
@@ -413,9 +419,8 @@ fn parseDecrpmReply(bytes: []const u8, mode: u16) ?bool {
             continue;
         }
         if (i + 1 < bytes.len and bytes[i] == '$' and bytes[i + 1] == 'y') {
-            // DECRPM values: 0 not recognized, 1 set, 2 reset, 3 set
-            // permanently, 4 reset permanently. Only 1 and 3 are "on".
-            return param == 1 or param == 3;
+            if (param <= 4) return @intCast(param);
+            return null;
         }
         search_from = start + 1;
     }
@@ -427,20 +432,20 @@ test {
 }
 
 test "caps: parseDecrpmReply vectors" {
-    try std.testing.expectEqual(@as(?bool, true), parseDecrpmReply("\x1b[?2026;1$y", 2026));
-    try std.testing.expectEqual(@as(?bool, false), parseDecrpmReply("\x1b[?2026;0$y", 2026));
-    try std.testing.expectEqual(@as(?bool, false), parseDecrpmReply("\x1b[?2026;2$y", 2026));
-    try std.testing.expectEqual(@as(?bool, true), parseDecrpmReply("\x1b[?2026;3$y", 2026));
-    try std.testing.expectEqual(@as(?bool, false), parseDecrpmReply("\x1b[?2026;4$y", 2026));
-    try std.testing.expectEqual(@as(?bool, true), parseDecrpmReply("\x1b[?2027;1$y", 2027));
+    try std.testing.expectEqual(@as(?u8, 1), parseDecrpmReply("\x1b[?2026;1$y", 2026));
+    try std.testing.expectEqual(@as(?u8, 0), parseDecrpmReply("\x1b[?2026;0$y", 2026));
+    try std.testing.expectEqual(@as(?u8, 2), parseDecrpmReply("\x1b[?2026;2$y", 2026));
+    try std.testing.expectEqual(@as(?u8, 3), parseDecrpmReply("\x1b[?2026;3$y", 2026));
+    try std.testing.expectEqual(@as(?u8, 4), parseDecrpmReply("\x1b[?2026;4$y", 2026));
+    try std.testing.expectEqual(@as(?u8, 1), parseDecrpmReply("\x1b[?2027;1$y", 2027));
     // incomplete / absent replies
-    try std.testing.expectEqual(@as(?bool, null), parseDecrpmReply("", 2026));
-    try std.testing.expectEqual(@as(?bool, null), parseDecrpmReply("\x1b[?2026", 2026));
-    try std.testing.expectEqual(@as(?bool, null), parseDecrpmReply("\x1b[?2026;1$", 2026));
+    try std.testing.expectEqual(@as(?u8, null), parseDecrpmReply("", 2026));
+    try std.testing.expectEqual(@as(?u8, null), parseDecrpmReply("\x1b[?2026", 2026));
+    try std.testing.expectEqual(@as(?u8, null), parseDecrpmReply("\x1b[?2026;1$", 2026));
     // wrong mode must not match
-    try std.testing.expectEqual(@as(?bool, null), parseDecrpmReply("\x1b[?1004;1$y", 2026));
+    try std.testing.expectEqual(@as(?u8, null), parseDecrpmReply("\x1b[?1004;1$y", 2026));
     // a later reply in the same byte stream still matches
-    try std.testing.expectEqual(@as(?bool, true), parseDecrpmReply("\x1b[?2027;1$y\x1b[?2026;1$y", 2026));
+    try std.testing.expectEqual(@as(?u8, 1), parseDecrpmReply("\x1b[?2027;1$y\x1b[?2026;1$y", 2026));
 }
 
 test "caps: DA1 param extraction" {
@@ -721,3 +726,21 @@ const FakeWriter = struct {
         return std.Io.Writer.countSplat(data, splat);
     }
 };
+
+test "caps: supported reset unicode core is enabled before drawing" {
+    var parser: Parser = .{};
+    const script = [_][]const u8{
+        "\x1b[?1;2c",
+        "\x1b[?2026;0$y",
+        "\x1b[?2027;2$y",
+        "\x1b[>1u",
+        "\x1b_Gi=9931;ERROR\x1b\\",
+        "\x1b]11;rgb:0000/0000/0000\x1b\\",
+    };
+    var fake: FakeTty = undefined;
+    try fake.init(std.testing.io, &script);
+    defer fake.deinit();
+    const detected = try detectWithTimeout(std.testing.allocator, &fake, &parser, 20);
+    try std.testing.expect(detected.unicode_core);
+    try std.testing.expect(std.mem.endsWith(u8, fake.queryLog(), "\x1b[?2027h"));
+}

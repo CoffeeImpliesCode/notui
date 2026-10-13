@@ -6,10 +6,10 @@
 //! snapshots, and a bounded Emacs-style kill ring with yank/yank-pop.
 //! There is no selection model: every operation acts at the cursor.
 //!
-//! Grapheme knowledge comes exclusively from the zg seam
-//! (`Width.firstGraphemeLen`, `Width.graphemeWidth`): motion, deletion and
-//! the draw window step whole clusters and never split a multi-byte
-//! cluster (base + combining mark, ZWJ emoji family) or a wide glyph.
+//! Width and segmentation come exclusively from `width.zig`. Motion and deletion
+//! use Unicode grapheme boundaries (`firstGraphemeLen`); the draw window and cursor
+//! use terminal cell clusters (`firstCellLen`, `graphemeWidth`) under its selected
+//! policy. Neither path splits a UTF-8 codepoint or a wide cell.
 //!
 //! Allocation and ownership. `init` stores the `gpa` it is given and
 //! every later allocation comes from it; `deinit` frees into it without
@@ -762,7 +762,7 @@ pub const Editor = struct {
         const rel = win.cursor_col - win.col;
         if (rel < avail) {
             const tail = window[self.cursorAt() - start ..];
-            const glen = Width.firstGraphemeLen(tail);
+            const glen = Width.firstCellLen(tail);
             // The cluster under the cursor, or empty at the end of the line
             // (where the marker is a blank block instead).
             const under: []const u8 =
@@ -801,7 +801,7 @@ pub const Editor = struct {
         var ccol: usize = 0;
         var total: usize = 0;
         while (scan < line.len) {
-            const glen = Width.firstGraphemeLen(line[scan..]);
+            const glen = Width.firstCellLen(line[scan..]);
             if (glen == 0) break;
             const w = Width.graphemeWidth(line[scan..][0..glen]);
             const columns: usize = if (w > 0) @intCast(w) else 0;
@@ -827,7 +827,7 @@ pub const Editor = struct {
         var off: usize = 0;
         var walked: usize = 0;
         while (off < line.len and walked < col) {
-            const glen = Width.firstGraphemeLen(line[off..]);
+            const glen = Width.firstCellLen(line[off..]);
             if (glen == 0) break;
             const w = Width.graphemeWidth(line[off..][0..glen]);
             const wu: usize = if (w > 0) @intCast(w) else 0;
@@ -994,7 +994,7 @@ fn widthUpTo(line: []const u8, at: usize) usize {
     var width: usize = 0;
     var off: usize = 0;
     while (off < at) {
-        const glen = Width.firstGraphemeLen(line[off..]);
+        const glen = Width.firstCellLen(line[off..]);
         if (glen == 0 or off + glen > at) break;
         const w = Width.graphemeWidth(line[off..][0..glen]);
         if (w > 0) {
@@ -2098,7 +2098,7 @@ test "editor: a scrolled wide cluster does not hide the character before the cur
 /// empty slice at the end of the line.
 fn cursorCluster(ed: *const Editor) []const u8 {
     const tail = ed.text()[ed.cursorAt()..];
-    return tail[0..Width.firstGraphemeLen(tail)];
+    return tail[0..Width.firstCellLen(tail)];
 }
 
 /// Every cell the window owns is intact: a wide lead keeps its

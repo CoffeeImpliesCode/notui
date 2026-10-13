@@ -402,7 +402,7 @@ fn drawClipped(buf: *Buffer, style: Style, text: []const u8, budget: usize, x: u
     var width: usize = 0;
     var off: usize = 0;
     while (off < text.len) {
-        const glen = Width.firstGraphemeLen(text[off..]);
+        const glen = Width.firstCellLen(text[off..]);
         if (glen == 0) break; // defensive: no progress possible
         const grapheme = text[off..][0..glen];
         off += glen;

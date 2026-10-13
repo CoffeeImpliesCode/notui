@@ -137,10 +137,10 @@ Screenshot zig-out/visual/stress/unicode-02-app-unicode-echo.png
 Sleep 500ms
 # Compare against unicode-01: the CJK glyphs, the accented cluster and the
 # ZWJ sequence must land on the same cells in both frames, and the band row
-# must be one row. The app walks grapheme clusters (src/width.zig
-# truncate/Graphemes), so the text after the ZWJ sequence starts where the
-# whole cluster ends. Whether the font draws that sequence as one glyph or
-# as separate emoji glyphs is a font question; the cell positions are notui's.
+# must be one row. The app selects cell clusters from terminal DEC 2027 support
+# (src/width.zig firstCellLen). A legacy terminal advances four cells for 👩‍💻;
+# a grapheme terminal advances two. In either case the text after it must start
+# at the terminal's actual next column, without losing the tail at the margin.
 
 # ── ctrl+c clears the line, the app stays up ───────────────────────────
 # Lowercase chord: uppercase "Ctrl+C" would be Ctrl+Shift+C and reach the

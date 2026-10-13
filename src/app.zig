@@ -40,6 +40,7 @@ const view_mod = @import("view.zig");
 const output = @import("output.zig");
 const transcript = @import("transcript.zig");
 const watchdog = @import("watchdog.zig");
+const width = @import("width.zig");
 /// Adaptive frame pacing: a nominal input cadence plus a ~50% duty cap.
 ///
 /// The loop waits `nominal` for input; when the last frame cost more than
@@ -1170,6 +1171,7 @@ pub fn App(comptime Model: type) type {
         fn startTty(self: *Self, io: std.Io, gpa: std.mem.Allocator) !void {
             self.parser = .{};
             self.caps = try caps.Capabilities.detect(gpa, &self.tty.?, &self.parser);
+            width.setMode(if (self.caps.?.unicode_core) .grapheme else .codepoint);
             self.region = try Region.init(gpa, .{
                 .height = self.opts.region_height,
                 .append_lines = self.opts.append_lines,

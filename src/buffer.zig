@@ -111,9 +111,17 @@ pub const Buffer = struct {
     ///
     /// Out of bounds is a no-op; never errors (plan §0: graceful
     /// truncation, no throw paths).
+    /// In codepoint mode a supplied Unicode grapheme is split into terminal
+    /// cell clusters, truncated at the right edge as in `draw`.
     /// Retains `cell`'s grapheme and style slices without copying; the type states their lifetime.
-    pub fn set(self: *Buffer, x: u16, y: u16, cell: Cell) !void {
+    pub fn set(self: *Buffer, x: u16, y: u16, cell: Cell) error{}!void {
         if (x >= self.width or y >= self.height) return;
+        if (!cell.wide and Width.getMode() == .codepoint and
+            Width.firstCellLen(cell.grapheme) < cell.grapheme.len)
+        {
+            _ = try self.draw(cell.style, cell.grapheme, x, y);
+            return;
+        }
         const idx = @as(usize, y) * @as(usize, self.width) + x;
 
         // Overwriting a wide continuation cell: its lead is at x - 1.
@@ -146,8 +154,8 @@ pub const Buffer = struct {
 
     /// Draw `text` with `style` at (x, y), grapheme-aware.
     ///
-    /// Iterates grapheme clusters through the width seam
-    /// (`Width.firstGraphemeLen` + `Width.graphemeWidth`; no zg import).
+    /// Iterates terminal cell clusters through the selected width policy
+    /// (`Width.firstCellLen` + `Width.graphemeWidth`; no zg import).
     /// Zero-width clusters (combining marks) advance no column; a wide
     /// glyph that would cross the right edge drops, and with it the rest
     /// of the line (graceful truncation — never an error). Returns the
@@ -160,7 +168,7 @@ pub const Buffer = struct {
         var col: u16 = x;
         var off: usize = 0;
         while (off < text.len) {
-            const glen = Width.firstGraphemeLen(text[off..]);
+            const glen = Width.firstCellLen(text[off..]);
             if (glen == 0) break; // defensive: no progress possible
             const gc = text[off..][0..glen];
             off += glen;
@@ -1761,7 +1769,7 @@ const FrameModel = struct {
     /// holds, carrying the style the terminal had active.
     fn text(self: *FrameModel) !void {
         const rest = self.bytes[self.index..];
-        const len = Width.firstGraphemeLen(rest);
+        const len = Width.firstCellLen(rest);
         try std.testing.expect(len > 0);
         const glyph = rest[0..len];
         try std.testing.expect(self.row < @as(usize, self.buf.height));
@@ -2329,4 +2337,33 @@ test "rowFootprint: gap allocation failure restores both tapes for retry" {
     try std.testing.expectEqual(@as(u16, 6), fp.paintedPrefixColumns(null_gaps.items, 8));
     try std.testing.expectEqualSlices(u16, &.{ 99, 0 }, tape.items);
     try std.testing.expectEqualDeep(sentinel, null_gaps.items[0]);
+}
+
+test "Buffer.draw: codepoint ZWJ sequence occupies four cells before following text" {
+    Width.setMode(.codepoint);
+    defer Width.setMode(.grapheme);
+    var buf = try Buffer.init(std.testing.allocator, 12, 1);
+    defer buf.deinit();
+    try std.testing.expectEqual(@as(u16, 12), try buf.draw(.{}, "👩‍💻 aligned", 0, 0));
+    try std.testing.expectEqualStrings("👩‍", buf.get(0, 0).grapheme);
+    try std.testing.expect(buf.get(1, 0).wide);
+    try std.testing.expectEqualStrings("💻", buf.get(2, 0).grapheme);
+    try std.testing.expect(buf.get(3, 0).wide);
+    try std.testing.expectEqualStrings(" ", buf.get(4, 0).grapheme);
+    try std.testing.expectEqualStrings("a", buf.get(5, 0).grapheme);
+    try std.testing.expectEqualStrings("d", buf.get(11, 0).grapheme);
+}
+
+test "Buffer.set: codepoint mode splits a supplied Unicode grapheme into cells" {
+    Width.setMode(.codepoint);
+    defer Width.setMode(.grapheme);
+    var buf = try Buffer.init(std.testing.allocator, 5, 1);
+    defer buf.deinit();
+    try buf.set(0, 0, .{ .grapheme = "👩‍💻" });
+    try buf.set(4, 0, .{ .grapheme = "x" });
+    try std.testing.expectEqualStrings("👩‍", buf.get(0, 0).grapheme);
+    try std.testing.expect(buf.get(1, 0).wide);
+    try std.testing.expectEqualStrings("💻", buf.get(2, 0).grapheme);
+    try std.testing.expect(buf.get(3, 0).wide);
+    try std.testing.expectEqualStrings("x", buf.get(4, 0).grapheme);
 }

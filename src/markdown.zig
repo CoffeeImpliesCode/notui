@@ -37,7 +37,7 @@
 //! the hook keeps that storage alive while it uses the block.
 //!
 //! Width and grapheme knowledge come from `width.zig` only
-//! (`strWidth`, `graphemeWidth`, `firstGraphemeLen`); this file imports
+//! (`strWidth`, `graphemeWidth`, `firstCellLen`); this file imports
 //! no terminal library directly.
 
 const std = @import("std");
@@ -903,7 +903,7 @@ fn wrapCode(
     for (spans) |span| {
         var off: usize = 0;
         while (off < span.text.len) {
-            const glen = Width.firstGraphemeLen(span.text[off..]);
+            const glen = Width.firstCellLen(span.text[off..]);
             if (glen == 0) break; // defensive: valid UTF-8 always progresses
             const gc = span.text[off..][0..glen];
             const gw = Width.graphemeWidth(gc);
@@ -944,7 +944,7 @@ fn pushWord(arena: std.mem.Allocator, words: *std.ArrayList(Word), spec: WordSpe
     var col: usize = 0;
     var first = true;
     while (off < text.len) {
-        const glen = Width.firstGraphemeLen(text[off..]);
+        const glen = Width.firstCellLen(text[off..]);
         if (glen == 0) break;
         const gc = text[off..][0..glen];
         const gw = Width.graphemeWidth(gc);
@@ -1146,7 +1146,7 @@ fn expandTabs(arena: std.mem.Allocator, line: []const u8, tab_width: usize) Erro
             i += 1;
             continue;
         }
-        const glen = Width.firstGraphemeLen(line[i..]);
+        const glen = Width.firstCellLen(line[i..]);
         if (glen == 0) break;
         const gc = line[i..][0..glen];
         try out.appendSlice(arena, gc);

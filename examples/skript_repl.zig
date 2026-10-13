@@ -189,6 +189,7 @@ pub fn main(init: std.process.Init) !void {
 
     var parser: notui.parser = .{};
     const caps = try notui.caps.Capabilities.detect(gpa, &tty, &parser);
+    notui.width.setMode(if (caps.unicode_core) .grapheme else .codepoint);
 
     var region = try Region.init(gpa, .{
         .height = 2,
@@ -1297,22 +1298,22 @@ fn drawBand(
     // on an earlier one — styles the text after it too.
     const segs = try scanQuery(aa, line);
     const cur_abs = active_off + cur; // absolute byte index of the cursor
-    // The cursor covers a whole grapheme: a combining mark or a ZWJ
-    // sequence stays with its base.
-    const cell_len = if (cur < active.len) notui.width.firstGraphemeLen(active[cur..]) else 0;
+    // The cursor covers one terminal cell cluster; trailing zero-width marks
+    // stay with their base even when the terminal does not join ZWJ emoji.
+    const cell_len = if (cur < active.len) notui.width.firstCellLen(active[cur..]) else 0;
     const cell_w: usize = if (cell_len > 0)
         @max(1, notui.width.strWidth(active[cur .. cur + cell_len]))
     else
         1;
 
     // Horizontal scroll: a line wider than the band keeps the cursor on
-    // screen by hiding whole graphemes from the left, marked with `…`.
+    // screen by hiding whole cell clusters from the left, marked with `…`.
     const room: usize = region.width -| prompt_col;
     var start: usize = 0;
     while (start < cur and
         notui.width.strWidth(active[start..cur]) + cell_w + @intFromBool(start > 0) > room)
     {
-        start += notui.width.firstGraphemeLen(active[start..]);
+        start += notui.width.firstCellLen(active[start..]);
     }
     if (start > 0) x += try region.cur.draw(.{ .attrs = .{ .dim = true } }, "…", x, 0);
     const text_col = x;
