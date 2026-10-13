@@ -2371,6 +2371,80 @@ test "native: a trailing newline flushes one committed row, not two" {
     try expectBandRow(&rig, 0, "C0");
 }
 
+test "native: default App spinner frames preserve the counter band through width reflow" {
+    const app_mod = @import("../app.zig");
+    const output = @import("../output.zig");
+    const Counter = struct {
+        const Self = @This();
+        pub const Msg = void;
+        tick: usize = 0,
+
+        pub fn init(_: Allocator) !struct { model: Self, cmd: app_mod.Cmd(Msg) } {
+            return .{ .model = .{}, .cmd = .none };
+        }
+        pub fn update(_: *Self, _: Msg, _: *app_mod.Context) !app_mod.Cmd(Msg) {
+            return .none;
+        }
+        pub fn view(_: *const Self, _: *app_mod.Context) app_mod.View(Self) {
+            return .{ .height = 3, .draw = draw };
+        }
+        fn draw(self: *Self, _: *app_mod.Context, buf: *@import("../buffer.zig").Buffer) !void {
+            const cyan: Style = .{ .fg = .{ .ansi = .cyan } };
+            _ = try buf.draw(cyan, "count: 0   [i]nc [d]ec [q]uit", 0, 0);
+            const spinner = if (self.tick % 2 == 0) "| working" else "/ working";
+            _ = try buf.draw(Style{}, spinner, 0, 1);
+            _ = try buf.draw(Style{}, "counter", 0, 2);
+            _ = try buf.draw(Style{}, "inline mode", buf.width - 11, 2);
+        }
+    };
+    const Sink = struct {
+        term: *Model,
+        pub fn tryWrite(self: *@This(), bytes: []const u8) error{WriteFailed}!usize {
+            self.term.feed(bytes) catch return error.WriteFailed;
+            return bytes.len;
+        }
+    };
+    var app = app_mod.App(Counter).init();
+    defer app.deinit();
+    app.io = testing.io;
+    app.gpa = testing.allocator;
+    app.model = .{};
+    app.arena = std.heap.ArenaAllocator.init(testing.allocator);
+    app.scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    app.out = try output.OutputQueue.init(testing.allocator, app.opts.output);
+    app.region = try Region.init(testing.allocator, .{
+        .height = app.opts.region_height,
+        .append_lines = app.opts.append_lines,
+        .resize_mode = app.opts.resize_mode,
+        .terminal_reflow = app.opts.terminal_reflow,
+    });
+    var term = try Model.init(testing.allocator, 101, 32, 20000);
+    defer term.deinit();
+    var sink: Sink = .{ .term = &term };
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(testing.allocator);
+    for ([_]u16{ 101, 61, 41, 23, 101 }) |cols| {
+        // The terminal rewraps before App.tick observes SIGWINCH.
+        try term.resize(cols, 32);
+        try app.region.?.resize(cols, 32, app.region.?.height);
+        app.region.?.repaintAll();
+        for (0..10) |tick| {
+            app.model.tick = tick;
+            _ = try app.frameHeadless(output.Transport.from(&sink));
+            while (term.takeReply()) |reply| try app.region.?.applyCpr(reply.row, reply.col);
+            try testing.expectEqual(term.cursorRow() - 2, app.region.?.anchorRow());
+            var count_rows: usize = 0;
+            for (0..term.lineCount()) |row| {
+                text.clearRetainingCapacity();
+                try term.writeText(row, &text);
+                if (std.mem.indexOf(u8, text.items, "count:") != null) count_rows += 1;
+            }
+            // A stale rewrapped prefix is an extra count row, even after restore.
+            try testing.expectEqual(@as(usize, 1), count_rows);
+        }
+    }
+}
+
 test "native: a replay supersedes queued appends and reaches the terminal alone" {
     var rig = try Rig.init(testing.allocator, .{
         .cols = 40,
