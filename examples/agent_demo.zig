@@ -478,14 +478,24 @@ pub const Model = struct {
         const now = std.Io.Timestamp.now(ctx.io, .awake);
         const accent = Theme.dark.style(.accent, ctx.color_profile);
         const dim = Theme.dark.style(.text_dim, ctx.color_profile);
-        const input_rows: u16 = @intCast(@min(self.editors.items.len, buf.height -| 3));
-        const input_top = buf.height -| (input_rows + 2);
-        const title = try std.fmt.bufPrint(
-            &self.title_buf,
-            "notui agent | turn {d} | {s}",
-            .{ self.turns, if (self.streaming) "streaming" else "ready" },
-        );
-        _ = try buf.draw(accent, title, 0, 0);
+        // Row budget, most important first: the focused input line, then the
+        // key hints, then the status row, then the title. A band of three or
+        // fewer rows drops the title and the status before the input.
+        const has_title = buf.height >= 4;
+        const bottom_rows: u16 = if (buf.height >= 4) 2 else @min(buf.height -| 1, 1);
+        const top_rows: u16 = @intFromBool(has_title);
+        const input_room = buf.height -| (bottom_rows + top_rows);
+        const min_input: u16 = @min(buf.height, 1);
+        const input_rows: u16 = @intCast(@min(self.editors.items.len, @max(input_room, min_input)));
+        const input_top = buf.height -| (input_rows + bottom_rows);
+        if (has_title) {
+            const title = try std.fmt.bufPrint(
+                &self.title_buf,
+                "notui agent | turn {d} | {s}",
+                .{ self.turns, if (self.streaming) "streaming" else "ready" },
+            );
+            _ = try buf.draw(accent, title, 0, 0);
+        }
         if (self.streaming) {
             const block = try self.markdown.render(reply[0..self.streamed], options(ctx));
             // Limit the markdown view to the space above the input, never paint through it.
@@ -518,16 +528,18 @@ pub const Model = struct {
             editor.cursor_style = .{ .attrs = .{ .reverse = editor.visible } };
             _ = try editor.draw(buf, 2, y, now);
         }
-        if (self.streaming) {
-            self.spinner.style = dim;
-            _ = try self.spinner.draw(buf, 0, buf.height -| 2, now);
-        } else _ = try buf.draw(
-            dim,
-            "Tab: /command or @file | ^Z undo | ^U kill | ^Y yank",
-            0,
-            buf.height -| 2,
-        );
-        _ = try self.keymap.renderHints(buf, 0, buf.height -| 1, now, .{
+        if (bottom_rows == 2) {
+            if (self.streaming) {
+                self.spinner.style = dim;
+                _ = try self.spinner.draw(buf, 0, buf.height - 2, now);
+            } else _ = try buf.draw(
+                dim,
+                "Tab: /command or @file | ^Z undo | ^U kill | ^Y yank",
+                0,
+                buf.height - 2,
+            );
+        }
+        if (bottom_rows >= 1) _ = try self.keymap.renderHints(buf, 0, buf.height - 1, now, .{
             .key_style = accent,
             .desc_style = dim,
         });
@@ -537,7 +549,7 @@ pub const Model = struct {
             _ = popup.setItemsFuzzy(text, &self.matches) catch 0;
             // The menu opens upward between the title row and the input: a
             // short band gets fewer rows instead of a menu over both.
-            const room: u16 = input_top -| 1;
+            const room: u16 = input_top -| top_rows;
             popup.max_rows = @min(popup.max_rows, room);
             const shown: u16 = @intCast(@min(@as(usize, popup.max_rows), popup.candidates.len));
             if (shown > 0) _ = try popup.draw(ctx.allocator, buf, 2, input_top - shown, now);
@@ -558,13 +570,20 @@ pub const Model = struct {
             const top = (buf.height - outer_h) / 2;
             // The picker sits below the title and body and above the footer
             // and bottom border. A box too short for it shows the current
-            // choice as its body instead, so the decision stays visible.
+            // choice as its body instead, and a box without a body row puts
+            // it in the title, so the decision stays visible at any height.
             const picker_top = top + 3;
             const picker_end = top + outer_h -| 2;
             const picker_fits = picker_end > picker_top and outer_w > 4;
             if (!picker_fits) {
                 if (approval.selected()) |i| {
-                    modal.body = try std.fmt.bufPrint(&self.choice_buf, "> {s}", .{approval.items[i]});
+                    const choice = approval.items[i];
+                    if (outer_h >= 5) {
+                        modal.body = try std.fmt.bufPrint(&self.choice_buf, "> {s}", .{choice});
+                    } else {
+                        modal.title =
+                            try std.fmt.bufPrint(&self.choice_buf, "Allow? > {s}", .{choice});
+                    }
                 }
             }
             _ = try modal.draw(buf, 0, 0, now);
