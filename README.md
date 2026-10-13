@@ -238,24 +238,28 @@ declarations were rejected by their intended guards. All six registered roots
 generated documentation. An external caller named `Buffer.RowFootprint` and its
 `NullGap`, then called the allocator-first footprint API.
 
-**Analyzer assessment, source reading at `bb4d44bf013b`:** all 132 diagnostic
-occurrences were reviewed. There are 82 false positives and 50 intentional test
+**Analyzer assessment, refreshed 2026-10-13 at `22e88c5cbd8b`:** all 126 diagnostic
+occurrences were reviewed. There are 75 false positives and 51 intentional test
 assertions. No reported finding exposed a confirmed runtime defect.
 
 | Analyzer report | Count | Assessment |
 |---|---:|---|
 | ziglint: public type exposure | 4 | `Buffer.RowFootprint` is public |
 | ziglint: incomplete disposal | 1 | Test fixture frees its buffer and retains its observation counter |
-| zwanzig: optional unwrap | 112 | 62 guarded or constructed values, 50 intentional test assertions |
-| zwanzig: identifier style | 13 | Valid type and value aliases |
-| zwanzig: unreachable code | 1 | Intentional compile-time bounds check |
-| zwanzig: swallowed error | 1 | Invalid UTF-8 rejects the cluster through the boolean result |
+| zwanzig: optional unwrap | 109 | 58 guarded or constructed values, 51 intentional test assertions |
+| zwanzig: resource store | 11 | Arena-owned allocations, a loop-scoped `defer`, and test helpers closing raw descriptors |
+| zwanzig: identifier style | 1 | `View.DrawError` is a type alias |
 
 The unwrap assessment relies on documented lifecycle and non-reentry contracts.
 It does not cover arbitrary mutation of runtime fields or every possible consumer.
 [`ANALYZER-TRIAGE.json`](ANALYZER-TRIAGE.json) records every occurrence and its
 source evidence, including the duplicate ziglint report. The tools were ziglint
-`0.5.3-1+66709a4` and zwanzig `0.15.1` with the Zig 0.16.0 frontend.
+`0.5.3-1+66709a4` and the 2026-10-05 build of zwanzig `0.15.1` (Zig 0.16.0
+frontend) with `--max-states-per-point 2000`. At the default limit of 50, zwanzig
+stops on `Region.render`, `caps.detectWithTimeout` and two coverage tests; at 2000
+they complete and add no finding. That build no longer reports 18 sites of the
+previous ledger (12 identifier-style, 4 optional-unwrap, 1 unreachable-code,
+1 swallowed-error); the ledger's `integration_note` lists their ids.
 
 A live sanitizer probe rejected an invalid cluster after its valid prefix advanced
 the escape state. `Sanitizer.acceptCluster` now documents this residue. Its behavior

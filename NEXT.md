@@ -41,8 +41,8 @@ or pass the value through a small helper — as `clampedIndex` does for the
 `coverageRowFast` kernel — rather than restating magic numbers.
 
 Whether a diagnostic is a defect is a recorded result, not a judgement call.
-[`ANALYZER-TRIAGE.json`](ANALYZER-TRIAGE.json) classifies all 132
-occurrences of the `bb4d44bf013b` tree: 82 false positives, 50 intentional
+[`ANALYZER-TRIAGE.json`](ANALYZER-TRIAGE.json) classifies all 126
+occurrences of the `22e88c5cbd8b` tree: 75 false positives, 51 intentional
 test assertions, none a confirmed runtime defect. Read that ledger before
 treating a new analyzer line as a bug, and extend it rather than re-derive
 the site. The classification is source and caller review against documented
