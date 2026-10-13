@@ -1958,23 +1958,31 @@ pub const Region = struct {
         // is settled content, so the reservation is mandatory: writing
         // in place would overwrite the transcript.
         if ((self.opts.append_lines or self.released) and self.height > 0) {
+            // CRLF creates the band's rows below the cursor (scrolling at
+            // the window's bottom), then CUU returns to the first of them.
+            // The band occupies exactly the rows it reserved: painting
+            // from the reserved bottom would leave `height - 1` blank rows
+            // above the band and push it off its own reservation.
             try emit.appendLines(w, self.height);
             f.down(self.height);
+            try self.moveToBandTop(w, f, self.height);
             // The run reaches from the ledger's nearest group to the band
             // top, which is where this frame left it, so it is recorded
             // as a run instead of a shift counter: every offset above it
             // is then a projection and cannot drift.
             //
-            // A re-created band starts that run ONE ROW HIGHER: the
-            // collapse settled the cursor's own row as committed content
-            // with the footprint it was painted with, and counting it
-            // here as a blank would give the ledger two rows for one
-            // physical row. The rows this frame wrote above the band are
-            // part of the same run and move it down again, one for one.
+            // A first band leaves the cursor's own row between it and
+            // whatever was above: one blank row. A re-created band starts
+            // directly below the settled row: the collapse settled the
+            // cursor's own row as committed content with the footprint it
+            // was painted with, and counting it here as a blank would give
+            // the ledger two rows for one physical row. The rows this frame
+            // wrote above the band are part of the same run and move it
+            // down again, one for one.
             f.band_push = if (self.released)
-                @as(u32, self.height) - 1 + @as(u32, @intCast(written))
+                @as(u32, @intCast(written))
             else
-                self.height;
+                1;
         }
         var tracked: Style = .{};
         for (0..self.height) |y| {
@@ -4388,13 +4396,15 @@ test "region: the first frame is wrapped once: sync, hide, autowrap off, body, o
     for ([_][]const u8{ sync_on, sync_off, hide_c, aw_off, aw_on }) |fragment| {
         try testing.expectEqual(@as(usize, 1), count(frame, fragment));
     }
-    // The band owns two reserved rows of its own below the cursor, one
-    // terminal row each, and the cursor parks on the last one.
+    // The band owns the two rows reserved below the cursor, one terminal
+    // row each, starting directly below the cursor's own row, and the
+    // cursor parks on the last one.
     var term: Term = .{};
     term.feed(frame);
-    try testing.expectEqualStrings("ab", term.text(2));
-    try testing.expectEqualStrings("cd", term.text(3));
-    try testing.expectEqual(@as(usize, 3), term.row);
+    try testing.expectEqualStrings("", term.text(0));
+    try testing.expectEqualStrings("ab", term.text(1));
+    try testing.expectEqualStrings("cd", term.text(2));
+    try testing.expectEqual(@as(usize, 2), term.row);
     try testing.expectEqual(@as(usize, 0), term.col);
     try testing.expect(r.cursor_hidden);
     try testing.expectEqual(@as(u16, 2), r.high_water);
@@ -6297,9 +6307,8 @@ test "region: a real collapse settles the band, a reopen reserves below it" {
     try testing.expectEqual(@as(usize, 0), count(t3.bytes(), "\x1b[J"));
     for (history_rows, 0..) |row, y| try testing.expectEqualStrings(row, term.text(y));
     for (0..3) |y| try expectLabel(&term, 5 + y, 'a', y);
-    try testing.expectEqualStrings("", term.text(8));
-    for (0..2) |y| try expectLabel(&term, 9 + y, 'b', y);
-    try testing.expectEqual(@as(usize, 10), term.row);
+    for (0..2) |y| try expectLabel(&term, 8 + y, 'b', y);
+    try testing.expectEqual(@as(usize, 9), term.row);
     try testing.expectEqual(@as(u16, 2), r.painted_rows);
 }
 
@@ -6553,9 +6562,9 @@ test "region: a released band settles the row it parks on and a queued row lands
     try testing.expectEqualStrings("ab", term.text(0));
     try testing.expectEqualStrings("cd", term.text(1));
     try testing.expectEqualStrings("late", term.text(2));
-    try testing.expectEqualStrings("zz", term.text(5));
-    try testing.expectEqualStrings("yy", term.text(6));
-    try testing.expectEqual(@as(usize, 6), term.row);
+    try testing.expectEqualStrings("zz", term.text(4));
+    try testing.expectEqualStrings("yy", term.text(5));
+    try testing.expectEqual(@as(usize, 5), term.row);
     try testing.expectEqual(@as(u16, 2), r.painted_rows);
 }
 
