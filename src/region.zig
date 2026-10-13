@@ -158,9 +158,11 @@
 //!
 //! - **Native width reflow.** `Options.terminal_reflow` is a
 //!   DECLARATION, never a probe: nothing here reads `TERM`, the
-//!   environment or the terminal's identity. `.none` (the default) is
-//!   the model every geometry in this file was written against — a
-//!   width change leaves every physical row where it was.
+//!   environment or the terminal's identity. The default is
+//!   `TerminalReflow.rewrapping`, because xterm.js, VTE, kitty, iTerm2,
+//!   WezTerm, foot and tmux all rewrap old rows on a width change.
+//!   `.none` is the model for a terminal that never rewraps (classic
+//!   xterm) — a width change leaves every physical row where it was.
 //!   `.non_cursor_rows` declares an xterm-style terminal that repacks
 //!   every hard logical group on a width change EXCEPT the group the
 //!   cursor is in (narrowing and widening alike), and carries the
@@ -254,9 +256,9 @@ pub const Region = struct {
     ///
     /// A DECLARATION, never a probe: nothing here reads `TERM`, the
     /// environment or the terminal's identity, and there is no fallback
-    /// that guesses one model from another. The caller knows which
-    /// terminal it is driving and says so; the default is the model that
-    /// needs no correction at all.
+    /// that guesses one model from another. The default, `rewrapping`, is
+    /// what nearly every current terminal does; a caller driving one that
+    /// does not rewrap declares `.none`.
     ///
     /// Native packing follows measured non-corrupting xterm reflow: at least
     /// two columns, no split wide glyph, the whole current cursor group
@@ -264,8 +266,8 @@ pub const Region = struct {
     /// Source-preserving front eviction is also required; installed xterm
     /// can violate it during capped width overflow and is not supported there.
     pub const TerminalReflow = union(enum) {
-        /// No declared native-reflow model. Do not guess native geometry or
-        /// retention from a terminal name; this is the conservative default.
+        /// The terminal never rewraps rows on a width change (classic
+        /// xterm): every band row keeps its place.
         none,
         /// Repack non-cursor hard groups on width change and retain exactly
         /// `scrollback_rows` rows above the viewport. Zero is valid.
@@ -281,17 +283,26 @@ pub const Region = struct {
         /// profile. Capacity and CPR cannot recover those corrupted bytes.
         ///
         /// Caller declaration only: no detection, probe, mode refusal or
-        /// fallback. Unknown capacity or foreign below-band content uses
-        /// `.none`. The caller must route CPR replies through `applyCpr`.
+        /// fallback. Unknown capacity uses `rewrapping`, whose unbounded
+        /// retention only misplaces rows the terminal already evicted from
+        /// the top of its scrollback. The caller must route CPR replies
+        /// through `applyCpr`.
         non_cursor_rows: struct {
             /// Rows of scrollback the terminal retains above the
             /// visible screen before it discards the oldest row.
             scrollback_rows: u32,
         },
+
+        /// The default: rewrap non-cursor groups, scrollback retention
+        /// unknown and treated as unbounded.
+        pub const rewrapping: TerminalReflow = .{
+            .non_cursor_rows = .{ .scrollback_rows = std.math.maxInt(u32) },
+        };
     };
 
     /// Band geometry and terminal behavior supplied at initialization.
-    /// Defaults assume interactive relative-cursor rendering with no native reflow.
+    /// Defaults assume interactive relative-cursor rendering in a terminal
+    /// that rewraps old rows on a width change.
     pub const Options = struct {
         /// Number of terminal rows the region owns.
         height: u16,
@@ -310,11 +321,11 @@ pub const Region = struct {
         sync_output: bool = true,
         /// Resize behaviour for a width change.
         resize_mode: ResizeMode = .append,
-        /// The caller's declared model for native width reflow. `.none`
-        /// (the default) means no reflow is expected and every band row
-        /// keeps its place; `.non_cursor_rows` additionally requires
-        /// the exact scrollback retention. See `TerminalReflow`.
-        terminal_reflow: TerminalReflow = .none,
+        /// The caller's declared model for native width reflow. The default
+        /// rewraps with unbounded retention; `.none` declares a terminal
+        /// that never rewraps, and `.non_cursor_rows` with an exact
+        /// `scrollback_rows` states the real retention. See `TerminalReflow`.
+        terminal_reflow: TerminalReflow = .rewrapping,
         /// Hard bound on retained ledger bytes (copied rows waiting for
         /// a receipt). Exceeding it is `error.HistoryTooLarge`, never a
         /// silent drop.

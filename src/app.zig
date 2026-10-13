@@ -193,11 +193,11 @@ pub fn App(comptime Model: type) type {
             output: output.OutputQueue.Options = .{},
             /// What a width change does to the band's own content.
             resize_mode: ResizeMode = .append,
-            /// The terminal's declared reflow profile: exact capacity,
-            /// transcript tail and oldest-source eviction. The default
-            /// assumes nothing; a terminal whose trailing blanks are unused
-            /// padding must be declared as `.none`.
-            terminal_reflow: Region.TerminalReflow = .none,
+            /// The terminal's declared reflow profile. The default rewraps
+            /// non-cursor rows on a width change with unbounded retention,
+            /// as current terminals do; declare `.none` for a terminal that
+            /// never rewraps. See `Region.TerminalReflow`.
+            terminal_reflow: Region.TerminalReflow = .rewrapping,
         };
 
         const Self = @This();

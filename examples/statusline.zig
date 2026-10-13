@@ -54,14 +54,19 @@ var frame_anchor: ?component.Clock = null;
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
-    // Native opt-in declares exact capacity, unused terminal-generated tail
-    // padding and conforming oldest-source eviction; it is not auto-detected.
-    var terminal_reflow: Region.TerminalReflow = .none;
+    // The library default assumes a rewrapping terminal with unknown
+    // retention. `--terminal-scrollback-rows=N` states the real retention;
+    // `--terminal-reflow=none` declares a terminal that never rewraps.
+    var terminal_reflow: Region.TerminalReflow = .rewrapping;
     var args = std.process.Args.Iterator.init(init.minimal.args);
     defer args.deinit();
     _ = args.next();
     const capacity_arg = "--terminal-scrollback-rows=";
     while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--terminal-reflow=none")) {
+            terminal_reflow = .none;
+            continue;
+        }
         if (!std.mem.startsWith(u8, arg, capacity_arg)) return error.InvalidArgument;
         terminal_reflow = .{ .non_cursor_rows = .{
             .scrollback_rows = try std.fmt.parseInt(u32, arg[capacity_arg.len..], 10),

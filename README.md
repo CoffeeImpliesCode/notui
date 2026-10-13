@@ -422,12 +422,16 @@ visible row, so CNL reserves nothing once the band grows while it sits on the
 screen's last row. LF at the bottom scrolls instead, so the screen gives up rows
 at the top and the committed transcript above the band lands in scrollback.
 
-**Width-reflow limitation:** xterm can split and merge existing hard rows when its width changes,
-even with DECAWM disabled. That moves rows relative to the cursor without notifying `Region`.
-The cursor-relative band anchor can then miss old live rows, leaving stale content above it.
-The native probe in `zig-out/visual/stress/native-reflow-evidence.json` reproduces that movement
-without notui. It establishes the emulator behavior; it does not excuse the renderer's anchor
-assumption. Height-only coalescing is repaired separately from this width-reflow limitation.
+**Width reflow:** xterm.js, VTE, kitty, iTerm2, WezTerm, foot and tmux split and merge old hard
+rows when the width changes, even with DECAWM disabled, moving rows relative to the cursor
+without notifying `Region`. `Region.Options.terminal_reflow` (and `App.Options`) therefore
+defaults to `TerminalReflow.rewrapping`: the native model with unbounded scrollback retention,
+which projects the rows the terminal rewrapped and repaints the band from its real top.
+Declare `.non_cursor_rows` with the real retention when it is known, and `.none` for a terminal
+that never rewraps (classic xterm); the REPL and statusline examples take
+`--terminal-scrollback-rows=N` and `--terminal-reflow=none`. With `.none` in a rewrapping
+terminal a narrowed window leaves the band's old leading rows above it, as the 2026-10-13
+xterm.js captures in `zig-out/visual/complex-2026-10-13/ExamplesVisual/` show.
 Height restoration is repaired independently of width reflow. The old
 [`postfix-height-evidence.json`](zig-out/visual/final-qa-complete-1790888329357/postfix-height-evidence.json)
 shows four uncommitted popup-prefix rows that the shrink moved into scrollback and the
@@ -764,7 +768,7 @@ row 11. Three states have no PNG, so their buffer record is the only evidence; t
 
 #### Remaining risks
 
-- **Width reflow.** xterm splits and merges hard rows when the width changes, so the cursor-relative band anchor can miss old live rows and they survive above it. The emulator half is reproduced without notui in `zig-out/visual/stress/native-reflow-evidence.json`. No width round trip was captured after the physical-height repair, so its status is untested, and `consumer-evidence-summary.json` lists it under `knownFailures`.
+- **Width reflow.** Fixed by default since 2026-10-13: the rewrapping profile is the default (see [Erase discipline and multiplexers](#erase-discipline-and-multiplexers)). A terminal that never rewraps must declare `.none`, or narrowing walks the band top above its real rows.
 - **Height-restore cleanup waits for CPR.** The historical archived-popup residue is repaired
   by the existing retirement ledger, validated by the 2026-10-13 model and live captures
   above. A geometry change invalidates the old measured reach; retired rows can be visible
