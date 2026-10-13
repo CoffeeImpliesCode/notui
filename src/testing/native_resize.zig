@@ -3010,3 +3010,105 @@ test "native: idle clipped bands do not strand another copy" {
         try expectAnchored(&rig);
     }
 }
+
+const burst_title = "notui agent | turn 0 | ready";
+const burst_status = "Tab: /command or @file | ^Z undo | ^U kill | ^Y yank";
+const burst_hints = "Enter send  ^N newline  ^G approve  ^P help  ^O modal  ^R fold  " ++
+    "^X expand  ^T diff  ^C exit";
+
+fn drawBurstBand(rig: *Rig) !void {
+    rig.region.cur.clear();
+    const styled: Style = .{ .attrs = .{ .dim = true } };
+    _ = try rig.region.cur.draw(styled, burst_title, 0, 0);
+    _ = try rig.region.cur.draw(styled, "> ", 0, 1);
+    _ = try rig.region.cur.draw(.{ .attrs = .{ .reverse = true } }, " ", 2, 1);
+    _ = try rig.region.cur.draw(styled, burst_status, 0, 2);
+    _ = try rig.region.cur.draw(styled, burst_hints, 0, 3);
+}
+
+fn renderBurstFrame(rig: *Rig) !void {
+    rig.out.clearRetainingCapacity();
+    try rig.region.render(&rig.out.writer);
+    try testing.expect(std.mem.indexOf(u8, rig.out.written(), "\x1b[2J") == null);
+    try testing.expect(std.mem.indexOf(u8, rig.out.written(), "\x1b[3J") == null);
+    try rig.term.feed(rig.out.written());
+}
+
+fn expectAgentBurst(seed: u64) !void {
+    errdefer std.debug.print("agent burst seed: {d}\n", .{seed});
+    var rng = std.Random.DefaultPrng.init(seed);
+    const random = rng.random();
+    var rig = try Rig.init(testing.allocator, .{
+        .cols = 101,
+        .rows = 32,
+        .height = 4,
+        .mode = .append,
+        .scrollback = 1024,
+    });
+    defer rig.deinit();
+    const transcript = [_][]const u8{ "COMMITTED-0", "COMMITTED-1", "COMMITTED-2" };
+    try rig.commit(1, &transcript, .append);
+    try drawBurstBand(&rig);
+    try renderBurstFrame(&rig);
+    try rig.pump();
+    try testing.expectEqual(@as(usize, 91), burst_hints.len);
+    const Shape = struct { cols: u16, rows: u16 };
+    const reported = [_]Shape{
+        .{ .cols = 61, .rows = 32 }, .{ .cols = 41, .rows = 32 },
+        .{ .cols = 23, .rows = 32 }, .{ .cols = 101, .rows = 32 },
+        .{ .cols = 101, .rows = 5 }, .{ .cols = 101, .rows = 32 },
+        .{ .cols = 41, .rows = 5 },  .{ .cols = 101, .rows = 32 },
+        .{ .cols = 61, .rows = 5 },  .{ .cols = 23, .rows = 32 },
+        .{ .cols = 41, .rows = 5 },  .{ .cols = 101, .rows = 32 },
+        .{ .cols = 23, .rows = 5 },  .{ .cols = 101, .rows = 32 },
+    };
+    for (reported) |shape| {
+        try rig.observe(shape.cols, shape.rows);
+        try drawBurstBand(&rig);
+        try renderBurstFrame(&rig);
+        // Deliver replies after later geometry observations, preserving
+        // wire order. Some fresh reports coalesce with stale ones.
+        if (random.uintLessThan(u32, 4) == 0) try rig.pump();
+    }
+    const widths = [_]u16{ 101, 61, 41, 23 };
+    const heights = [_]u16{ 32, 5 };
+    for (0..64) |_| {
+        if (random.uintLessThan(u32, 4) == 0) try rig.pump();
+        try rig.observe(
+            widths[random.uintLessThan(usize, widths.len)],
+            heights[random.uintLessThan(usize, heights.len)],
+        );
+        // Skip composition in a coalesced burst, or paint while an old
+        // reply is still outstanding. Replies may land between frames.
+        if (random.boolean()) {
+            try drawBurstBand(&rig);
+            try renderBurstFrame(&rig);
+        }
+        if (random.uintLessThan(u32, 4) == 0) try rig.pump();
+    }
+    try rig.observe(101, 32);
+    try drawBurstBand(&rig);
+    for (0..16) |_| {
+        try renderBurstFrame(&rig);
+        try rig.pump();
+    }
+    try expectAnchored(&rig);
+    for (transcript) |row| try expectMarkerOnce(&rig, row);
+    try expectBandRow(&rig, 0, burst_title);
+    var counts: [4]usize = @splat(0);
+    for (0..rig.term.rows) |y| {
+        const text = try rig.textOf(rig.term.ybase + y);
+        defer rig.gpa.free(text);
+        for ([_][]const u8{ "notui agent", ">", "Tab:", "Enter" }, 0..) |marker, i| {
+            if (std.mem.indexOf(u8, text, marker) != null) counts[i] += 1;
+        }
+    }
+    try testing.expectEqualSlices(usize, &.{ 1, 1, 1, 1 }, &counts);
+    try renderBurstFrame(&rig);
+    try testing.expectEqual(@as(usize, 0), rig.out.written().len);
+}
+
+test "native: seeded App-like resize bursts settle after delayed CPR replies" {
+    const seeds = [_]u64{ 0, 1, 3, 7, 11, 19, 37, 61, 97, 149, 233, 317, 383, 431, 479, 511 };
+    for (seeds) |seed| try expectAgentBurst(seed);
+}
