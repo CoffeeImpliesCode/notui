@@ -62,9 +62,9 @@
 //!   height change is therefore tracked apart from `setHeight` (logical
 //!   only): the next frame re-bases the band on the cursor, erases
 //!   row-scoped the rows it still owns and gives up, and repaints ALL of
-//!   them. Only `min(painted_rows, terminal_rows)` rows of the old extent
-//!   are still cursor-reachable, the walk up to the re-based top stops
-//!   there, and no byte reaches a row above it.
+//!   them. The surviving extent is bounded by the viewport and, when
+//!   measured, the rows through the cursor. A clipped width change asks
+//!   CPR before repainting, so a cursor above the bottom loses no prefix.
 //!
 //!   The other side of the same fact: a band whose physical extent is
 //!   PAST the window has its top on the window's first row, and no row
@@ -353,9 +353,9 @@ pub const Region = struct {
         /// `.text` that keeps to the contract; it does not defend
         /// against one that does not.
         text: []const u8,
-        /// One hard-wrapped exact-layout terminal row. Written verbatim,
-        /// occupies exactly one row — the anchor shifts deterministically.
-        /// Must fit one row at the painted width and contain no newline or cursor controls.
+        /// Plain text, hard-wrapped at flush time to `width` terminal cells
+        /// under `Width.getMode`. Newlines start hard rows; a trailing newline
+        /// already terminates the final row. Contains no other cursor controls.
         line: []const u8,
     };
 
@@ -631,10 +631,10 @@ pub const Region = struct {
     /// height change is measured AGAINST, so a run of changes settles
     /// once, on the net difference (see `noteHeightChange`).
     painted_rows: u16 = 0,
-    /// A CPR measurement is owed. The query goes out AFTER the frame
-    /// has painted and parked, and only when the single query slot is
-    /// free, so an idle session never re-asks a terminal that is slow
-    /// to answer.
+    /// A CPR measurement is owed. Normally the query follows the paint
+    /// and park; a clipped width change measures before repainting.
+    /// The single query slot prevents repeated requests while a terminal
+    /// is slow to answer.
     anchor_dirty: bool = true,
     /// A width change / forced full redraw is due.
     width_dirty: bool = false,
@@ -663,7 +663,7 @@ pub const Region = struct {
     /// The outstanding query was asked under an older geometry
     /// generation: whatever it answers describes rows the region has
     /// stopped tracking, so the reply is discarded and one fresh
-    /// postpaint query replaces it.
+    /// query replaces it.
     query_stale: bool = false,
     /// The geometry generation every reply is judged against, and the
     /// one the last accepted reply actually measured. A report is only
@@ -832,6 +832,9 @@ pub const Region = struct {
         /// Owned row copies, in order.
         rows: [][]u8,
         bytes: usize,
+        /// Append queue boundary at submission. Only unwritten batches use it;
+        /// both queues settle together, so retained receipts need no rebasing.
+        appends_before: usize,
         acked: bool = false,
     };
 
@@ -1226,7 +1229,7 @@ pub const Region = struct {
     fn clipped(self: *const Region) Clip {
         if (self.term_rows == 0) return .{ .rows = 0, .chunks = 0 };
         const band = self.bandRows();
-        const budget = band -| @min(band, self.term_rows);
+        const budget = band -| self.reachableBandRows();
         var whole: u32 = 0;
         var walked: u32 = 0;
         while (whole < self.painted_rows and walked + self.bandRowRows(whole) <= budget) {
@@ -1235,6 +1238,17 @@ pub const Region = struct {
         }
         const cut = whole < self.painted_rows and walked < budget;
         return .{ .rows = whole, .chunks = if (cut) budget - walked else 0 };
+    }
+
+    /// A combined resize can leave the cursor above the viewport bottom:
+    /// multiplexers keep reflowed continuation rows below its hard row.
+    /// A measured cursor bounds the surviving prefix, not just winsize.
+    fn reachableBandRows(self: *const Region) u32 {
+        const rows: u32 = if (self.reach_known)
+            @as(u32, self.cursor_screen) + 1
+        else
+            self.term_rows;
+        return @min(self.bandRows(), rows);
     }
 
     /// Repack the band's own committed geometry for a width the terminal
@@ -1413,9 +1427,9 @@ pub const Region = struct {
     /// outstanding `ESC[6n`.
     ///
     /// The reply is the cursor's 1-indexed row as the terminal had it
-    /// WHEN IT ANSWERED, and the query is emitted after the frame has
-    /// painted and parked — so between frames that row IS the band
-    /// bottom and the band top is `painted_rows - 1` rows above it.
+    /// WHEN IT ANSWERED. Normally the query follows the paint and park.
+    /// A clipped width change measures the old bottom before repainting,
+    /// so its reachable extent can be retired without guessing.
     /// Every frame that committed while the reply was in flight pushed
     /// the cursor on, in order and through the same viewport clamps, so a
     /// late reply is transformed by that composition (`query_shift` and
@@ -1466,6 +1480,7 @@ pub const Region = struct {
         // nothing is measured: absolute placement stays unusable, and
         // the frame that re-creates a band is the one that asks again.
         if (self.painted_rows == 0) return;
+        self.cursor_off = @as(i32, @intCast(self.bandRows() -| 1));
         self.measured_gen = self.query_gen;
         self.reach_known = true;
     }
@@ -1595,6 +1610,7 @@ pub const Region = struct {
             .kind = batch.kind,
             .rows = rows,
             .bytes = total,
+            .appends_before = self.append_queue.items.len,
         });
         self.history_bytes += total;
         self.history_high = batch.id;
@@ -1723,6 +1739,8 @@ pub const Region = struct {
     /// sits at the band bottom (column 1 of the last row), which is
     /// exactly the row the query asks about, so a reply needs no
     /// correction for the frame that asked it. Allocation failure occurs before output.
+    /// Exception: a clipped width change stages only a prepaint CPR,
+    /// waits silently for its reply, then resumes the normal frame flow.
     /// A writer error preserves the committed frame and queued payloads, but `w` may hold
     /// a prefix. Retry only after discarding that staging; direct terminal output needs
     /// explicit recovery. Internal reusable capacity and preparation state may change.
@@ -1754,6 +1772,19 @@ pub const Region = struct {
         // An idle tick or a cursor measurement must not strand another copy.
         const band_work = diff != null or self.width_dirty or self.height_dirty or flush;
         if (covered and band_work) self.physical_dirty = true;
+        // Width reflow beside a physical clip can move the cursor above
+        // the new last row. Measure before repainting: the postpaint
+        // report cannot recover how many old prefix rows the walk lost.
+        // Keep the old snapshot/extent untouched while this query waits.
+        if (self.physical_dirty and self.width_dirty and !self.reach_known and
+            self.painted_rows > 0)
+        {
+            if (!self.query_outstanding) {
+                try emit.queryCursor(w);
+                self.takeQuery();
+            }
+            return;
+        }
         const changed = self.first_frame or self.width_dirty or self.height_dirty or
             flush or release or self.physical_dirty or (diff != null) or cursor_turn or retiring;
         // Nothing to say: an idle frame emits zero bytes, envelope
@@ -1904,13 +1935,13 @@ pub const Region = struct {
             // the only thing the pipe sees.
             for (self.history.items[at].rows) |row| try w.print("{s}\n", .{row});
         } else {
-            for (self.append_queue.items) |item| switch (item) {
-                .line => |l| try w.print("{s}\n", .{l}),
-                .text => |t| try w.print("{s}\n", .{t}),
-            };
+            var next: usize = 0;
             for (self.history.items[self.history_written..]) |b| {
+                try writePlainAppends(w, self.append_queue.items[next..b.appends_before]);
+                next = b.appends_before;
                 for (b.rows) |row| try w.print("{s}\n", .{row});
             }
+            try writePlainAppends(w, self.append_queue.items[next..]);
         }
         if (self.height > 0) {
             // A pipe never restyles, so nothing is tracked and no
@@ -1931,6 +1962,13 @@ pub const Region = struct {
         }
         self.history_written = 0;
         self.first_frame = false;
+    }
+
+    fn writePlainAppends(w: anytype, items: []const Append) !void {
+        for (items) |item| switch (item) {
+            .line => |l| try w.print("{s}\n", .{l}),
+            .text => |t| try w.print("{s}\n", .{t}),
+        };
     }
 
     /// Frame selection (B3 matrix). Priority: first > collapse >
@@ -1978,12 +2016,7 @@ pub const Region = struct {
         // rows, exactly where the settled content ends.
         const written = self.writtenRows();
         if (self.released and written > 0) try self.stepOffSettledRow(w, f);
-        if (self.pendingReplay() == null and self.append_queue.items.len > 0) {
-            try self.writeAppends(w, f);
-        }
-        if (self.history.items.len > self.history_written) {
-            try self.writeHistoryBatches(w, f);
-        }
+        try self.writeHistoryBatches(w, f);
         // `append_lines` governs the FIRST band only. A band re-created
         // after a release starts one row below the cursor, and that row
         // is settled content, so the reservation is mandatory: writing
@@ -2111,9 +2144,6 @@ pub const Region = struct {
             try emit.eraseToEnd(w);
         } else {
             try self.stepOffSettledRow(w, f);
-        }
-        if (self.pendingReplay() == null and self.append_queue.items.len > 0) {
-            try self.writeAppends(w, f);
         }
         try self.writeHistoryBatches(w, f);
         if (self.height > 0) {
@@ -2283,10 +2313,10 @@ pub const Region = struct {
     /// survives instead of diffing one — a diff reads those rows as
     /// unchanged and strands whatever scrolled in behind them.
     ///
-    /// The band re-bases on the CURSOR, which a shrink keeps on its own
-    /// the new height. The walk up starts from the topmost row the BAND
-    /// can still reach — `min(bandRows(), term_rows)` of them, which is
-    /// where the terminal's own viewport clamp stops it — so the erase
+    /// The band re-bases on the CURSOR, whose hard row a shrink keeps.
+    /// The walk reaches at most the band's projected extent or the
+    /// measured rows through that cursor (`term_rows` while unmeasured).
+    /// The erase
     /// that follows touches only rows the band owned, never a row above
     /// it: the transcript keeps its rows, the walk never reaches into
     /// scrollback, and a ledger that has grown above the band cannot
@@ -2303,7 +2333,6 @@ pub const Region = struct {
     /// here; every row it keeps is repainted. The frame ends parked on
     /// the owned bottom, as every other frame does.
     fn paintPhysical(self: *const Region, w: anytype, f: *Frame) !void {
-        const band = self.bandRows();
         // The re-base is about the BAND, never about the whole content
         // above it. `reachable` counts only rows the band owns, so the
         // walk up and the erases that follow can never reach a committed
@@ -2311,7 +2340,7 @@ pub const Region = struct {
         // physical clip into a transcript erase. Without a declared
         // native model `band` IS `painted_rows`, so this is the walk the
         // file has always made.
-        const reachable = @min(band, self.term_rows);
+        const reachable = self.reachableBandRows();
         try self.moveToBandTop(w, f, reachable);
         const released = reachable -| self.height;
         if (released > 0) {
@@ -2595,30 +2624,55 @@ pub const Region = struct {
         for (rows) |row| try self.stageTextRow(san, row);
     }
 
-    /// Write every queued item: text `\n` becomes `\r\n`, lines are
-    /// verbatim, each item is terminated with `\r\n`.
-    ///
-    /// Both kinds move the band top down by an exact count — one row for
-    /// a `.line`, one row per newline a `.text` carries plus the
-    /// terminator it adds — and every one of those rows joins the
-    /// ownership ledger with the geometry the terminal was given, at the
-    /// tail. That is what puts a later narrowing's projection of the
-    /// transcript on the same footing as the band's own: nothing above
-    /// the top carries a stored offset or a shift counter, so no stored
-    /// number can drift away from what the terminal really did. DECAWM is
-    /// off for the whole envelope, so a `.text` cannot soft-wrap behind
-    /// our back: `\r\n` is a hard row move whatever the caller's columns
-    /// hold. The row count is still the caller's to keep right (the
-    /// anchor is re-queried next frame).
-    fn writeAppends(self: *Region, w: anytype, f: *Frame) !void {
+    /// Allocation-free hard rows of a line append, shared by reservation
+    /// counting and emission so a retry and its ledger cannot disagree.
+    const LineRows = struct {
+        segments: std.mem.SplitIterator(u8, .scalar),
+        remaining: ?[]const u8 = null,
+        width: u16,
+        trailing: bool,
+
+        fn init(text: []const u8, columns: u16) LineRows {
+            return .{
+                .segments = std.mem.splitScalar(u8, text, '\n'),
+                .width = columns,
+                .trailing = std.mem.endsWith(u8, text, "\n"),
+            };
+        }
+
+        fn next(self: *LineRows) ?[]const u8 {
+            const segment = self.remaining orelse blk: {
+                const seg = self.segments.next() orelse return null;
+                // A final LF already terminates its preceding hard row.
+                if (seg.len == 0 and self.segments.index == null and self.trailing) return null;
+                break :blk seg;
+            };
+            var len = Width.fitPrefixLen(segment, self.width);
+            // A cluster wider than the whole band cannot be split. Consume
+            // it once, even at width zero, rather than stalling the iterator.
+            if (len == 0 and segment.len > 0) {
+                len = @max(1, Width.firstCellLen(segment));
+            }
+            self.remaining = if (len < segment.len) segment[len..] else null;
+            return segment[0..len];
+        }
+    };
+
+    /// Emit this submission-order slice of appends. Lines hard-wrap on cell
+    /// boundaries; text retains its caller-supplied row layout. Every CRLF
+    /// stages one ownership entry and charges one cursor move.
+    fn writeAppends(self: *Region, w: anytype, f: *Frame, items: []const Append) !void {
         var san: markdown.Sanitizer = .{};
-        for (self.append_queue.items) |item| {
+        for (items) |item| {
             switch (item) {
                 .line => |l| {
-                    try self.stageTextRow(&san, l);
-                    try w.writeAll(l);
-                    try w.writeAll("\r\n");
-                    f.down(1);
+                    var rows = LineRows.init(l, self.width);
+                    while (rows.next()) |row| {
+                        try self.stageTextRow(&san, row);
+                        try w.writeAll(row);
+                        try w.writeAll("\r\n");
+                        f.down(1);
+                    }
                 },
                 .text => |t| {
                     const trailing = std.mem.endsWith(u8, t, "\n");
@@ -2659,8 +2713,7 @@ pub const Region = struct {
         f.took_appends = true;
     }
 
-    /// Write the ledger above the band and return the number of rows
-    /// written (the exact anchor shift).
+    /// Merge queued appends and retained batches in submission order.
     ///
     /// A pending `.replay` restates the whole logical ledger, so it
     /// goes on the wire ALONE: the appends it supersedes are never
@@ -2693,10 +2746,14 @@ pub const Region = struct {
         }
         // The write cursor only advances on commit: a frame that fails
         // mid-ledger must leave every batch unwritten.
+        var next: usize = 0;
         for (self.history.items[self.history_written..]) |b| {
+            try self.writeAppends(w, f, self.append_queue.items[next..b.appends_before]);
+            next = b.appends_before;
             try self.stageRows(&san, b.rows);
             f.down(try writeRows(b.rows, w));
         }
+        try self.writeAppends(w, f, self.append_queue.items[next..]);
         f.took_history = true;
     }
 
@@ -2893,13 +2950,16 @@ pub const Region = struct {
     /// Rows the ledger bytes of the frame in flight will write above the
     /// band: the queued appends (or the replay that supersedes them) and
     /// the unwritten batches. Counted before the first byte so their
-    /// geometry has tape room; a `.text`'s internal newlines are hard row
-    /// moves, exactly as `writeAppends` writes them.
+    /// geometry has tape room. Lines use the emission iterator; a `.text`'s
+    /// internal newlines are hard row moves, exactly as `writeAppends` writes them.
     fn writtenRows(self: *const Region) usize {
         if (self.pendingReplay()) |at| return self.history.items[at].rows.len;
         var n: usize = 0;
         for (self.append_queue.items) |item| switch (item) {
-            .line => n += 1,
+            .line => |l| {
+                var rows = LineRows.init(l, self.width);
+                while (rows.next() != null) n += 1;
+            },
             .text => |t| n += std.mem.count(u8, t, "\n") +
                 @intFromBool(!std.mem.endsWith(u8, t, "\n")),
         };
@@ -3551,27 +3611,27 @@ pub const Region = struct {
         // frame settled, never latched by whichever call noticed.
         self.collapsed = self.height == 0 and self.painted_rows == 0;
         if (f.anchor_dirty) self.anchor_dirty = true;
-        if (f.query) {
-            // The slot is taken only now, after every byte of the frame
-            // that asks it is staged, and the transform starts from the
-            // whole viewport: the reply names a row the Region does not
-            // know, and the walk that follows is what places it.
-            self.anchor_dirty = false;
-            self.query_outstanding = true;
-            self.query_stale = false;
-            self.query_gen = self.geom_gen;
-            self.query_shift = 0;
-            self.query_low = 0;
-            self.query_high = if (self.term_rows == 0)
-                std.math.maxInt(i32)
-            else
-                @as(i32, self.term_rows) - 1;
-        }
+        if (f.query) self.takeQuery();
         if (f.replay) |at| self.applyReplay(at);
         if (f.took_history) self.history_written = self.history.items.len;
         // Infallible: `render` prepared the snapshot before a single
         // byte was staged, so this only publishes it.
         self.publishSnapshot();
+    }
+
+    /// Publish a query only after its complete bytes have been staged.
+    /// The same single slot serves prepaint and postpaint measurements.
+    fn takeQuery(self: *Region) void {
+        self.anchor_dirty = false;
+        self.query_outstanding = true;
+        self.query_stale = false;
+        self.query_gen = self.geom_gen;
+        self.query_shift = 0;
+        self.query_low = 0;
+        self.query_high = if (self.term_rows == 0)
+            std.math.maxInt(i32)
+        else
+            @as(i32, self.term_rows) - 1;
     }
 
     /// Move the band rows this frame released into the ownership ledger.
@@ -4994,6 +5054,155 @@ test "region: queued lines land above the band in order, each exactly once" {
     try testing.expectEqualStrings("aaa", term.text(3));
     for ([_][]const u8{ "one", "two", "three", "aaa" }) |row| {
         try testing.expectEqual(@as(usize, 1), rowsHolding(&term, row));
+    }
+}
+
+test "region: interleaved history and appends preserve submission order across frames" {
+    var r = try makeRegion(2, .{});
+    defer r.deinit();
+    try r.resize(10, Term.rows, 2);
+    try tagRows(&r.cur, 2, 'a');
+    var term: Term = .{};
+    var out: TestWriter = .{};
+    for (0..2) |frame| {
+        const id: u64 = @intCast(frame * 2 + 1);
+        try r.writeHistory(.{ .id = id, .rows = &.{"history-a"}, .kind = .append });
+        try r.append(.{ .line = "append-a" });
+        try r.writeHistory(.{ .id = id + 1, .rows = &.{"history-b"}, .kind = .append });
+        try r.append(.{ .line = "append-b" });
+        out.init();
+        try r.render(&out.w);
+        term.feed(out.bytes());
+        for ([_][]const u8{ "history-a", "append-a", "history-b", "append-b" }, 0..) |row, y| {
+            try testing.expectEqualStrings(row, term.text(frame * 4 + y));
+        }
+        try expectLabel(&term, frame * 4 + 4, 'a', 0);
+        try expectLabel(&term, frame * 4 + 5, 'a', 1);
+        // Leave the first frame's receipts retained while queue indices reset.
+        try testing.expectEqual(@as(usize, frame * 2 + 2), r.history_written);
+        try answerQuery(&r, &term);
+    }
+    try testing.expectEqualSlices(u64, &.{ 1, 2, 3, 4 }, r.acknowledgeDrained());
+    out.init();
+    try r.render(&out.w);
+    try testing.expectEqualStrings("", out.bytes());
+}
+
+test "region: interleaved submission retry preserves both queues and screen order" {
+    var r = try makeRegion(1, .{});
+    defer r.deinit();
+    try drawRow(&r.cur, 0, "band");
+    try r.writeHistory(.{ .id = 1, .rows = &.{"card"}, .kind = .append });
+    try r.append(.{ .line = "next" });
+    var short: [24]u8 = undefined;
+    var failed: std.Io.Writer = .fixed(&short);
+    try testing.expectError(error.WriteFailed, r.render(&failed));
+    try testing.expectEqual(@as(usize, 0), r.history_written);
+    try testing.expectEqual(@as(usize, 1), r.append_queue.items.len);
+    var out: TestWriter = .{};
+    out.init();
+    try r.render(&out.w);
+    var term: Term = .{};
+    term.feed(out.bytes());
+    try testing.expectEqualStrings("card", term.text(0));
+    try testing.expectEqualStrings("next", term.text(1));
+    try testing.expectEqualStrings("band", term.text(2));
+}
+
+test "region: piped interleaved submissions preserve order" {
+    var r = try makeRegion(1, .{ .interactive = false });
+    defer r.deinit();
+    try r.resize(4, Term.rows, 1);
+    try drawRow(&r.cur, 0, "band");
+    try r.writeHistory(.{ .id = 1, .rows = &.{"card"}, .kind = .append });
+    try r.append(.{ .line = "next" });
+    try r.writeHistory(.{ .id = 2, .rows = &.{"diff"}, .kind = .append });
+    try r.append(.{ .text = "last" });
+    var out: TestWriter = .{};
+    out.init();
+    try r.render(&out.w);
+    try testing.expectEqualStrings("card\nnext\ndiff\nlast\nband\n", out.bytes());
+}
+
+test "region: long line appends hard wrap with exact ledger and next frame anchor" {
+    var r = try makeNativeRegion(2, .{}, 100);
+    defer r.deinit();
+    try r.resize(10, Term.rows, 2);
+    try tagRows(&r.cur, 2, 'a');
+    try r.append(.{ .line = "ABCDEFGHIJKLMNOPQRSTUVWXY" });
+    var out: TestWriter = .{};
+    out.init();
+    try r.render(&out.w);
+    var term: Term = .{};
+    term.feed(out.bytes());
+    try testing.expectEqualStrings("ABCDEFGHIJ", term.text(0));
+    try testing.expectEqualStrings("KLMNOPQRST", term.text(1));
+    try testing.expectEqualStrings("UVWXY", term.text(2));
+    try expectLabel(&term, 3, 'a', 0);
+    try expectLabel(&term, 4, 'a', 1);
+    try testing.expectEqual(@as(usize, 3), r.pending_owned.items.len);
+    for ([_]u16{ 10, 10, 5 }, r.pending_owned.items) |columns, row| {
+        try testing.expectEqual(.committed, row.kind);
+        try testing.expectEqual(columns, row.fp.columns);
+    }
+    try testing.expectEqual(@as(u16, 4), r.cursor_screen);
+    try testing.expectEqual(@as(usize, 3), r.pending_rows);
+    try answerQuery(&r, &term);
+    try testing.expectEqual(@as(u16, 4), r.anchorRow());
+    try drawRow(&r.cur, 1, "ZZ");
+    out.init();
+    try r.render(&out.w);
+    term.feed(out.bytes());
+    try testing.expectEqualStrings("ABCDEFGHIJ", term.text(0));
+    try testing.expectEqualStrings("KLMNOPQRST", term.text(1));
+    try testing.expectEqualStrings("UVWXY", term.text(2));
+    try expectLabel(&term, 3, 'a', 0);
+    try testing.expectEqualStrings("ZZ", term.text(4));
+    try testing.expectEqual(@as(usize, 4), term.row);
+    try testing.expectEqual(@as(usize, 0), term.col);
+    out.init();
+    try r.render(&out.w);
+    try testing.expectEqualStrings("", out.bytes());
+}
+
+test "region: line append newlines split rows without raw LF or phantom trailing row" {
+    var r = try makeNativeRegion(1, .{}, 100);
+    defer r.deinit();
+    try r.resize(4, Term.rows, 1);
+    try drawRow(&r.cur, 0, "band");
+    try r.append(.{ .line = "abcdef\n\nxy\n" });
+    var out: TestWriter = .{};
+    out.init();
+    try r.render(&out.w);
+    var term: Term = .{};
+    term.feed(out.bytes());
+    for ([_][]const u8{ "abcd", "ef", "", "xy", "band" }, 0..) |row, y| {
+        try testing.expectEqualStrings(row, term.text(y));
+    }
+    try testing.expectEqual(@as(usize, 4), r.pending_rows);
+    try testing.expectEqual(@as(u16, 4), r.cursor_screen);
+}
+
+test "region: line hard wrapping follows terminal cell mode and wide cluster boundaries" {
+    const saved = Width.getMode();
+    defer Width.setMode(saved);
+    for ([_]Width.Mode{ .grapheme, .codepoint }) |mode| {
+        Width.setMode(mode);
+        var r = try makeNativeRegion(1, .{}, 100);
+        defer r.deinit();
+        try r.resize(3, Term.rows, 1);
+        try r.append(.{ .line = "ab界e\u{301}👨‍🌾!" });
+        var out: TestWriter = .{};
+        out.init();
+        try r.render(&out.w);
+        const expected = if (mode == .grapheme)
+            "ab\r\n界e\u{301}\r\n👨‍🌾!\r\n"
+        else
+            "ab\r\n界e\u{301}\r\n👨‍\r\n🌾!\r\n";
+        try testing.expect(std.mem.indexOf(u8, out.bytes(), expected) != null);
+        const rows: usize = if (mode == .grapheme) 3 else 4;
+        try testing.expectEqual(rows, r.pending_rows);
+        try testing.expectEqual(@as(u16, @intCast(rows)), r.cursor_screen);
     }
 }
 

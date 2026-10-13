@@ -854,6 +854,14 @@ const Rig = struct {
         try self.region.render(&self.out.writer);
         try self.term.feed(self.out.written());
         try self.pump();
+        // A clipped width change first measures the terminal's actual
+        // cursor. Answer that prepaint query, then complete its repaint.
+        if (self.region.width_dirty and self.region.physical_dirty and self.region.reach_known) {
+            const from = self.out.written().len;
+            try self.region.render(&self.out.writer);
+            try self.term.feed(self.out.written()[from..]);
+            try self.pump();
+        }
     }
 
     /// Route the terminal's own CPR replies into the Region, in the order
@@ -2050,6 +2058,96 @@ test "height restore: returned popup prefix closes the gap above the live band" 
         for (popup[1..9]) |row| try expectRetiredGone(&rig, row);
         try expectBandRow(&rig, 0, popup[0]);
         try expectBandRow(&rig, 1, popup[9]);
+        try testing.expect(std.mem.indexOf(u8, rig.out.written(), "\x1b[2J") == null);
+        try testing.expect(std.mem.indexOf(u8, rig.out.written(), "\x1b[3J") == null);
+        try rig.render();
+        try testing.expectEqual(@as(usize, 0), rig.out.written().len);
+    }
+}
+
+test "native: dismissed popup prefix is cleaned after a combined width and height restore" {
+    for ([_]bool{ false, true }) |cursor_reflows| {
+        var rig = try Rig.init(testing.allocator, .{
+            .cols = 101,
+            .rows = 31,
+            .height = 2,
+        });
+        defer rig.deinit();
+        const status = "Enter: eval · ↑/↓: history · ^C: clear (quit while eval) · ^D/q: quit";
+        const popup = [_][]const u8{
+            "skript>str",    "string!=",        "string->list",    "string->number",    "string->symbol",
+            "string-append", "string-byte-ref", "string-downcase", "string-ends-with?", status,
+        };
+        try rig.draw(&.{ "skript>", status });
+        try rig.render();
+        try rig.commit(1, &.{"COMMITTED"}, .append);
+        try rig.setHeight(10);
+        try rig.draw(&popup);
+        try rig.render();
+
+        try rig.term.resize(34, 7);
+        if (cursor_reflows) {
+            // Live tmux retains two status continuations below its hard
+            // cursor row. Its viewport advances two extra rows and CPR
+            // reports row 5, not the viewport's last row (7). Model that
+            // observed viewport transform independently of Region.
+            rig.term.ybase += 2;
+            rig.term.y -= 2;
+            while (rig.term.lines.items.len < rig.term.ybase + rig.term.rows) {
+                try rig.term.appendLine();
+            }
+        }
+        try rig.region.resize(34, 7, 7);
+        try rig.draw(&.{ popup[0], popup[1], popup[2], popup[3], popup[4], popup[5], status });
+        // Query staging is transactional and must not publish the new
+        // snapshot before the measured physical repaint.
+        var tiny: [2]u8 = undefined;
+        var failed = std.Io.Writer.fixed(&tiny);
+        try testing.expectError(error.WriteFailed, rig.region.render(&failed));
+        try testing.expect(!rig.region.query_outstanding);
+        try testing.expectEqual(@as(u16, 10), rig.region.painted_rows);
+        rig.out.clearRetainingCapacity();
+        try rig.region.render(&rig.out.writer);
+        try testing.expectEqualStrings("\x1b[6n", rig.out.written());
+        try testing.expectEqual(@as(u16, 10), rig.region.prev.height);
+        rig.out.clearRetainingCapacity();
+        try rig.region.render(&rig.out.writer);
+        try testing.expectEqual(@as(usize, 0), rig.out.written().len);
+        try rig.term.feed("\x1b[6n");
+        try rig.pump();
+        try rig.render();
+        try expectMarkerOnce(&rig, "COMMITTED");
+        try rig.setHeight(2);
+        try rig.draw(&.{ popup[0], status });
+        try rig.render();
+
+        try rig.term.resize(101, 31);
+        // xterm's no-pull growth keeps the retired prefix in scrollback.
+        // It cannot be erased there, but must remain tracked for a later
+        // terminal/multiplexer exposure rather than becoming committed.
+        try rig.region.resize(101, 31, 2);
+        try rig.draw(&.{ popup[0], status });
+        try rig.render();
+        try rig.render();
+        try testing.expectEqual(@as(usize, 2), try rig.countRows(popup[0]));
+        try testing.expect((try rig.indexOfRow(popup[0])).? < rig.term.ybase);
+        try expectMarkerOnce(&rig, "COMMITTED");
+        try rig.render();
+        try testing.expectEqual(@as(usize, 0), rig.out.written().len);
+
+        // A multiplexer exposes that prefix even though the cursor
+        // stopped at the short band's bottom before the growth.
+        const pulled = rig.term.ybase;
+        rig.term.ybase = 0;
+        rig.term.y += pulled;
+        try rig.region.reanchor();
+        try rig.render();
+        try rig.render();
+        try expectAnchored(&rig);
+        try expectMarkerOnce(&rig, "COMMITTED");
+        try expectMarkerOnce(&rig, popup[0]);
+        for (popup[1..9]) |row| try expectRetiredGone(&rig, row);
+        try expectBandRow(&rig, 0, popup[0]);
         try testing.expect(std.mem.indexOf(u8, rig.out.written(), "\x1b[2J") == null);
         try testing.expect(std.mem.indexOf(u8, rig.out.written(), "\x1b[3J") == null);
         try rig.render();

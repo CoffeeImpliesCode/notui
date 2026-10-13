@@ -357,6 +357,14 @@ retained batch storage. Finality is a product decision, not a row leaving
 the viewport. Resize modes `append`, `rebuild` and `preserve` change the
 live band without rewriting committed history.
 
+Queued appends and history batches appear above the band in application submission
+order, including when one frame flushes interleaved submissions. A pending replay
+still supersedes all queued appends and other unwritten batches. `.line` appends
+(`Context.appendAbove` and `Cmd.println`) hard-wrap at the current band width when
+flushed, at terminal cell boundaries under `width.getMode`. Embedded newlines
+start hard rows; a trailing newline terminates the final row without adding another
+blank row. Every emitted row is included in cursor and ownership-ledger accounting.
+
 ### Physical height changes
 
 A terminal loses rows without the app asking. A resize makes the screen
@@ -368,9 +376,14 @@ paints from a screen that no longer exists.
 `resize` records that it happened and the next frame takes the `physical`
 strategy (`src/region.zig`) instead of diffing:
 
-- the walk up to the re-based band top stops at
-  `min(painted_rows, terminal_rows)` rows, so no byte reaches a row above
-  the band and the transcript is never touched;
+- when width reflow accompanies a physical clip, a fresh CPR is requested
+  **before repainting**. Until it arrives, no band bytes or snapshot changes
+  are published. Multiplexers can leave cursor-row continuations below the
+  cursor, so the new viewport's last row is not a safe cursor estimate;
+- the walk up to the re-based band top stops at the band's projected extent
+  or the measured rows through the cursor, whichever is smaller. Without a
+  measured cursor it is bounded by `terminal_rows`. The retirement count uses
+  the same bound, so no clipped prefix row loses its ownership;
 - the band re-anchors on the cursor and repaints **every surviving row**,
   not just the ones `prev` disagrees about;
 - the rows the band gives up while the screen still shows them are

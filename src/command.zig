@@ -59,8 +59,11 @@ pub fn Cmd(comptime Msg: type) type {
         /// Dispatch `msg` immediately: `update` is re-entered within this
         /// tick and the command it returns is processed next.
         msg: Msg,
-        /// Append `text` above the band into scrollback as one plain line,
-        /// forcing a render this frame.
+        /// Append `text` above the band into scrollback in submission order with
+        /// history batches, forcing a render this frame. At flush time lines
+        /// hard-wrap at the band width on terminal cell boundaries under
+        /// `width.getMode`; embedded newlines start rows (a trailing newline
+        /// already terminates the last row). No other cursor controls are allowed.
         ///
         /// The queue borrows `text`: it must stay alive and unchanged until
         /// the region has flushed that line or the session ends, and a frame
