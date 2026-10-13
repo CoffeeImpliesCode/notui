@@ -1287,7 +1287,7 @@ fn drawBand(
     // recall can put the cursor on any of them.
     const cursor_at = @min(cursor, line.len);
     const active_off = if (std.mem.findScalarLast(u8, line[0..cursor_at], '\n')) |nl| nl + 1 else 0;
-    const active_end = if (std.mem.indexOfScalarPos(u8, line, cursor_at, '\n')) |nl| nl else line.len;
+    const active_end = if (std.mem.findScalarPos(u8, line, cursor_at, '\n')) |nl| nl else line.len;
     const active = line[active_off..active_end];
     const prompt = if (active_off > 0) cont_prompt else prompt_text;
     const multiline = std.mem.indexOfScalar(u8, line, '\n') != null;

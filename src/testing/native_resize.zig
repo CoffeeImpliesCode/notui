@@ -99,6 +99,7 @@ const Region = @import("../region.zig").Region;
 const ResizeMode = @import("../region.zig").ResizeMode;
 const HistoryBatch = @import("../region.zig").HistoryBatch;
 const Style = @import("../style.zig").Style;
+const Buffer = @import("../buffer.zig").Buffer;
 
 const testing = std.testing;
 
@@ -2388,7 +2389,7 @@ test "native: default App spinner frames preserve the counter band through width
         pub fn view(_: *const Self, _: *app_mod.Context) app_mod.View(Self) {
             return .{ .height = 3, .draw = draw };
         }
-        fn draw(self: *Self, _: *app_mod.Context, buf: *@import("../buffer.zig").Buffer) !void {
+        fn draw(self: *Self, _: *app_mod.Context, buf: *Buffer) !void {
             const cyan: Style = .{ .fg = .{ .ansi = .cyan } };
             _ = try buf.draw(cyan, "count: 0   [i]nc [d]ec [q]uit", 0, 0);
             const spinner = if (self.tick % 2 == 0) "| working" else "/ working";
@@ -2398,8 +2399,9 @@ test "native: default App spinner frames preserve the counter band through width
         }
     };
     const Sink = struct {
+        const Self = @This();
         term: *Model,
-        pub fn tryWrite(self: *@This(), bytes: []const u8) error{WriteFailed}!usize {
+        pub fn tryWrite(self: *Self, bytes: []const u8) error{WriteFailed}!usize {
             self.term.feed(bytes) catch return error.WriteFailed;
             return bytes.len;
         }

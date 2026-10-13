@@ -173,6 +173,7 @@ pub const Model = struct {
         self.keymap.deinit();
         self.completion_scratch.deinit(gpa);
         C.cards.deinitHunks(gpa, &self.hunks);
+        self.* = undefined;
     }
 
     fn addLine(self: *Model) !void {
