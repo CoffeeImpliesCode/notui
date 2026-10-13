@@ -115,6 +115,54 @@ pub const Buffer = struct {
         pub fn paints(self: Slot) bool {
             return !self.meta.wide and self.meta.len != 0 and !self.isBlank();
         }
+
+        /// Meta bits of a slot with cold data.
+        pub const cold: u32 = @bitCast(Meta{ .len = 0, .borrowed = true, .link = true });
+        /// Meta bit of a slot whose grapheme is in `text`.
+        pub const borrowed_bit: u32 = @bitCast(Meta{ .len = 0, .borrowed = true });
+        /// Meta bit of a slot that bit equality does not settle.
+        pub const deep_bit: u32 = @bitCast(Meta{ .len = 0, .deep = true });
+
+        /// The indices of `slots` whose meta has a bit of `mask`, found
+        /// eight slots per step: the eight meta words are gathered from
+        /// one 128-byte load with a shuffle and tested at once, so a run
+        /// of slots without the flags costs one compare per eight.
+        pub const Flagged = struct {
+            slots: []const Slot,
+            mask: u32,
+            chunk: usize = 0,
+            hits: u8 = 0,
+            at: usize = 0,
+
+            pub fn next(self: *Flagged) ?usize {
+                while (self.hits == 0) {
+                    if (self.chunk >= self.slots.len) return null;
+                    self.at = self.chunk;
+                    const rest = self.slots[self.chunk..];
+                    if (rest.len >= 8) {
+                        self.hits = metaHits(rest[0..8], self.mask);
+                        self.chunk += 8;
+                    } else {
+                        for (rest, 0..) |s, k| {
+                            if (@as(u32, @bitCast(s.meta)) & self.mask != 0) {
+                                self.hits |= @as(u8, 1) << @intCast(k);
+                            }
+                        }
+                        self.chunk = self.slots.len;
+                    }
+                }
+                const k = @ctz(self.hits);
+                self.hits &= self.hits - 1;
+                return self.at + k;
+            }
+
+            fn metaHits(chunk: *const [8]Slot, mask: u32) u8 {
+                const words: @Vector(32, u32) = @as(*const [32]u32, @ptrCast(chunk)).*;
+                const metas = @shuffle(u32, words, undefined, [8]i32{ 1, 5, 9, 13, 17, 21, 25, 29 });
+                const hit = metas & @as(@Vector(8, u32), @splat(mask)) != @as(@Vector(8, u32), @splat(0));
+                return @bitCast(hit);
+            }
+        };
     };
 
     /// Bytes one cell takes across the three arrays.
@@ -179,9 +227,11 @@ pub const Buffer = struct {
     fn copyRun(self: *Buffer, src: *const Buffer, at: usize, from: usize, n: usize) void {
         @memcpy(self.slots[at..][0..n], src.slots[from..][0..n]);
         if (!src.any_cold) return;
-        for (src.slots[from..][0..n], 0..) |s, i| {
-            if (s.meta.borrowed) self.text[at + i] = src.text[from + i];
-            if (s.meta.link) self.links[at + i] = src.links[from + i];
+        var cold: Slot.Flagged = .{ .slots = src.slots[from..][0..n], .mask = Slot.cold };
+        while (cold.next()) |i| {
+            const m = src.slots[from + i].meta;
+            if (m.borrowed) self.text[at + i] = src.text[from + i];
+            if (m.link) self.links[at + i] = src.links[from + i];
         }
     }
 
@@ -440,7 +490,7 @@ pub const Buffer = struct {
     /// Does not retain the writer or modify either grid. Writer failure may emit a prefix;
     /// discard staged output or restore the terminal before retrying.
     pub fn renderDiff(self: *const Buffer, prev: *const Buffer, w: anytype) !void {
-        var styles: SgrCache = .{};
+        var styles: SgrCache = .empty();
         var tracked: Emitted = default_style;
         var cur_row: usize = 0;
         const rows: usize = self.height;
@@ -475,7 +525,7 @@ pub const Buffer = struct {
     /// Does not retain the writer or modify the grid. Writer failure may emit a prefix;
     /// discard staged output or restore the terminal before retrying.
     pub fn renderAll(self: *const Buffer, w: anytype) !void {
-        var styles: SgrCache = .{};
+        var styles: SgrCache = .empty();
         var tracked: Emitted = default_style;
         const rows: usize = self.height;
         for (0..rows) |y| {
@@ -518,8 +568,9 @@ pub const Buffer = struct {
         if (!self.any_deep) return false;
         const base = y * @as(usize, self.width);
         const prev_base = y * @as(usize, prev.width);
-        for (cur, 0..) |s, x| {
-            if (s.meta.deep and !self.deepEqual(base + x, prev, prev_base + x)) return true;
+        var deep: Slot.Flagged = .{ .slots = cur, .mask = Slot.deep_bit };
+        while (deep.next()) |x| {
+            if (!self.deepEqual(base + x, prev, prev_base + x)) return true;
         }
         return false;
     }
@@ -1054,12 +1105,27 @@ comptime {
 /// stale — a key is a function of the style alone, never of borrowed
 /// bytes. One cache per frame means there is nothing to persist and
 /// nothing to invalidate.
+///
+/// Start one with `empty()`: only the occupancy mask is initialized, so a
+/// frame does not pay to clear 1.5 KiB of slots it may never touch.
 const SgrCache = struct {
-    used: [sgr_cache_slots]bool = @splat(false),
-    from_keys: [sgr_cache_slots]u64 = undefined,
-    to_keys: [sgr_cache_slots]u64 = undefined,
-    lens: [sgr_cache_slots]u8 = undefined,
-    bytes: [sgr_cache_slots][max_sgr_bytes]u8 = undefined,
+    used: SlotMask,
+    from_keys: [sgr_cache_slots]u64,
+    to_keys: [sgr_cache_slots]u64,
+    lens: [sgr_cache_slots]u8,
+    bytes: [sgr_cache_slots][max_sgr_bytes]u8,
+
+    const SlotMask = std.meta.Int(.unsigned, sgr_cache_slots);
+
+    fn empty() SgrCache {
+        var cache: SgrCache = undefined;
+        cache.used = 0;
+        return cache;
+    }
+
+    fn bit(slot: usize) SlotMask {
+        return @as(SlotMask, 1) << @intCast(slot);
+    }
 
     /// Move the terminal from `tracked.*` to `to`, writing nothing when
     /// the two already describe the same bytes on the wire.
@@ -1077,7 +1143,7 @@ const SgrCache = struct {
     }
 
     fn holds(self: *const SgrCache, slot: usize, from: Emitted, to: Emitted) bool {
-        return self.used[slot] and
+        return self.used & bit(slot) != 0 and
             self.from_keys[slot] == from.key and
             self.to_keys[slot] == to.key;
     }
@@ -1087,7 +1153,7 @@ const SgrCache = struct {
         self.lens[slot] = len;
         self.from_keys[slot] = from.key;
         self.to_keys[slot] = to.key;
-        self.used[slot] = true;
+        self.used |= bit(slot);
     }
 
     /// The bucket a transition lands in. Only the choice is hashed; the
@@ -1274,6 +1340,30 @@ test "buffer: get is bounds-checked, set out of bounds is a no-op" {
     try buf.set(0, 99, .{ .grapheme = "z" });
     try std.testing.expect(buf.get(0, 0).eql(Cell{}));
     try std.testing.expect(buf.get(5, 2).eql(Cell{}));
+}
+
+test "buffer: the eight-slot flag scan finds exactly the flagged slots" {
+    // Lengths around the eight-slot step, a flag pattern that hits chunk
+    // edges and the scalar tail.
+    var slots: [40]Buffer.Slot = undefined;
+    for (0..slots.len + 1) |len| {
+        for (slots[0..len], 0..) |*s, i| {
+            s.* = Buffer.Slot.blank;
+            s.meta.borrowed = i % 7 == 0 or i % 8 == 7;
+            s.meta.deep = i % 5 == 3;
+        }
+        for ([_]u32{ Buffer.Slot.borrowed_bit, Buffer.Slot.deep_bit }) |mask| {
+            var it: Buffer.Slot.Flagged = .{ .slots = slots[0..len], .mask = mask };
+            var want: usize = 0;
+            while (it.next()) |i| : (want += 1) {
+                while (@as(u32, @bitCast(slots[want].meta)) & mask == 0) want += 1;
+                try std.testing.expectEqual(want, i);
+            }
+            while (want < len) : (want += 1) {
+                try std.testing.expect(@as(u32, @bitCast(slots[want].meta)) & mask == 0);
+            }
+        }
+    }
 }
 
 test "buffer: set/get round-trip" {

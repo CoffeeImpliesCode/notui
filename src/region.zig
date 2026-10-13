@@ -3834,9 +3834,12 @@ pub const Region = struct {
         // Only borrowed graphemes are copied: one-byte ASCII and empty
         // cells are stored by value, so a mostly-ASCII frame pays almost
         // no per-cell allocation.
-        for (self.cur.slots, self.cur.text) |s, text| {
-            if (!s.meta.borrowed) continue;
-            self.snapshot_cells.appendAssumeCapacity(try arena.dupe(u8, text));
+        var borrowed: Buffer.Slot.Flagged = .{
+            .slots = self.cur.slots,
+            .mask = Buffer.Slot.borrowed_bit,
+        };
+        while (borrowed.next()) |i| {
+            self.snapshot_cells.appendAssumeCapacity(try arena.dupe(u8, self.cur.text[i]));
         }
     }
 
@@ -3856,11 +3859,16 @@ pub const Region = struct {
         // Every borrowed grapheme takes its prepared copy, in the order
         // `prepareSnapshot` made them.
         var next: usize = 0;
-        if (self.prev.any_cold) for (self.prev.slots, self.prev.text) |s, *text| {
-            if (!s.meta.borrowed) continue;
-            text.* = self.snapshot_cells.items[next];
-            next += 1;
-        };
+        if (self.prev.any_cold) {
+            var borrowed: Buffer.Slot.Flagged = .{
+                .slots = self.prev.slots,
+                .mask = Buffer.Slot.borrowed_bit,
+            };
+            while (borrowed.next()) |i| {
+                self.prev.text[i] = self.snapshot_cells.items[next];
+                next += 1;
+            }
+        }
         std.mem.swap(std.heap.ArenaAllocator, &self.prev_text, &self.snapshot_scratch);
     }
 
