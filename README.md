@@ -246,15 +246,15 @@ declarations were rejected by their intended guards. All six registered roots
 generated documentation. An external caller named `Buffer.RowFootprint` and its
 `NullGap`, then called the allocator-first footprint API.
 
-**Analyzer assessment, refreshed 2026-10-13 at `22e88c5cbd8b`:** all 126 diagnostic
-occurrences were reviewed. There are 75 false positives and 51 intentional test
+**Analyzer assessment, refreshed 2026-10-13 at `6a09ae304673`:** all 136 diagnostic
+occurrences were reviewed. There are 78 false positives and 58 intentional test
 assertions. No reported finding exposed a confirmed runtime defect.
 
 | Analyzer report | Count | Assessment |
 |---|---:|---|
 | ziglint: public type exposure | 4 | `Buffer.RowFootprint` is public |
 | ziglint: incomplete disposal | 1 | Test fixture frees its buffer and retains its observation counter |
-| zwanzig: optional unwrap | 109 | 58 guarded or constructed values, 51 intentional test assertions |
+| zwanzig: optional unwrap | 119 | 61 guarded or constructed values, 58 intentional test assertions |
 | zwanzig: resource store | 11 | Arena-owned allocations, a loop-scoped `defer`, and test helpers closing raw descriptors |
 | zwanzig: identifier style | 1 | `View.DrawError` is a type alias |
 
