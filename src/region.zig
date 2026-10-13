@@ -493,8 +493,8 @@ pub const Region = struct {
     /// How a frame hands the rows it took off the TOP of the band to the
     /// ownership ledger above it.
     const LedgerOut = struct {
-        /// Old band rows that are now above the new band top, so no
-        /// longer the band's: `painted_rows - height`.
+        /// Old logical band rows whose source this frame copies into
+        /// the ledger. A physical re-base copies only its clipped prefix.
         rows: u32,
         /// How many of THOSE are out of reach, taken from the band's TOP.
         /// They are the band's own uncommitted text — a terminal that
@@ -513,6 +513,11 @@ pub const Region = struct {
         /// re-base erased over, or committed history a `.rebuild` left
         /// in the transcript.
         settled: enum { blank, committed } = .blank,
+        /// Exact visible physical rows erased ABOVE the new band top by
+        /// a physical re-base. These can span several logical rows even
+        /// when the clip cuts inside the first one; their blank gap is
+        /// independent of the logical prefix whose source is retired.
+        erased_rows: ?u32 = null,
         /// Physical chunks the LAST settled band row keeps, when a
         /// `.rebuild` handed over the whole old extent: the cursor's own
         /// row is the one the repaint overwrites, so it never settles,
@@ -2387,16 +2392,13 @@ pub const Region = struct {
         // chunk counts, and a cut that falls inside a band row counts
         // that row once and hands over only the chunks above the cut.
         const clip = self.clipped();
-        const leaving = @max(
-            self.painted_rows -| self.height,
-            clip.rows + @intFromBool(clip.chunks > 0),
-        );
-        if (leaving > 0) {
+        const leaving = clip.rows + @intFromBool(clip.chunks > 0);
+        if (leaving > 0 or released > 0) {
             f.ledger_out = .{
                 .rows = leaving,
-                .retired_rows = @min(clip.rows, leaving),
+                .retired_rows = clip.rows,
                 .retired_chunks = clip.chunks,
-                .settled = .blank,
+                .erased_rows = released,
             };
         }
         f.anchor_dirty = true;
@@ -2896,7 +2898,11 @@ pub const Region = struct {
         // ledger; nothing else can. Their geometry is already recorded,
         // so their share of the tapes is copied, not re-measured.
         const hand_over: usize = switch (strategy) {
-            .physical, .resize, .collapse => self.painted_rows,
+            .physical => blk: {
+                const clip = self.clipped();
+                break :blk clip.rows + @intFromBool(clip.chunks > 0);
+            },
+            .resize, .collapse => self.painted_rows,
             else => 0,
         };
         // Rows written above the band, rows handed over, one blank run
@@ -2914,11 +2920,12 @@ pub const Region = struct {
         // Reserve their actual tape spans, not a bound from the new width.
         var handed_wide: usize = 0;
         var handed_gaps: usize = 0;
-        if (hand_over > 0) for (self.band_fp.items) |row| {
+        const copied = self.band_fp.items[0..@min(hand_over, self.band_fp.items.len)];
+        for (copied) |row| {
             if (row.rows == 0) continue;
             handed_wide += row.fp.wide_count;
             handed_gaps += row.fp.null_count;
-        };
+        }
         const emitted_room = (@as(usize, self.cur.width) / 2 + 1) * written;
         try self.wide_tape.ensureUnusedCapacity(
             self.gpa,
@@ -3649,11 +3656,11 @@ pub const Region = struct {
     ///
     /// A native band row can be several physical rows tall, and a clip
     /// boundary can fall inside one. That row is split at the exact chunk
-    /// the producer reports: the unreachable chunks above the cut are
-    /// still the band's own and go in retired, and the rows under it were
-    /// erased above and are the hard blanks they now are. Retiring or
-    /// settling such a row whole would either claim rows the terminal
-    /// cannot show or erase rows it still shows.
+    /// the producer reports: unreachable chunks above the cut remain
+    /// retired. A physical re-base supplies its exact erased extent
+    /// separately, because that blank gap can cross further logical rows;
+    /// the surviving chunks of this one boundary row are not the whole
+    /// gap. Other hand-overs retain their per-logical-row settlement.
     ///
     /// A `.rebuild` is the one hand-over whose LAST row is cut from the
     /// other end: it repaints starting on the cursor's own row, so every
@@ -3674,7 +3681,7 @@ pub const Region = struct {
                 const total = self.bandRowRows(@intCast(i));
                 const cut = total -| out.retired_chunks;
                 self.appendBandGroup(i, .retired, out.retired_chunks);
-                if (cut > 0) {
+                if (cut > 0 and out.erased_rows == null) {
                     self.owned.appendAssumeCapacity(.{ .kind = .blank, .rows = cut });
                 }
                 continue;
@@ -3697,6 +3704,11 @@ pub const Region = struct {
                 }
             }
             self.appendBandGroup(i, .committed, null);
+        }
+        if (out.erased_rows) |erased| {
+            if (erased > 0) {
+                self.owned.appendAssumeCapacity(.{ .kind = .blank, .rows = erased });
+            }
         }
     }
 

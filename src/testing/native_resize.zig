@@ -2155,6 +2155,61 @@ test "native: dismissed popup prefix is cleaned after a combined width and heigh
     }
 }
 
+test "native: a partial clipped formula row keeps every erased gap row in the ledger" {
+    var rig = try Rig.init(testing.allocator, .{
+        .cols = 114,
+        .rows = 38,
+        .height = 4,
+        .mode = .append,
+    });
+    defer rig.deinit();
+    var markers: [45][16]u8 = undefined;
+    var transcript: [45][]const u8 = undefined;
+    for (&markers, &transcript, 0..) |*buf, *row, i| {
+        row.* = try std.fmt.bufPrint(buf, "SHELL-{d:0>2}", .{i});
+        try rig.term.feed(row.*);
+        try rig.term.feed("\r\n");
+    }
+    var old_input: [114]u8 = @splat('x');
+    @memcpy(old_input[0..11], "formula-old");
+    const preview = "(no kitty graphics: formulas are checked, preview not shown)";
+    const timing = "parse 1.23ms render 0.00ms";
+    try rig.draw(&.{ &old_input, "", "", "" });
+    try rig.drawAt(1, 1, preview);
+    try rig.drawAt(114 - timing.len, 2, timing);
+    try rig.render();
+    try expectAnchored(&rig);
+    for (transcript) |row| try expectMarkerOnce(&rig, row);
+
+    // At 35 columns the rows occupy 4 + 2 + 4 + 1 physical rows.
+    // The 10-row viewport clips one chunk inside the first logical row.
+    // Repainting the four-row band erases SIX surviving rows above its
+    // new top, across the input, preview, and timing logical rows.
+    try rig.resize(35, 10);
+    try rig.draw(&.{ "formula-new", "", timing, "" });
+    try rig.drawAt(1, 1, preview);
+    try rig.render();
+    try expectAnchored(&rig);
+    try expectRetiredPresent(&rig, "formula-old");
+    for (transcript) |row| try expectMarkerOnce(&rig, row);
+
+    try rig.resize(109, 32);
+    try rig.draw(&.{ "formula-new", "", "", "" });
+    try rig.drawAt(1, 1, preview);
+    try rig.drawAt(109 - timing.len, 2, timing);
+    try rig.render();
+    try rig.render();
+    try expectAnchored(&rig);
+    try expectRetiredGone(&rig, "formula-old");
+    try expectMarkerOnce(&rig, "formula-new");
+    for (transcript) |row| try expectMarkerOnce(&rig, row);
+    try expectBandRow(&rig, 0, "formula-new");
+    try testing.expect(std.mem.indexOf(u8, rig.out.written(), "\x1b[2J") == null);
+    try testing.expect(std.mem.indexOf(u8, rig.out.written(), "\x1b[3J") == null);
+    try rig.render();
+    try testing.expectEqual(@as(usize, 0), rig.out.written().len);
+}
+
 test "native: a band shrinks and grows inside the window" {
     var rig = try Rig.init(testing.allocator, .{
         .cols = 40,
