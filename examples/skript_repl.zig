@@ -283,7 +283,7 @@ pub fn main(init: std.process.Init) !void {
                     std.mem.trim(u8, line.items, " \t").len == 0)
                 {
                     break; // `q` quits on an empty (or whitespace-only) line
-                } else if (k.matches(Key.enter, .{})) {
+                } else if (k.matches(Key.enter, .{}) or k.matches('j', .{ .ctrl = true })) {
                     // An open popup dismisses BEFORE Enter's normal path
                     // (submit or multi-line continuation) runs.
                     if (sugg != null) {
@@ -354,26 +354,25 @@ pub fn main(init: std.process.Init) !void {
                     line.items.len -= cursor - start;
                     cursor = start;
                 } else if (k.matches(Key.left, .{})) {
-                    cursor = prevCodepoint(line.items, cursor);
+                    cursor = prevGrapheme(line.items, cursor);
                 } else if (k.matches(Key.right, .{})) {
-                    if (cursor < line.items.len) cursor += utf8SeqLen(line.items, cursor);
+                    cursor = nextGrapheme(line.items, cursor);
                 } else if (k.matches(Key.home, .{})) {
                     cursor = 0;
                 } else if (k.matches(Key.end, .{})) {
                     cursor = line.items.len;
                 } else if (k.matches(Key.backspace, .{})) {
-                    // Delete the codepoint BEFORE the cursor.
-                    const start = prevCodepoint(line.items, cursor);
+                    // Delete the grapheme BEFORE the cursor: a base and its
+                    // combining marks go together.
+                    const start = prevGrapheme(line.items, cursor);
                     std.mem.copyForwards(u8, line.items[start..], line.items[cursor..]);
                     line.items.len -= cursor - start;
                     cursor = start;
                 } else if (k.matches(Key.delete, .{})) {
-                    // Delete the codepoint AT the cursor (forward).
-                    if (cursor < line.items.len) {
-                        const clen = utf8SeqLen(line.items, cursor);
-                        std.mem.copyForwards(u8, line.items[cursor..], line.items[cursor + clen ..]);
-                        line.items.len -= clen;
-                    }
+                    // Delete the grapheme AT the cursor (forward).
+                    const end = nextGrapheme(line.items, cursor);
+                    std.mem.copyForwards(u8, line.items[cursor..], line.items[end..]);
+                    line.items.len -= end - cursor;
                 } else if (k.matches(Key.escape, .{})) {
                     // Ignore.
                 } else {
@@ -1277,15 +1276,16 @@ fn drawBand(
     status: ?[]const u8,
 ) !void {
     region.cur.clear();
-    // Only the ACTIVE continuation line renders (§4.3); the pending
-    // buffer may contain embedded '\n' from continuation Enters.
-    const active_off = if (std.mem.findScalarLast(u8, line, '\n')) |nl| nl + 1 else 0;
-    const active = line[active_off..];
+    // Only the line holding the cursor renders (§4.3); the pending buffer
+    // may contain embedded '\n' from continuation Enters, and history
+    // recall can put the cursor on any of them.
+    const cursor_at = @min(cursor, line.len);
+    const active_off = if (std.mem.findScalarLast(u8, line[0..cursor_at], '\n')) |nl| nl + 1 else 0;
+    const active_end = if (std.mem.indexOfScalarPos(u8, line, cursor_at, '\n')) |nl| nl else line.len;
+    const active = line[active_off..active_end];
+    const prompt = if (active_off > 0) cont_prompt else prompt_text;
     const multiline = std.mem.indexOfScalar(u8, line, '\n') != null;
-    const prompt = if (multiline) cont_prompt else prompt_text;
-    // The cursor is a byte index into the whole buffer; clamp it into
-    // the active line's range so the slice boundaries stay valid.
-    const cur = std.math.clamp(cursor, active_off, line.len) - active_off;
+    const cur = cursor_at - active_off;
 
     var x = try region.cur.draw(.{}, prompt, 0, 0);
     const prompt_col = x;
@@ -1297,27 +1297,47 @@ fn drawBand(
     // on an earlier one — styles the text after it too.
     const segs = try scanQuery(aa, line);
     const cur_abs = active_off + cur; // absolute byte index of the cursor
-    const cell_len = if (cur_abs < line.len) utf8SeqLen(line, cur_abs) else 0;
+    // The cursor covers a whole grapheme: a combining mark or a ZWJ
+    // sequence stays with its base.
+    const cell_len = if (cur < active.len) notui.width.firstGraphemeLen(active[cur..]) else 0;
+    const cell_w: usize = if (cell_len > 0)
+        @max(1, notui.width.strWidth(active[cur .. cur + cell_len]))
+    else
+        1;
+
+    // Horizontal scroll: a line wider than the band keeps the cursor on
+    // screen by hiding whole graphemes from the left, marked with `…`.
+    const room: usize = region.width -| prompt_col;
+    var start: usize = 0;
+    while (start < cur and
+        notui.width.strWidth(active[start..cur]) + cell_w + @intFromBool(start > 0) > room)
+    {
+        start += notui.width.firstGraphemeLen(active[start..]);
+    }
+    if (start > 0) x += try region.cur.draw(.{ .attrs = .{ .dim = true } }, "…", x, 0);
+    const text_col = x;
+
     // Left of the cursor.
-    x += try drawSpan(&region.cur, segs, line, active_off, cur_abs, x, 0);
+    x += try drawSpan(&region.cur, segs, line, active_off + start, cur_abs, x, 0);
     // The TOKEN-START column (the popup's anchor): the first column of the
     // word being completed. Scan back to the completion delimiter, then
     // measure the display width of everything before it — so the popup
     // starts at the word's beginning and STAYS there while the cursor
     // moves within the word (typing more chars, or Left/Right through it).
-    const token_start = tokenStart(active, cur);
+    const token_start = @max(tokenStart(active, cur), start);
     // Saturating: a query wider than the band still anchors inside it.
-    const lead_cols: usize = @min(notui.width.strWidth(active[0..token_start]), region.width);
-    const token_col: u16 = @min(prompt_col +| @as(u16, @intCast(lead_cols)), region.width);
+    const lead_cols: usize = @min(notui.width.strWidth(active[start..token_start]), region.width);
+    const token_col: u16 = @min(text_col +| @as(u16, @intCast(lead_cols)), region.width);
 
     if (cell_len > 0) {
-        // Cursor sits ON a codepoint: reverse-video it.
+        // Cursor sits ON a grapheme: reverse-video it.
         x += try region.cur.draw(cur_style, line[cur_abs .. cur_abs + cell_len], x, 0);
     } else {
         _ = try region.cur.draw(cur_style, " ", x, 0); // block cursor at EOL
     }
-    // Right of the cursor, in the segments' own styles.
-    _ = try drawSpan(&region.cur, segs, line, cur_abs + cell_len, line.len, x, 0);
+    // Right of the cursor, in the segments' own styles, up to the end of
+    // the active line.
+    _ = try drawSpan(&region.cur, segs, line, cur_abs + cell_len, active_off + active.len, x, 0);
 
     // Popup rows (1..shown) under the cursor column; the status row moves
     // down to `y` (1 + shown when open, 1 otherwise).
@@ -1460,6 +1480,9 @@ fn insertKeyText(aa: std.mem.Allocator, line: *std.ArrayList(u8), cursor: *usize
     const text: []const u8 = if (k.text) |t|
         t
     else blk: {
+        // A chord is a command, not text: an unbound Ctrl+X must not type
+        // `x`, and a terminal's LF arrives as Ctrl+J.
+        if (k.mods.ctrl or k.mods.alt or k.mods.super or k.mods.meta) return;
         if (!isPrintable(k.codepoint)) return;
         const n = try std.unicode.utf8Encode(k.codepoint, &text_buf);
         break :blk text_buf[0..n];
@@ -1500,17 +1523,22 @@ fn closerFor(opener: u8) ?u8 {
 
 // ── cursor helpers (§3.3, zigzag TextInput semantics) ────────────────
 
-/// UTF-8 sequence length of the codepoint starting at buf[i].
-fn utf8SeqLen(buf: []const u8, i: usize) usize {
-    return std.unicode.utf8ByteSequenceLength(buf[i]) catch 1;
+/// Byte index just past the grapheme starting at `cursor`.
+fn nextGrapheme(buf: []const u8, cursor: usize) usize {
+    if (cursor >= buf.len) return buf.len;
+    return cursor + notui.width.firstGraphemeLen(buf[cursor..]);
 }
 
-/// Byte index of the codepoint boundary before `cursor`.
-fn prevCodepoint(buf: []const u8, cursor: usize) usize {
+/// Byte index of the grapheme boundary before `cursor`. Segmentation
+/// restarts at the line's start, the nearest boundary that is certain.
+fn prevGrapheme(buf: []const u8, cursor: usize) usize {
     if (cursor == 0) return 0;
-    var p = cursor - 1;
-    while (p > 0 and (buf[p] & 0xC0) == 0x80) p -= 1;
-    return p;
+    var p: usize = if (std.mem.findScalarLast(u8, buf[0 .. cursor - 1], '\n')) |nl| nl + 1 else 0;
+    while (true) {
+        const n = nextGrapheme(buf, p);
+        if (n >= cursor) return p;
+        p = n;
+    }
 }
 
 /// Byte index of the start of the word before `cursor` (skip trailing
@@ -1565,6 +1593,77 @@ const many_candidates = [_][]const u8{
     "aaa", "bbb", "ccc", "ddd", "eee", "fff", "ggg", "hhh", "iii", "jjj",
 };
 
+/// Draw the band for `line` with the cursor at byte `cursor` on a
+/// `cols`-wide region, popup closed and idle.
+fn drawTestBand(arena: std.mem.Allocator, region: *Region, line: []const u8, cursor: usize) !void {
+    var spinner: notui.component.Spinner = .{ .label = "evaluating" };
+    try drawBand(arena, region, line, cursor, null, &spinner, false, .fromNanoseconds(0), null);
+}
+
+test "repl band: a line wider than the band scrolls to keep the cursor visible" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var region = try Region.init(arena.allocator(), .{ .height = 2 });
+    defer region.deinit();
+    try region.resize(30, 24, 2);
+
+    const line = "(list \"" ++ "abcdef" ** 10 ++ "END\")";
+    try drawTestBand(arena.allocator(), &region, line, line.len);
+    var row: [512]u8 = undefined;
+    const shown = bandRow(&region.cur, 0, &row);
+    // The prompt stays, the hidden head is marked, the tail is in view and
+    // the cursor block sits on the last column the band has room for.
+    try std.testing.expect(std.mem.startsWith(u8, shown, "skript> …"));
+    try std.testing.expect(std.mem.endsWith(u8, shown, "END\")"));
+    try std.testing.expect(region.cur.get(29, 0).style.eql(cursor_block));
+
+    // Home brings the head back.
+    try drawTestBand(arena.allocator(), &region, line, 0);
+    try std.testing.expect(std.mem.startsWith(u8, bandRow(&region.cur, 0, &row), "skript> (list"));
+    try std.testing.expect(region.cur.get(8, 0).style.eql(cursor_block));
+}
+
+test "repl band: the cursor covers a whole grapheme" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var region = try Region.init(arena.allocator(), .{ .height = 2 });
+    defer region.deinit();
+
+    const line = "\"e\u{301}X\"";
+    // Left from the end crosses `"`, `X`, then the e + combining acute.
+    var cursor: usize = line.len;
+    for (0..3) |_| cursor = prevGrapheme(line, cursor);
+    try std.testing.expectEqual(@as(usize, 1), cursor);
+    try drawTestBand(arena.allocator(), &region, line, cursor);
+    const cell = region.cur.get(9, 0);
+    try std.testing.expectEqualStrings("e\u{301}", cell.grapheme);
+    try std.testing.expect(cell.style.eql(cursor_block));
+}
+
+test "repl band: a recalled multi-line entry shows the line holding the cursor" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var region = try Region.init(arena.allocator(), .{ .height = 2 });
+    defer region.deinit();
+
+    const line = "(+ 10\n 20)";
+    var row: [512]u8 = undefined;
+    try drawTestBand(arena.allocator(), &region, line, 3);
+    try std.testing.expectEqualStrings("skript> (+ 10", bandRow(&region.cur, 0, &row));
+    try drawTestBand(arena.allocator(), &region, line, line.len);
+    try std.testing.expect(std.mem.endsWith(u8, bandRow(&region.cur, 0, &row), " 20)"));
+}
+
+test "repl input: a chord never types its letter" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var line: std.ArrayList(u8) = .empty;
+    var cursor: usize = 0;
+    try insertKeyText(arena.allocator(), &line, &cursor, .{ .codepoint = 'j', .mods = .{ .ctrl = true } });
+    try insertKeyText(arena.allocator(), &line, &cursor, .{ .codepoint = 'x', .mods = .{ .alt = true } });
+    try std.testing.expectEqualStrings("", line.items);
+}
+
 test "repl band: a midline cursor keeps the styled right tail visible" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1617,7 +1716,7 @@ test "repl band: moving the cursor left keeps the tail it moved off" {
     // Walk left from the end of the line onto the `4` of the number:
     // the rest of the number and the string are now the right tail.
     var cursor: usize = line.items.len;
-    for (0..6) |_| cursor = prevCodepoint(line.items, cursor);
+    for (0..6) |_| cursor = prevGrapheme(line.items, cursor);
     try std.testing.expectEqual(@as(usize, 8), cursor);
 
     try drawBand(
@@ -1652,7 +1751,7 @@ test "repl band: a midline backspace keeps the tail it did not touch" {
     // Backspace the `a` of `bar` with the cursor right after `ba`, so
     // `r 42 "s"` is the tail the frame has to keep legible.
     var cursor: usize = 6;
-    const start = prevCodepoint(line.items, cursor);
+    const start = prevGrapheme(line.items, cursor);
     @memmove(line.items[start..][0 .. line.items.len - cursor], line.items[cursor..]);
     line.items.len -= cursor - start;
     cursor = start;
