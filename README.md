@@ -250,17 +250,17 @@ declarations were rejected by their intended guards. All six registered roots
 generated documentation. An external caller named `Buffer.RowFootprint` and its
 `NullGap`, then called the allocator-first footprint API.
 
-**Analyzer assessment, refreshed 2026-10-13 at `c6b5b218b85f`:** all 138 diagnostic
-occurrences were reviewed. There are 78 false positives and 60 intentional test
+**Analyzer assessment, refreshed 2026-10-13 at `f48a076049fa`:** all 141 diagnostic
+occurrences were reviewed. There are 81 false positives and 60 intentional test
 assertions. No reported finding exposed a confirmed runtime defect.
 
 | Analyzer report | Count | Assessment |
 |---|---:|---|
-| ziglint: public type exposure | 4 | `Buffer.RowFootprint` is public |
+| ziglint: public type exposure | 6 | `Buffer.Slot` and `Buffer.RowFootprint` are public |
 | ziglint: incomplete disposal | 1 | Test fixture frees its buffer and retains its observation counter |
 | zwanzig: optional unwrap | 121 | 61 guarded or constructed values, 60 intentional test assertions |
 | zwanzig: resource store | 11 | Arena-owned allocations, a loop-scoped `defer`, and test helpers closing raw descriptors |
-| zwanzig: identifier style | 1 | `View.DrawError` is a type alias |
+| zwanzig: identifier style | 2 | `View.DrawError` and `SgrCache.SlotMask` are type aliases |
 
 The unwrap assessment relies on documented lifecycle and non-reentry contracts.
 It does not cover arbitrary mutation of runtime fields or every possible consumer.
@@ -1011,6 +1011,16 @@ The final profile leaves drawing, row comparison and snapshot copying as the mai
 Explicit vector construction of ASCII slots and block copies of cold slices were tested separately
 and together. They gave no repeatable gain across cases, so the simpler paths remain.
 The sampled `Style.eql` hotspot belonged to the pinned benchmark encoder, not Region.
+
+Verification of the retained source (`f48a076049fa`), 2026-10-13:
+
+- `zig build`: 62/62 steps.
+- `zig build test`: 845/845 tests in Debug, ReleaseSafe and ReleaseFast.
+- `zig-gate --no-zbc`: format, build, tests, AST check and zlint passed.
+  All four cross targets executed 845 tests each: x86-64, x86, AArch64 and big-endian PowerPC64.
+  The gate exits 1 for the 141 reviewed analyzer occurrences above. No finding is suppressed.
+- Live `example-statusline` in tmux: 100→60→100 columns, history retained, normal exit with `q`.
+
 
 ### 0.1.0 comparison
 

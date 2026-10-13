@@ -37,6 +37,10 @@ and Region h24 median p50 154 608 → 35 314 ns.
 Buffer cases retain zero allocations per frame. Static and Region idle frames emit zero bytes.
 See README "Measurement and verification" for all cases and the benchmark-reference timing caveat.
 
+Verification: 845/845 tests in Debug, ReleaseSafe and ReleaseFast.
+All four cross targets passed, including 32-bit x86 and big-endian PowerPC64.
+The live statusline retained history through a 100→60→100-column resize and exited normally.
+
 ## 0.1.0
 
 First tagged release. Changes since `main` at `38634f2b`.

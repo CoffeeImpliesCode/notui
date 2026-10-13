@@ -1,18 +1,18 @@
 {
-  "source_pin": "c6b5b218b85f757d42c584f73d0c69a462eb014a",
-  "scope": "All 56 explicit non-vendor Zig files in the analyzer gate at source_pin.",
+  "source_pin": "f48a076049fa12e037ce1a24a7c0dc6391f7f13f",
+  "scope": "All 57 explicit non-vendor Zig files in the analyzer gate at source_pin.",
   "tools": {
     "ziglint": "0.5.3-1+66709a4",
     "zwanzig": "0.15.1 (Zig frontend 0.16.0), binary of 2026-10-05 (sha256 437a78fc277a6270...)",
     "zwanzig_args": "--max-states-per-point 2000"
   },
   "diagnostics": {
-    "ziglint": 5,
-    "zwanzig": 133,
-    "total": 138
+    "ziglint": 7,
+    "zwanzig": 134,
+    "total": 141
   },
   "classification_counts": {
-    "false_positive": 78,
+    "false_positive": 81,
     "test_assertion": 60
   },
   "coverage_checks": {
@@ -47,42 +47,42 @@
       "id": "ZL002",
       "rule": "Z012",
       "file": "src/buffer.zig",
-      "line": 408,
+      "line": 740,
       "message": "public function exposes private type 'RowFootprint'",
       "classification": "false_positive",
-      "evidence": "RowFootprint is explicitly public at buffer.zig:356, nested under the public Buffer type; its public receiver/return signatures at 386,431,450 expose no private type. The repeated line 450 is retained as two reported occurrences, not silently deduplicated."
+      "evidence": "Buffer.RowFootprint and its nested NullGap are explicitly public. paintedPrefixColumns, rowsAt and prefixRows therefore expose public types. The two reports on prefixRows are distinct diagnostic occurrences and remain separate."
     },
     {
       "id": "ZL003",
       "rule": "Z012",
       "file": "src/buffer.zig",
-      "line": 453,
+      "line": 785,
       "message": "public function exposes private type 'RowFootprint'",
       "classification": "false_positive",
-      "evidence": "RowFootprint is explicitly public at buffer.zig:356, nested under the public Buffer type; its public receiver/return signatures at 386,431,450 expose no private type. The repeated line 450 is retained as two reported occurrences, not silently deduplicated."
+      "evidence": "Buffer.RowFootprint and its nested NullGap are explicitly public. paintedPrefixColumns, rowsAt and prefixRows therefore expose public types. The two reports on prefixRows are distinct diagnostic occurrences and remain separate."
     },
     {
       "id": "ZL004",
       "rule": "Z012",
       "file": "src/buffer.zig",
-      "line": 472,
+      "line": 804,
       "message": "public function exposes private type 'RowFootprint'",
       "classification": "false_positive",
-      "evidence": "RowFootprint is explicitly public at buffer.zig:356, nested under the public Buffer type; its public receiver/return signatures at 386,431,450 expose no private type. The repeated line 450 is retained as two reported occurrences, not silently deduplicated."
+      "evidence": "Buffer.RowFootprint and its nested NullGap are explicitly public. paintedPrefixColumns, rowsAt and prefixRows therefore expose public types. The two reports on prefixRows are distinct diagnostic occurrences and remain separate."
     },
     {
       "id": "ZL005",
       "rule": "Z012",
       "file": "src/buffer.zig",
-      "line": 472,
+      "line": 804,
       "message": "public function exposes private type 'RowFootprint'",
       "classification": "false_positive",
-      "evidence": "RowFootprint is explicitly public at buffer.zig:356, nested under the public Buffer type; its public receiver/return signatures at 386,431,450 expose no private type. The repeated line 450 is retained as two reported occurrences, not silently deduplicated."
+      "evidence": "Buffer.RowFootprint and its nested NullGap are explicitly public. paintedPrefixColumns, rowsAt and prefixRows therefore expose public types. The two reports on prefixRows are distinct diagnostic occurrences and remain separate."
     },
     {
       "id": "ZW001",
       "file": "bench/bench.zig",
-      "line": 1074,
+      "line": 1070,
       "classification": "false_positive",
       "evidence": "errdefer guarded by the succeeding `app.region = try Region.init(...)` on 1069; registered after the only fallible statement that precedes it | ranges: bench.zig:1065-1075 | INV-A + errdefer ordering.",
       "reviewer": "IntegrationUnwrapTriage",
@@ -91,7 +91,7 @@
     {
       "id": "ZW002",
       "file": "bench/bench.zig",
-      "line": 1075,
+      "line": 1071,
       "classification": "false_positive",
       "evidence": "`app.region.?` immediately after the same successful assignment; the following `errdefer` is the fallback if `resize` fails | ranges: 1069-1076 | INV-A.",
       "reviewer": "IntegrationUnwrapTriage",
@@ -100,7 +100,7 @@
     {
       "id": "ZW003",
       "file": "bench/bench.zig",
-      "line": 1077,
+      "line": 1073,
       "classification": "false_positive",
       "evidence": "guarded by `app.out = try output.OutputQueue.init(...)` on 1076 | ranges: 1076-1078 | INV-A.",
       "reviewer": "IntegrationUnwrapTriage",
@@ -109,7 +109,7 @@
     {
       "id": "ZW004",
       "file": "bench/bench.zig",
-      "line": 1079,
+      "line": 1075,
       "classification": "false_positive",
       "evidence": "guarded by the infallible `app.arena = ArenaAllocator.init(...)` on 1078 | ranges: 1078-1080 | INV-A.",
       "reviewer": "IntegrationUnwrapTriage",
@@ -118,7 +118,7 @@
     {
       "id": "ZW005",
       "file": "bench/bench.zig",
-      "line": 1081,
+      "line": 1077,
       "classification": "false_positive",
       "evidence": "guarded by the infallible `app.scratch = ArenaAllocator.init(...)` on 1080 | ranges: 1080-1082 | INV-A.",
       "reviewer": "IntegrationUnwrapTriage",
@@ -127,7 +127,7 @@
     {
       "id": "ZW006",
       "file": "bench/bench.zig",
-      "line": 1104,
+      "line": 1100,
       "classification": "false_positive",
       "evidence": "`LoopCase.frame` is only reachable for a `LoopCase` whose `init` succeeded; nothing between `init` and the driver loop nulls `app.region` | ranges: 1065-1085, 1091-1106, 1237-1252 | INV-A.",
       "reviewer": "IntegrationUnwrapTriage",
@@ -136,7 +136,7 @@
     {
       "id": "ZW007",
       "file": "bench/bench.zig",
-      "line": 1105,
+      "line": 1101,
       "classification": "false_positive",
       "evidence": "same guard as ZW006 (same expression, adjacent line) | ranges: 1091-1106, 1237-1252 | INV-A.",
       "reviewer": "IntegrationUnwrapTriage",
@@ -145,7 +145,7 @@
     {
       "id": "ZW008",
       "file": "bench/bench.zig",
-      "line": 1276,
+      "line": 1272,
       "classification": "false_positive",
       "evidence": "runs after `driver.run` but before the deferred `loop_case.app.deinit()` at 1238, which is the only nulling call | ranges: 1237-1238, 1252, 1274-1280 | INV-A + defer ordering.",
       "reviewer": "IntegrationUnwrapTriage",
@@ -532,7 +532,7 @@
     {
       "id": "ZW064",
       "file": "src/app.zig",
-      "line": 2520,
+      "line": 2517,
       "classification": "false_positive",
       "evidence": "`try app.initTranscript(...)` at 2413 immediately precedes; `app` from `setupHeadless` with `defer app.deinit()` | 2406-2415, 2301-2322 | fixture proof",
       "reviewer": "AppUnwrapTriage:v2",
@@ -541,7 +541,7 @@
     {
       "id": "ZW065",
       "file": "src/app.zig",
-      "line": 2582,
+      "line": 2579,
       "classification": "false_positive",
       "evidence": "`setup.app.out` assigned at 1526 in `setupInteractive`; `defer setup.deinit()` runs only at test end | 1526, 2459-2477 | fixture proof",
       "reviewer": "AppUnwrapTriage:v2",
@@ -550,7 +550,7 @@
     {
       "id": "ZW066",
       "file": "src/app.zig",
-      "line": 2718,
+      "line": 2715,
       "classification": "false_positive",
       "evidence": "`try app.initTranscript(...)` at 2611 two lines above | 2602-2613, 2301-2322 | fixture proof",
       "reviewer": "AppUnwrapTriage:v2",
@@ -559,7 +559,7 @@
     {
       "id": "ZW067",
       "file": "src/app.zig",
-      "line": 2726,
+      "line": 2723,
       "classification": "false_positive",
       "evidence": "same transcript instance created at 2611 | 2611, 2621 | fixture proof",
       "reviewer": "AppUnwrapTriage:v2",
@@ -568,7 +568,7 @@
     {
       "id": "ZW068",
       "file": "src/app.zig",
-      "line": 2729,
+      "line": 2726,
       "classification": "false_positive",
       "evidence": "same transcript instance created at 2611 | 2611, 2624 | fixture proof",
       "reviewer": "AppUnwrapTriage:v2",
@@ -577,7 +577,7 @@
     {
       "id": "ZW069",
       "file": "src/app.zig",
-      "line": 2766,
+      "line": 2763,
       "classification": "false_positive",
       "evidence": "`try app.initTranscript(...)` at 2659 | 2655-2661 | fixture proof",
       "reviewer": "AppUnwrapTriage:v2",
@@ -586,7 +586,7 @@
     {
       "id": "ZW070",
       "file": "src/app.zig",
-      "line": 2791,
+      "line": 2788,
       "classification": "false_positive",
       "evidence": "`try app.initTranscript(...)` at 2684 | 2680-2686 | fixture proof",
       "reviewer": "AppUnwrapTriage:v2",
@@ -595,7 +595,7 @@
     {
       "id": "ZW071",
       "file": "src/app.zig",
-      "line": 2797,
+      "line": 2794,
       "classification": "false_positive",
       "evidence": "`app.region` from `setupHeadless` 2305; mutating through the pointer is legal and the pointer is constructor-proved | 2305, 2692 | fixture proof",
       "reviewer": "AppUnwrapTriage:v2",
@@ -604,7 +604,7 @@
     {
       "id": "ZW072",
       "file": "src/app.zig",
-      "line": 2806,
+      "line": 2803,
       "classification": "false_positive",
       "evidence": "same region pointer, still live (nothing nulls it between 2692 and 2701) | 2305, 2692-2701 | fixture proof",
       "reviewer": "AppUnwrapTriage:v2",
@@ -613,7 +613,7 @@
     {
       "id": "ZW073",
       "file": "src/app.zig",
-      "line": 2822,
+      "line": 2819,
       "classification": "false_positive",
       "evidence": "first `deinit` of the queue installed by `setupHeadless` at 2313; `app.out = null` happens only at 2718, after this line | 2313, 2717-2718 | fixture proof",
       "reviewer": "AppUnwrapTriage:v2",
@@ -622,7 +622,7 @@
     {
       "id": "ZW074",
       "file": "src/app.zig",
-      "line": 2835,
+      "line": 2832,
       "classification": "false_positive",
       "evidence": "CORRECTED: the queue live at 2730 is the one installed by `try` at 2719 (`capacity = 24, watermark = 8`), not the future 2732; 2731/2732 run after this deinit | 2313, 2719, 2730-2732 | fixture proof",
       "reviewer": "AppUnwrapTriage:v2",
@@ -631,7 +631,7 @@
     {
       "id": "ZW075",
       "file": "src/app.zig",
-      "line": 2875,
+      "line": 2872,
       "classification": "false_positive",
       "evidence": "first `deinit` of the queue installed by `setupHeadless` at 2313; `app.out = null` only at 2771, after this line | 2313, 2770-2771 | fixture proof",
       "reviewer": "AppUnwrapTriage:v2",
@@ -640,7 +640,7 @@
     {
       "id": "ZW076",
       "file": "src/app.zig",
-      "line": 2893,
+      "line": 2890,
       "classification": "false_positive",
       "evidence": "CORRECTED: the queue live at 2788 is the one installed by `try` at 2772 (`capacity = 16, watermark = 8`), not the future 2790; 2789/2790 run after this deinit | 2313, 2772, 2788-2790 | fixture proof",
       "reviewer": "AppUnwrapTriage:v2",
@@ -649,7 +649,7 @@
     {
       "id": "ZW077",
       "file": "src/app.zig",
-      "line": 2967,
+      "line": 2964,
       "classification": "false_positive",
       "evidence": "`setup.app.tty` assigned at 1512 by `setupInteractive`; that path also has `out` live at 1526, which this `processCmd` needs | 1512, 1526, 2844-2862 | fixture proof",
       "reviewer": "AppUnwrapTriage:v2",
@@ -964,7 +964,7 @@
     {
       "id": "ZW115",
       "file": "src/region.zig",
-      "line": 7012,
+      "line": 7042,
       "classification": "test_assertion",
       "evidence": "Classify: test_assertion (non-actionable). `const at = std.mem.indexOf(u8, t2.bytes(), \"\\x1b[J\").?;` in `test \"region: an ED0 in a flush is always preceded by the band-top move\"` (src/region.zig:6645-6658). Source ranges: site 6652; the claim it feeds 6657 (`expectEqualStrings(\"\\r\\x1b[2A\\x1b[J\", t2.bytes()[at - 5 .. at + 3])`); setup 6646-6651 (`r.append(.{ .line = \"flush\" })` then `r.render(&t2.w)`); the same ED0-emission property asserted non-fatally elsewhere at 6630 (`count(bytes, \"\\x1b[J\")`) and by the findPos loop at 6632-6639. The unwrap is the oracle: if the flush render emitted no ED0 the test must fail, and that is the regression under test — not a consumer path. Test-only code; `t2` is a local TestWriter.",
       "reviewer": "ComponentUnwrapTriage",
@@ -973,7 +973,7 @@
     {
       "id": "ZW116",
       "file": "src/region.zig",
-      "line": 7120,
+      "line": 7150,
       "classification": "test_assertion",
       "evidence": "Classify: test_assertion (non-actionable). `const at = std.mem.indexOf(u8, t2.bytes(), \"one\\r\\n\").?;` in `test \"region: a replay reproduces the entire ledger in one write\"` (src/region.zig:6742-6769). Source ranges: site 6760; the claim it feeds 6761 (`expectEqualStrings(\"one\\r\\ntwo\\r\\n\", t2.bytes()[at..][0..10])`) and 6762 (`count(t2.bytes(), \"two\\r\\n\") == 1`); setup 6743-6759 — `writeHistory(.replay)` at 6756 then `r.render(&t2.w)` at 6759. The unwrap is the oracle for the replay-commit property: a replay that did not restate \"one\\r\\n\" is exactly the bug this test exists to catch. The earlier append-then-drain render at 6751-6753 asserts the same rows appeared once before, and no other code path exists for a null here (the preceding non-null assertion at 6753 covers t1, not t2). Test-only code.",
       "reviewer": "ComponentUnwrapTriage",
@@ -1117,7 +1117,7 @@
     {
       "id": "ZW135",
       "file": "src/app.zig",
-      "line": 2447,
+      "line": 2444,
       "classification": "false_positive",
       "evidence": "test model draw: `allocPrint(ctx.frame_arena, ...)`; frame arena owns it | ranges: 2341-2345.",
       "reviewer": "parent:2026-10-13",
@@ -1126,7 +1126,7 @@
     {
       "id": "ZW136",
       "file": "src/app.zig",
-      "line": 2688,
+      "line": 2685,
       "classification": "false_positive",
       "evidence": "test model draw: `allocPrint(ctx.frame_arena, ...)`; frame arena owns it | ranges: 2582-2585.",
       "reviewer": "parent:2026-10-13",
@@ -1261,7 +1261,7 @@
     {
       "id": "ZW151",
       "file": "src/width.zig",
-      "line": 511,
+      "line": 659,
       "classification": "test_assertion",
       "evidence": "Classify: test_assertion (non-actionable). `const zg_len = iter.next().?.bytes(buf[0..2]).len;` in `test \"ascii fast path: agrees with zg for every printable byte and successor\"` (src/width.zig:497-526). The iterator runs over a non-empty test fixture (one printable ASCII byte plus a successor or tail, built at 506-516), and zg's grapheme iterator yields a first grapheme for any non-empty input. The unwrap is the oracle the comparison against firstGraphemeLen/firstCellLen rests on: a null would be a failed test, not a consumer bug.",
       "reviewer": "parent:2026-10-14",
@@ -1270,14 +1270,43 @@
     {
       "id": "ZW152",
       "file": "src/width.zig",
-      "line": 518,
+      "line": 666,
       "classification": "test_assertion",
       "evidence": "Classify: test_assertion (non-actionable). `const zg_len = iter.next().?.bytes(s).len;` in `test \"ascii fast path: agrees with zg for every printable byte and successor\"` (src/width.zig:497-526). The iterator runs over a non-empty test fixture (one printable ASCII byte plus a successor or tail, built at 506-516), and zg's grapheme iterator yields a first grapheme for any non-empty input. The unwrap is the oracle the comparison against firstGraphemeLen/firstCellLen rests on: a null would be a failed test, not a consumer bug.",
       "reviewer": "parent:2026-10-14",
       "rule": "optional-unwrap"
+    },
+    {
+      "id": "ZL006",
+      "rule": "Z012",
+      "file": "src/buffer.zig",
+      "line": 109,
+      "message": "public function exposes private type 'Slot'",
+      "classification": "false_positive",
+      "evidence": "Buffer is public and Buffer.Slot is explicitly declared pub const Slot = extern struct. The isBlank receiver therefore exposes a public nested type, not a private type.",
+      "reviewer": "parent:2026-10-13"
+    },
+    {
+      "id": "ZL007",
+      "rule": "Z012",
+      "file": "src/buffer.zig",
+      "line": 115,
+      "message": "public function exposes private type 'Slot'",
+      "classification": "false_positive",
+      "evidence": "Buffer is public and Buffer.Slot is explicitly declared pub const Slot = extern struct. The paints receiver therefore exposes a public nested type, not a private type.",
+      "reviewer": "parent:2026-10-13"
+    },
+    {
+      "id": "ZW153",
+      "rule": "identifier-style",
+      "file": "src/buffer.zig",
+      "line": 1199,
+      "classification": "false_positive",
+      "evidence": "SlotMask is a type alias: @Int(.unsigned, sgr_cache_slots) produces the unsigned integer type u16. It types SgrCache.used and the bit helper return and cast. TitleCase follows the Zig type-name convention; this declaration is not a value constant.",
+      "reviewer": "parent:2026-10-13"
     }
   ],
-  "integration_note": "Refreshed 2026-10-13 against 22e88c5cbd8b. Kept 114 entries (7 with shifted lines, matched by source text). Retired 18 entries the 2026-10-05 zwanzig build no longer reports: ZW009, ZW011, ZW012, ZW013, ZW014, ZW015, ZW016, ZW017, ZW018, ZW019, ZW020, ZW052, ZW078, ZW101, ZW112, ZW121, ZW125, ZW126. Added 12 entries: 11 store-violations-engine (arena-owned allocations, a loop-scoped defer and raw-fd closes in test helpers, all false positives) and one test assertion. At the default 50 states per point zwanzig also emitted 11 analysis-limit-exceeded diagnostics (Region.render, caps.detectWithTimeout, two coverage tests); with --max-states-per-point 2000, as the gate now passes, those functions complete and add no findings. No suppression. Refreshed again 2026-10-13 after the visual-testing fixes, pinned to 6a09ae304673: 125 entries carried over by source text, ZW054 retired (its emitTeardown unwrap moved and is re-entered), 11 new entries (4 false positives, 7 test assertions). Re-pinned to b8b2118ef980 after the last visual fixes: all 136 entries carried over by source text (5 with shifted lines), no new or retired diagnostics. Re-pinned to c6b5b218b85f after the 0.1.0 performance round: all 136 entries carried over by source text (7 with shifted lines), 2 new test assertions (ZW151, ZW152) in the width ASCII fast-path test.",
+  "integration_note": "Refreshed 2026-10-13 against 22e88c5cbd8b. Kept 114 entries (7 with shifted lines, matched by source text). Retired 18 entries the 2026-10-05 zwanzig build no longer reports: ZW009, ZW011, ZW012, ZW013, ZW014, ZW015, ZW016, ZW017, ZW018, ZW019, ZW020, ZW052, ZW078, ZW101, ZW112, ZW121, ZW125, ZW126. Added 12 entries: 11 store-violations-engine (arena-owned allocations, a loop-scoped defer and raw-fd closes in test helpers, all false positives) and one test assertion. At the default 50 states per point zwanzig also emitted 11 analysis-limit-exceeded diagnostics (Region.render, caps.detectWithTimeout, two coverage tests); with --max-states-per-point 2000, as the gate now passes, those functions complete and add no findings. No suppression. Refreshed again 2026-10-13 after the visual-testing fixes, pinned to 6a09ae304673: 125 entries carried over by source text, ZW054 retired (its emitTeardown unwrap moved and is re-entered), 11 new entries (4 false positives, 7 test assertions). Re-pinned to b8b2118ef980 after the last visual fixes: all 136 entries carried over by source text (5 with shifted lines), no new or retired diagnostics. Re-pinned to c6b5b218b85f after the 0.1.0 performance round: all 136 entries carried over by source text (7 with shifted lines), 2 new test assertions (ZW151, ZW152) in the width ASCII fast-path test. Re-pinned 2026-10-13 to f48a076049fa after the multi-round performance work and verification repairs. All 138 prior occurrences carried over by source text (32 with shifted lines). Added ZL006 and ZL007 for public Buffer.Slot receivers and ZW153 for the SlotMask integer type alias, all false positives. Retired no diagnostics. Fixed the real deprecated std.meta.Int use and unused Region.Cell import before the final report. No suppression. The final gate passed formatting, build, tests, AST checking, zlint and all four executed cross targets; its exit 1 is solely the 141 reviewed ziglint/zwanzig diagnostic occurrences.",
   "source_review_contexts": {
     "AppUnwrapTriage:v2": "CORRECTED REPORT (v2). Classifications unchanged from v1: defect 0, hardening 0, false_positive 46, test_assertion 2, uncertain 0. Three corrections applied: (a) ZW074's live queue is the one installed by `try` at 2719, not 2732; (b) ZW076's live queue is the one installed at 2772, not 2790; (c) INV-C is narrowed to the `start`/`acquire` lifecycle, not every in-repo constructed App value — `bench/bench.zig:1066-1085` also builds `out` live (1076) with `tty` null, like `setupHeadless` (src/app.zig:2313). Also restated: the callback conclusion rests on the DECLARED non-reentry rules, not on the absence of a `*Self` argument.\n\nREUSABLE PROOFS (src/app.zig @ bb4d44b unless noted)\nINV-A `io` non-null: assigned once per session as the FIRST statement of `acquire` (386-387), before every acquisition and before `processInit` (398); `deinit` (904-925) never nulls it; field doc (~256) says \"null before start\". All unwrap hosts are private (`renderStep` 671/685, `retireTranscript` 803, `processCmd` 1013/1022, `makeCtx` 1252) or public with a documented precondition (`tick` \"Valid after start\" 487; `frameHeadless` \"Valid on a live runtime\" 747-749). Survives a FAILED start, which keeps io.\nINV-B `region` non-null: assigned in `startTty` 1150 / `startPlain` 1183, both before `processInit`; only nullings are errdefers 1162/1194 and `deinit` 920, which run only while unwinding. Hosts: `tick` 602/603; `stageFrame` 719/721/723 (only from `renderStep`, which returns 0 at 645 when out is null, and out is installed with region at 1164/1150); `retireTranscript` 806 (only from `stageFrame` 722); `frameHeadless` 760/761 (documented); `renderPlainFrame` 881/882/884/885 (private; sole caller `run` 848 under the explicit `else if (self.region != null)` 844); `makeCtx` 1247; `regionPending` 1269 (only from `renderStep`).\nINV-C (NARROWED) `out != null => tty != null and region != null` HOLDS FOR STATES BUILT BY THE SUPPORTED LIFECYCLE ONLY: `self.out` is assigned in exactly one production place, `startTty` 1164, reached only from `acquire` 393 after `self.tty = try Tty.init(io)` 391; `startPlain` never sets it; `deinit` nulls `out` 909 strictly before `region` 920 and `tty` 924, so no teardown window has tty/region null with out live. It DOES NOT hold for every in-repo App value: `setupHeadless` 2313 and `bench/bench.zig` 1076 both install `out` with `tty` null. Neither reaches the `tty` unwrap: `stageWith` (and therefore 1106) is reachable only from `processCmd`, which is private to app.zig, and bench drives only `frameHeadless` (bench.zig 1098); the tests that DO issue `.mouse`/`.cursor`/`.set_title` use either `setupInteractive` (tty live, 1512/1526) or `cmdApp` (out null -> the `if (w)` fallback at 1109). So the out-live/tty-null shapes are inert today, but the obligation is real and cross-function. Guards: `stageWith` 1089 checks `out` then dereferences `tty` 1106; `renderStep` checks `out` 645 then reaches `stageFrame`'s `&self.out.?` 708; `emitTeardown` 1206-1218 dereferences `tty` inside the `out` branch and is itself called only under `if (self.tty) |*t|` 842.\nINV-D arenas non-null: set 1171-1172 / 1196-1197 after region/out and before `processInit`; only `deinit` nulls them. `makeCtx` is private and runs only from start-completed paths.\nINV-E tty non-null inside `startTty`: 1149/1169/1173 sit after 391; earlier `try`s return before them.\nCALLBACK REENTRY: `View.draw` \"must not reenter the App session\" (view.zig 64-65) and the filter translator \"must not reenter the App\" (app.zig ~980). Those DECLARED rules are the operative reason no user callback can null a field between a guard and an unwrap. I do not rest this on the arguments alone: a callback could capture or reach a global `*Self`, so the invariant is the published contract, and the unwraps are all behind it.\nTEST FIXTURES: `setupInteractive` 1509-1529 assigns io 1510, tty 1512, region 1515, out 1526, arena 1527, scratch 1528 in that order, every fallible step (`try` 1515/1525) preceding the unwrap at 1529. `setupHeadless` 2301-2322 assigns io 2303, region 2305, out 2313, arena/scratch 2318-2319, then `processInit`. `cmdApp` 1561-1572 assigns io 1567, region 1569, arena/scratch 1570-1571 and leaves `out`/`tty` null.",
     "InputUnwrapTriage": "ANSWER: none of my 22 optionalunwrap IDs are actionable. 3 are provably non-null in library code (false_positive); 19 live inside `test` blocks where the unwrap is the oracle that a decode/bind/lookup produced an event (test_assertion). No defect, no hardening candidate, no uncertain row.\n\nCOUNTS (22/22 assigned IDs, exactly once)\nfalse_positive 3 — ZW019, ZW124, ZW126\ntest_assertion 19 — ZW021, ZW022, ZW023, ZW024, ZW025, ZW026, ZW027, ZW028, ZW029 (Parser.zig), ZW102-ZW109 (input.zig), ZW110, ZW111 (keybindings.zig)\ndefect 0, hardening 0, uncertain 0. No builds/tests/linters run; no files edited.\n\nREUSABLE INVARIANT PROOFS\nP1 (Key.zig by-value receiver): `matchShiftedCodepoint(self: Key, ...)` (Key.zig:132) takes `Key` BY VALUE, so no alias can change a field between a guard and its use. Guard at 133 returns early on null; lines 135-141 touch only local copies `self_mods`/`tgt_mods`. Non-null is structural, not behavioral. Proof holds for the analogous `matchShortcut` (121-123) but that line is not in my slice.\nP2 (Tty.tty_writer single-writer): field declared `?std.Io.File.Writer = null` (tty.zig:178) and assigned in exactly ONE place — `Tty.writer()` line 342 (repo-wide grep for `tty_writer` returns only 178/341/342/344). No code sets it back to null; `Tty.deinit` ends with `self.* = undefined` (tty.zig:243) and is documented \"The value is unusable afterwards\" (230-234), so post-deinit use is already UB, not a new unwrap risk. The signal handlers never touch it: `handleWinch` stores an atomic (398-400), `handleTermSignal`/`restoreTerminal` use `global_tty`'s fd with `posix.tcsetattr`/`std.os.linux.write` (122-138, 411-424). Every `writer()` caller is the app thread (app.zig:425, 457, 579, 843, 1218, 2862 and caps.zig:246 inside `startTty`->`caps.detect` at app.zig:1149); the only `Thread.spawn` in the tree is a test pipe-feeder (input.zig:535) and `io.concurrent` is confined to debug_server.zig:185 on its own socket — no reentrancy or cross-thread reader of the field.\nP3 (Parser.test-oracle): `parse` is documented to return `event = null` with `n > 0` for complete-but-eventless sequences (Parser.zig:24-33 and 50-76), so `result.event` is NOT statically non-null anywhere. All nine Parser unwraps sit inside `test` blocks whose input and purpose require that specific event; a null is the assertion failing, not a consumer path. Zig test blocks are compiled only in test builds, so the panic surfaces as a test failure with the input in scope.\nP4 (input.zig same-thread pipe fixture): `Pipe.write` is a synchronous `writeStreamingAll` on the test thread (input.zig:455-458) and `nextTimeout` returns null ONLY when the wait expired with no event (input.zig:189-200, `pollFd` 306-314). At every one of my eight sites the bytes are already in the pipe before the call, so poll is immediately ready and a null means the reader failed to deliver — a failed test. Each enclosing test also uses `expectEqual(@as(?Event, null), ...)` at the preceding step to express the *legitimate* null, which confirms the unwrap is the must-deliver oracle (e.g. 598 then 602; 718/725 then 730; 746/752 then 755).\nP5 (Keymap.chord after bind): `bind` (keybindings.zig:183-222) creates the action's group before appending and pops it back only on append failure (the `if (!known) _ = self.groups.pop()` arm); `chord` (263-268) returns null only when no group carries the action. Both ZW110/ZW111 unwraps sit after `try km.bind(...)` for the same action (765 and 769), so a null means the round-trip the test exists to prove is broken — failed test, not a consumer defect.\n\nROWS (id | site | class | reason | proof ranges | invariant/caller path)",
