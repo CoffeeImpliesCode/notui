@@ -731,7 +731,7 @@ fn appendEntry(
             try pushStyle(aa, &row, lib_style);
             try row.print(aa, "… (truncated: {d} lines)", .{hidden});
             try row.appendSlice(aa, reset_sgr);
-            try pushLine(aa, region, row.items);
+            try pushLine(region, row.items);
             break;
         }
         var rest = aline;
@@ -761,22 +761,17 @@ fn appendEntry(
             try pushStyle(aa, &row, lib_style);
             try row.appendSlice(aa, l);
             try row.appendSlice(aa, reset_sgr);
-            try pushLine(aa, region, row.items);
+            try pushLine(region, row.items);
         }
     }
 }
 
-/// Queue `text` as `.line` rows split at the region width so each
-/// occupies exactly one terminal row (prompt.zig pushLine pattern). The
-/// caller has already styled `text`; width is measured on the PLAIN text.
-fn pushLine(aa: std.mem.Allocator, region: *Region, text: []const u8) !void {
-    var rest = text;
-    while (rest.len > 0) {
-        const chunk = try notui.width.truncate(aa, rest, region.width);
-        if (chunk.len == 0) break; // a single over-wide grapheme: drop
-        try region.append(.{ .line = chunk });
-        rest = rest[chunk.len..];
-    }
+/// Queue already-styled `text` as one `.line`. Region hard-wraps it at
+/// the band width measured on the visible cells, so the style's escape
+/// bytes never cost a column; splitting it here with `width.truncate`
+/// counted them and wrapped muted rows four cells early.
+fn pushLine(region: *Region, text: []const u8) !void {
+    try region.append(.{ .line = text });
 }
 
 // ── answer formatting (contract §4, skript repl.zig Query.submit) ─────
