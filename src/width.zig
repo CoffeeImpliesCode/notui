@@ -178,8 +178,33 @@ pub inline fn asciiSingle(str: []const u8) bool {
 
 /// Whether every byte of `str` is printable ASCII, so its width is its length.
 fn allPrintableAscii(str: []const u8) bool {
-    for (str) |b| if (!isPrintableAscii(b)) return false;
-    return true;
+    return printableAsciiPrefix(str) == str.len;
+}
+
+/// Length of the longest prefix of `str` whose bytes are all printable ASCII.
+/// Scans 32 bytes per step: a printable byte is one with `b - 0x20 < 0x5f`
+/// (wrapping), so one compare per lane tests the whole range.
+pub fn printableAsciiPrefix(str: []const u8) usize {
+    const lanes = 32;
+    const V = @Vector(lanes, u8);
+    var i: usize = 0;
+    while (i + lanes <= str.len) : (i += lanes) {
+        const v: V = str[i..][0..lanes].*;
+        const ok = (v -% @as(V, @splat(0x20))) < @as(V, @splat(0x5f));
+        const bad: u32 = ~@as(u32, @bitCast(ok));
+        if (bad != 0) return i + @ctz(bad);
+    }
+    while (i < str.len and isPrintableAscii(str[i])) i += 1;
+    return i;
+}
+
+/// Number of leading bytes of `str` that are each a one-cell cluster on
+/// their own (see `asciiSingle`): the printable ASCII prefix, less its last
+/// byte when a non-ASCII byte follows that could extend it.
+pub fn asciiSingleRun(str: []const u8) usize {
+    const n = printableAsciiPrefix(str);
+    if (n > 0 and n < str.len and str[n] >= 0x80) return n - 1;
+    return n;
 }
 
 /// Simple (single-codepoint) uppercase mapping for `cp`. Codepoints whose
@@ -523,4 +548,27 @@ test "ascii fast path: agrees with zg for every printable byte and successor" {
         }
         try std.testing.expectEqual(DisplayWidth.graphemeWidth(buf[0..1]), graphemeWidth(buf[0..1]));
     }
+}
+
+test "ascii run: the vector scan stops at the first unprintable byte at any offset" {
+    // Lengths around the 32-byte step, a stopper at every position, and
+    // stoppers at both range edges and above ASCII.
+    var buf: [80]u8 = undefined;
+    for ([_]u8{ 0x1f, 0x7f, 0x80, 0xff, 0x00 }) |stop| {
+        for (0..buf.len + 1) |len| {
+            for (0..len + 1) |at| {
+                @memset(buf[0..len], 'a');
+                buf[len -| 1] = '~';
+                if (len > 0) buf[0] = ' ';
+                if (at < len) buf[at] = stop;
+                const want = if (at < len) at else len;
+                try std.testing.expectEqual(want, printableAsciiPrefix(buf[0..len]));
+            }
+        }
+    }
+    // A non-ASCII byte may extend the last ASCII byte, so the run gives it up.
+    try std.testing.expectEqual(@as(usize, 1), asciiSingleRun("ae\u{301}"));
+    try std.testing.expectEqual(@as(usize, 3), asciiSingleRun("abc"));
+    try std.testing.expectEqual(@as(usize, 2), asciiSingleRun("ab\x01"));
+    try std.testing.expectEqual(@as(usize, 0), asciiSingleRun("\u{301}"));
 }

@@ -178,24 +178,48 @@ pub const Buffer = struct {
         var col: u16 = x;
         var off: usize = 0;
         while (off < text.len) {
-            // Printable ASCII is one byte and one column in every mode;
-            // only other text goes through the segmenter.
-            const ascii = Width.asciiSingle(text[off..]);
-            const glen = if (ascii) 1 else Width.firstCellLen(text[off..]);
+            // Printable ASCII is one byte and one column in every mode, so
+            // a run of it is stored in one pass; only other text goes
+            // through the segmenter, one cluster at a time.
+            const run = Width.asciiSingleRun(text[off..]);
+            if (run > 0) {
+                if (col >= self.width) break; // over-wide: drop the rest
+                const n: u16 = @intCast(@min(run, self.width - col));
+                self.fillAscii(col, y, style, text[off..][0..n]);
+                col += n;
+                off += n;
+                if (n < run) break;
+                continue;
+            }
+            const glen = Width.firstCellLen(text[off..]);
             if (glen == 0) break; // defensive: no progress possible
             const gc = text[off..][0..glen];
             off += glen;
 
-            const cw: isize = if (ascii) 1 else Width.graphemeWidth(gc);
+            const cw = Width.graphemeWidth(gc);
             if (cw <= 0) continue; // zero-width: advance no column
 
             const cwu: u16 = if (cw >= 2) 2 else 1;
             if (@as(u32, col) + cwu > self.width) break; // over-wide: drop the rest
-            const stored = if (ascii) Cell.asciiGrapheme(gc[0]) else gc;
-            self.place(col, y, .{ .grapheme = stored, .style = style }, cwu);
+            self.place(col, y, .{ .grapheme = gc, .style = style }, cwu);
             col += cwu;
         }
         return col - x;
+    }
+
+    /// Store the one-cell ASCII graphemes `bytes` from (x, y) on, all in
+    /// bounds: what `place` does cell by cell, decided once per run. Inside
+    /// the run every overwritten wide pair is overwritten whole, so only
+    /// the two ends can split one: a continuation at the start loses its
+    /// lead, and a continuation just past the end loses its own cell.
+    fn fillAscii(self: *Buffer, x: u16, y: u16, style: Style, bytes: []const u8) void {
+        const start = @as(usize, y) * @as(usize, self.width) + x;
+        const end = start + bytes.len;
+        if (self.cells[start].wide and start > 0) self.cells[start - 1] = Cell{};
+        if (x + bytes.len < self.width and self.cells[end].wide) self.cells[end] = Cell{};
+        for (self.cells[start..end], bytes) |*cell, b| {
+            cell.* = .{ .grapheme = Cell.asciiGrapheme(b), .style = style };
+        }
     }
 
     /// Emit the difference between `self` (current frame) and `prev`
@@ -1110,6 +1134,35 @@ test "buffer: zero-width combining marks advance no column" {
     try std.testing.expectEqualStrings("e\u{301}", buf.get(2, 0).grapheme);
     try std.testing.expectEqualStrings("x", buf.get(3, 0).grapheme);
     try std.testing.expect(buf.get(4, 0).eql(Cell{}));
+}
+
+test "buffer: an ASCII run over wide pairs matches cell-by-cell placement" {
+    // Wide pairs at columns 1-2 and 5-6; every run start and length that
+    // fits, drawn in one call, must leave the grid `set` would leave one
+    // cell at a time — including a run ending on a lead or starting on a
+    // continuation.
+    const text = "abcdefgh";
+    for (0..8) |x0| {
+        for (1..8 - x0 + 1) |len| {
+            var got = try Buffer.init(std.testing.allocator, 8, 2);
+            defer got.deinit();
+            var want = try Buffer.init(std.testing.allocator, 8, 2);
+            defer want.deinit();
+            for ([_]*Buffer{ &got, &want }) |b| {
+                try b.set(1, 1, .{ .grapheme = "日" });
+                try b.set(5, 1, .{ .grapheme = "本" });
+            }
+            const x: u16 = @intCast(x0);
+            _ = try got.draw(.{ .attrs = .{ .bold = true } }, text[0..len], x, 1);
+            for (text[0..len], 0..) |b, i| {
+                try want.set(x + @as(u16, @intCast(i)), 1, .{
+                    .grapheme = Cell.asciiGrapheme(b),
+                    .style = .{ .attrs = .{ .bold = true } },
+                });
+            }
+            for (got.cells, want.cells) |g, w| try std.testing.expect(g.eql(w));
+        }
+    }
 }
 
 test "buffer: draw out of bounds returns 0" {
