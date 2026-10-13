@@ -124,6 +124,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "kitty_image", .file = "examples/kitty_image.zig" },
         .{ .name = "kitty_image_showcase", .file = "examples/kitty_image_showcase.zig" },
         .{ .name = "bounded_smoke", .file = "examples/bounded_smoke.zig" },
+        .{ .name = "agent_demo", .file = "examples/agent_demo.zig" },
     };
     inline for (examples) |ex| {
         const example_exe = b.addExecutable(.{

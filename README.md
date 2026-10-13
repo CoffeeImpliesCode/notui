@@ -939,6 +939,8 @@ modules, immutable source pin and the shared four-rule frame contract.
 zig build run-example-spinner      # spinning frame; q / ctrl+c exits
 zig build run-example-prompt       # echo + backspace + Enter appends to scrollback
 zig build run-example-statusline   # styled segments; resize truncates gracefully
+zig build run-example-agent_demo   # agent chat: editor, completion, overlays, markdown, cards
+zig build run-example-agent_demo -- --script   # forty scripted turns
 ```
 
 Piped (non-TTY) smoke — one plain frame, no interactive sequences:
