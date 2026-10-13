@@ -261,6 +261,10 @@ pub const Select = struct {
 
         const start = self.windowStart(rows);
         self.offset = start;
+        // The box is drawn over whatever the band already holds: clear the
+        // whole box first, or text beneath shows through blank rows and
+        // past the end of short items.
+        try fill(buf, self.style, x, y, outer_w, rows + 2 * pad);
         if (framed) try drawFrame(buf, self.border_style, x, y, outer_w, rows + 2);
 
         const y0: u16 = y + pad;
@@ -353,10 +357,12 @@ pub const Modal = struct {
         const x0: u16 = x + (avail_w - outer_w) / 2;
         const y0: u16 = y + (avail_h - outer_h) / 2;
         if (outer_w < 2 or outer_h < 2) {
+            try fill(buf, self.style, x0, y0, outer_w, 1);
             var san: markdown.Sanitizer = .{};
             return drawBounded(buf, &san, self.style, self.firstLine(), x0, y0, outer_w, "", 0);
         }
 
+        try fill(buf, self.style, x0, y0, outer_w, outer_h);
         try drawFrame(buf, self.border_style, x0, y0, outer_w, outer_h);
         const inner_w: u16 = outer_w - 2;
         const inner_h: u16 = outer_h - 2;
@@ -478,6 +484,7 @@ pub const Popover = struct {
         // because outer_w is already capped at buf.width.
         const x0: u16 = @min(x, buf.width - outer_w);
         const y0: u16 = @min(y, buf.height - outer_h);
+        try fill(buf, self.style, x0, y0, outer_w, outer_h);
         try drawFrame(buf, self.border_style, x0, y0, outer_w, outer_h);
 
         const inner_w: u16 = outer_w - 2;
@@ -516,6 +523,17 @@ fn narrow(v: usize) u16 {
 /// of wrapping.
 fn put(buf: *Buffer, style: Style, glyph: []const u8, x: u16, y: u16) !void {
     try buf.set(x, y, .{ .grapheme = glyph, .style = style });
+}
+
+/// Blank a `w` x `h` rectangle with its top-left at (x, y) in `style`, so
+/// a box hides the band content it covers. Cells past the buffer edge are
+/// dropped by `Buffer.set`.
+fn fill(buf: *Buffer, style: Style, x: u16, y: u16, w: u16, h: u16) !void {
+    var row: u16 = 0;
+    while (row < h) : (row += 1) {
+        var col: u16 = 0;
+        while (col < w) : (col += 1) try put(buf, style, " ", x +| col, y +| row);
+    }
 }
 
 /// Draw a `w` x `h` box with its top-left corner at (x, y). Anything
@@ -1163,6 +1181,32 @@ test "modal: centres the box in the space it is given" {
     // The title is bold, the body is not.
     try std.testing.expect(buf.get(5, 3).style.eql(m.title_style));
     try std.testing.expect(buf.get(5, 4).style.eql(m.style));
+}
+
+test "overlay: every box hides the band content it is drawn over" {
+    var buf = try Buffer.init(test_alloc, 20, 7);
+    defer buf.deinit();
+    var row: [64]u8 = undefined;
+    const under = "XXXXXXXXXXXXXXXXXXXX";
+
+    for (0..7) |y| _ = try buf.draw(.{}, under, 0, @intCast(y));
+    var m: Modal = .{ .title = "Help", .body = "a\n\nb", .footer = "Esc", .width = 10, .height = 7 };
+    _ = try m.draw(&buf, 0, 0, at0);
+    try std.testing.expectEqualStrings("XXXXX│Help    │XXXXX", rowStr(&buf, 1, &row));
+    try std.testing.expectEqualStrings("XXXXX│        │XXXXX", rowStr(&buf, 3, &row));
+    try std.testing.expectEqualStrings("XXXXX│Esc     │XXXXX", rowStr(&buf, 5, &row));
+
+    for (0..7) |y| _ = try buf.draw(.{}, under, 0, @intCast(y));
+    var s: Select = .{ .items = &.{ "yes", "no" }, .width = 8 };
+    _ = try s.draw(&buf, 2, 1, at0);
+    try std.testing.expectEqualStrings("XX│yes   │XXXXXXXXXX", rowStr(&buf, 2, &row));
+    try std.testing.expectEqualStrings("XX│no    │XXXXXXXXXX", rowStr(&buf, 3, &row));
+
+    for (0..7) |y| _ = try buf.draw(.{}, under, 0, @intCast(y));
+    var p: Popover = .{ .width = 6, .height = 4, .lines = &.{"hi"} };
+    _ = try p.draw(&buf, 1, 1, at0);
+    try std.testing.expectEqualStrings("X│hi  │XXXXXXXXXXXXX", rowStr(&buf, 2, &row));
+    try std.testing.expectEqualStrings("X│    │XXXXXXXXXXXXX", rowStr(&buf, 3, &row));
 }
 
 test "modal: a buffer too small for the preferred size shrinks instead of overflowing" {
