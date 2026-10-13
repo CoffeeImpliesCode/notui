@@ -42,7 +42,7 @@ or pass the value through a small helper — as `clampedIndex` does for the
 
 Whether a diagnostic is a defect is a recorded result, not a judgement call.
 [`ANALYZER-TRIAGE.json`](ANALYZER-TRIAGE.json) classifies all 136
-occurrences of the `6a09ae304673` tree: 78 false positives, 58 intentional
+occurrences of the `b8b2118ef980` tree: 78 false positives, 58 intentional
 test assertions, none a confirmed runtime defect. Read that ledger before
 treating a new analyzer line as a bug, and extend it rather than re-derive
 the site. The classification is source and caller review against documented

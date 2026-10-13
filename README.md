@@ -246,7 +246,7 @@ declarations were rejected by their intended guards. All six registered roots
 generated documentation. An external caller named `Buffer.RowFootprint` and its
 `NullGap`, then called the allocator-first footprint API.
 
-**Analyzer assessment, refreshed 2026-10-13 at `6a09ae304673`:** all 136 diagnostic
+**Analyzer assessment, refreshed 2026-10-13 at `b8b2118ef980`:** all 136 diagnostic
 occurrences were reviewed. There are 78 false positives and 58 intentional test
 assertions. No reported finding exposed a confirmed runtime defect.
 
