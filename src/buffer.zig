@@ -344,10 +344,10 @@ pub const Buffer = struct {
         const packed_style = packStyle(style);
         var col: u16 = x;
         var off: usize = 0;
-        while (off < text.len) {
+        outer: while (off < text.len) {
             // Printable ASCII is one byte and one column in every mode, so
-            // a run of it is stored in one pass; only other text goes
-            // through the segmenter, one cluster at a time.
+            // a run of it is stored in one pass; other text goes through
+            // one segmenter walk until the next such run.
             const run = Width.asciiSingleRun(text[off..]);
             if (run > 0) {
                 if (col >= self.width) break; // over-wide: drop the rest
@@ -358,18 +358,22 @@ pub const Buffer = struct {
                 if (n < run) break;
                 continue;
             }
-            const glen = Width.firstCellLen(text[off..]);
-            if (glen == 0) break; // defensive: no progress possible
-            const gc = text[off..][0..glen];
-            off += glen;
-
-            const cw = Width.graphemeWidth(gc);
-            if (cw <= 0) continue; // zero-width: advance no column
-
-            const cwu: u16 = if (cw >= 2) 2 else 1;
-            if (@as(u32, col) + cwu > self.width) break; // over-wide: drop the rest
-            self.place(col, y, gc, packed_style, style.hyperlink, false, cwu);
-            col += cwu;
+            const start = off;
+            var cells = Width.CellIterator.init(text[start..]);
+            while (cells.next()) |c| {
+                const gc = text[start + c.offset ..][0..c.len];
+                off = start + c.offset + c.len;
+                // A zero-width cluster advances no column.
+                if (c.width > 0) {
+                    const cwu: u16 = if (c.width >= 2) 2 else 1;
+                    // Over-wide: drop the rest.
+                    if (@as(u32, col) + cwu > self.width) break :outer;
+                    self.place(col, y, gc, packed_style, style.hyperlink, false, cwu);
+                    col += cwu;
+                }
+                if (Width.asciiSingle(text[off..])) continue :outer;
+            }
+            break; // the walk reached the end, or input it cannot advance over
         }
         return col - x;
     }

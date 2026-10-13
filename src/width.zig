@@ -88,6 +88,52 @@ pub fn firstCellLen(str: []const u8) usize {
     return end;
 }
 
+/// The terminal cell clusters of a string with their widths, under the
+/// selected mode: `firstCellLen` and `graphemeWidth` applied cluster after
+/// cluster, but in grapheme mode one segmenter walks the string, so each
+/// codepoint is decoded and classified once instead of per call.
+pub const CellIterator = struct {
+    str: []const u8,
+    off: usize = 0,
+    graphemes: ?Graphemes.Iterator,
+
+    /// One cluster: `str[offset..][0..len]`, `width` as `graphemeWidth`.
+    pub const Cluster = struct { offset: usize, len: usize, width: isize };
+
+    pub fn init(str: []const u8) CellIterator {
+        return .{
+            .str = str,
+            .graphemes = if (mode == .grapheme) Graphemes.iterator(str) else null,
+        };
+    }
+
+    /// The next cluster, or null at the end (or at input the segmenter
+    /// cannot advance over, as `firstCellLen` returning 0).
+    pub fn next(self: *CellIterator) ?Cluster {
+        if (self.graphemes) |*it| {
+            const g = it.next() orelse return null;
+            const gc = self.str[g.offset..][0..g.len];
+            return .{ .offset = g.offset, .len = g.len, .width = clusterWidth(gc) };
+        }
+        if (self.off >= self.str.len) return null;
+        const len = firstCellLen(self.str[self.off..]);
+        if (len == 0) return null;
+        const at = self.off;
+        self.off += len;
+        return .{ .offset = at, .len = len, .width = graphemeWidth(self.str[at..][0..len]) };
+    }
+
+    /// `DisplayWidth.graphemeWidth` without its second decode for the
+    /// common one-codepoint cluster, whose width is the codepoint's.
+    fn clusterWidth(gc: []const u8) isize {
+        if (gc.len == 1 and isPrintableAscii(gc[0])) return 1;
+        if (firstCodepoint(gc)) |cp| {
+            if (cp.len == gc.len) return DisplayWidth.codePointWidth(cp.code);
+        }
+        return DisplayWidth.graphemeWidth(gc);
+    }
+};
+
 /// Display width of `str` in terminal cells under the selected drawing policy.
 pub fn strWidth(str: []const u8) usize {
     if (allPrintableAscii(str)) return str.len;
@@ -571,4 +617,35 @@ test "ascii run: the vector scan stops at the first unprintable byte at any offs
     try std.testing.expectEqual(@as(usize, 3), asciiSingleRun("abc"));
     try std.testing.expectEqual(@as(usize, 2), asciiSingleRun("ab\x01"));
     try std.testing.expectEqual(@as(usize, 0), asciiSingleRun("\u{301}"));
+}
+
+test "cell iterator: one walk agrees with firstCellLen and graphemeWidth per cluster" {
+    const saved = getMode();
+    defer setMode(saved);
+    const corpus = [_][]const u8{
+        "日本語テスト ──┌─┬─┐",
+        "e\u{301}o\u{308} a\u{30A}",
+        "👨‍🌾x👩‍💻\u{fe0f}",
+        "🇩🇪🇫🇷🇺",
+        "\u{1100}\u{1161}\u{11a8}가",
+        "\u{600}a\u{600}\u{600}b",
+        "a\r\nb\x01\u{85}",
+        "\u{301}\u{200d}",
+        "☺\u{fe0e}☺\u{fe0f}👍\u{1f3fd}",
+    };
+    for ([_]Mode{ .grapheme, .codepoint }) |m| {
+        setMode(m);
+        for (corpus) |s| {
+            var it = CellIterator.init(s);
+            var off: usize = 0;
+            while (it.next()) |c| {
+                const len = firstCellLen(s[off..]);
+                try std.testing.expectEqual(off, c.offset);
+                try std.testing.expectEqual(len, c.len);
+                try std.testing.expectEqual(graphemeWidth(s[off..][0..len]), c.width);
+                off += len;
+            }
+            try std.testing.expectEqual(s.len, off);
+        }
+    }
 }
