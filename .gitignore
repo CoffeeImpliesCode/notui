@@ -23,3 +23,19 @@ graphify-out/
 
 # Local handoff note (session state, never commit)
 HANDOFF.md
+
+# Compiler, package, and coverage outputs
+.zig-global-cache/
+*.o
+*.a
+*.so
+*.log
+*.zcov
+core
+core.*
+__pycache__/
+*.pyc
+.ruff_cache/
+/result*
+node_modules/
+target/
