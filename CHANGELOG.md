@@ -2,101 +2,32 @@
 
 ## Unreleased
 
-### Breaking changes
-
-- `Buffer.cells` is removed. Use `get`, `set`, `draw` and `copyFrom`.
-  `Cell` remains the interface value. The grid uses hot slots and cold side arrays.
-- `Buffer.set` and `Buffer.draw` store one-byte ASCII graphemes by value.
-  Reads return static slices. Other graphemes and all hyperlinks remain caller borrows.
-- `width.simpleCluster` is replaced by `width.SimpleIterator`.
-  Use `init(text)`, then `next()` for prefix clusters with byte offsets, lengths and widths.
-  The iterator borrows its input and stops before ASCII or uncertain joining boundaries.
-
-### Fixes
-
-- Preserve SIMD lane order on big-endian targets. ASCII prefix scans, cold-text
-  copies and row footprints now select the correct slots.
-- Return the DA1 truecolor flag by value. Capability detection no longer reads
-  a slice of the query function's expired stack buffer.
+- Require Zig 0.17.0 and pin zg to its upstream Zig 0.17 compatibility PR, with Unicode 18 data.
+- Remove `Buffer.cells`. Use `get`, `set`, `draw`, and `copyFrom`.
+- Store one-byte ASCII graphemes by value. Other graphemes and hyperlinks remain caller borrows.
+- Replace `width.simpleCluster` with the borrowed, allocation-free `width.SimpleIterator`.
+- Keep SIMD lane masks in logical lane order on all target byte orders.
+- Return the DA1 truecolor flag by value instead of borrowing a query stack buffer.
 - Remove the timer test's immediate second-call timing assumption.
-  Its message-delivery and render assertions remain.
-
-### Performance
-
 - Scan printable ASCII in 32-byte vectors and store each run in one pass.
-- Keep glyph heads, flags and packed styles in 16-byte hot slots.
-  Damage scans, copies and row emission read cold text only when flags require it.
-- Segment non-ASCII stretches with one iterator. A checked BMP bitset skips
-  segmentation for common Latin, Greek, Cyrillic, kana, CJK and symbol clusters.
-  Other clusters still use zg.
+- Store glyph heads, flags, and packed styles in 16-byte hot slots with cold slice arrays.
+- Segment each non-ASCII stretch with one iterator and retain common-script lookahead.
 - Scan cold flags and row footprints eight slots at a time.
-- Use an occupancy mask for the SGR memo instead of clearing its full storage each frame.
-- Drop experimental vector slot construction and block copies of cold slices.
-  Neither gave a repeatable gain across the benchmark cases.
-- Carry verified BMP lookahead across common-script draw steps instead of decoding it twice.
-  The iterator stays local to the draw loop and allocates nothing.
-
-The sixth round compared `1110c371` with `33d40219`, five interleaved ReleaseFast runs:
-static and streaming minima fell 5.4–5.9%; other cases' median p50 stayed within 1%.
-Bytes and allocations per frame did not change. Copy-path and placement-inline experiments
-were removed. The earlier 0.1.0 comparison below remains a historical result.
-
-ReleaseFast against 0.1.0, five interleaved runs on the same CPU:
-static 200×60 minimum 145 030 → 48 833 ns, stream 200×60 160 661 → 50 128 ns,
-and Region h24 median p50 154 608 → 35 314 ns.
-Buffer cases retain zero allocations per frame. Static and Region idle frames emit zero bytes.
-See README "Measurement and verification" for all cases and the benchmark-reference timing caveat.
-
-Verification: 845/845 tests in Debug, ReleaseSafe and ReleaseFast.
-All four cross targets passed, including 32-bit x86 and big-endian PowerPC64.
-The live statusline retained history through a 100→60→100-column resize and exited normally.
+- Track occupied SGR memo slots instead of clearing all storage per frame.
 
 ## 0.1.0
 
-First tagged release. Changes since `main` at `38634f2b`.
-
-### Breaking changes
-
-- `Region.Options.terminal_reflow` and `App.Options.terminal_reflow` default to
-  `.rewrapping`. xterm.js, VTE, kitty, iTerm2, WezTerm, foot and tmux rewrap old rows
-  on a width change. A terminal that never rewraps must declare `.none`.
-- The paint envelope no longer turns DECAWM off around band writes. A frame that
-  reaches a terminal after it narrowed now soft-wraps instead of overwriting
-  committed scrollback at the last column.
-- `Buffer.draw` stores printable one-byte ASCII graphemes as static slices
-  (`Cell.asciiGrapheme`), not slices of the caller's text. Code that checks where a
-  cell's bytes live must skip `Cell.isStaticGrapheme` cells.
-
-### Fixes
-
-- Region: paint the first band on the rows it reserves; repaint the whole band after
-  every resize signal; reclaim retired rows that return contiguous with the band;
-  keep scrollback in submission order; wrap long and styled lines by display width;
-  record every erased gap row when a clipped prefix is handed over.
-- App: paint every frame from a blank buffer, flush the teardown, resize the band on
-  SIGWINCH.
-- Overlay: clear the box before drawing a Select, Modal or Popover.
-- Width: lay text out per codepoint where the terminal does not cluster.
-- Caps: read a reply that is already waiting when its window opens.
-- Examples: REPL cursor and grapheme movement, formula preview and error hint, and
-  agent_demo layout in tiny bands.
-
-### Additions
-
-- `examples/agent_demo`, a coding-agent chat built from every component.
-- Resize tests: App-like resize bursts with delayed CPR replies, and width reflow under
-  the default profile.
-- Gate: a cross-test profile; zwanzig finishes every function.
-
-### Performance
-
-ReleaseFast, medians of per-run `min` ns against `38634f2b` on the same host:
-static 80×24 193 171 → 47 077, static 200×60 1 013 303 → 305 788, stream 80×24
-197 313 → 61 392, styles 81 156 → 56 850. Bytes and allocations per frame did not
-grow. See README "Measurement and verification" for the full table.
-
-- `width.zig`: ASCII fast paths in segmentation, width and prefix fitting.
-- `Buffer.draw`: static ASCII graphemes and no second measurement per cell.
-- `Region`: snapshots own static graphemes without copying; row damage reuses
-  `Buffer.rowChanged`'s whole-row byte compare; `Cell.eql` accepts the same slice
-  without reading its bytes.
+- Default terminal width reflow to `.rewrapping`. Non-rewrapping terminals must declare `.none`.
+- Leave autowrap enabled so frames in flight across a resize preserve committed text.
+- Store printable one-byte ASCII graphemes in static slices.
+- Paint the first band on its reserved rows and repaint the band after resize signals.
+- Reclaim retired rows that return beside the live band without erasing committed history.
+- Preserve scrollback submission order and wrap appended lines by display width.
+- Record erased gap rows when a clipped prefix leaves the band.
+- Clear the App buffer per frame, flush teardown output, and process SIGWINCH.
+- Clear overlay boxes before drawing Select, Modal, or Popover components.
+- Use codepoint widths when the terminal does not cluster text.
+- Read capability replies that arrive before their query window opens.
+- Improve REPL cursor motion, formula diagnostics, and tiny-band example layout.
+- Add the `agent_demo` example, resize tests, and a cross-test profile.
+- Add ASCII fast paths and reuse row-level damage checks for snapshots and rendering.

@@ -64,14 +64,8 @@ For row `y` writing `out[0..out.len)`:
   loop — identical math, one piece at a time.
 - `diff_cap = 2048`: a wider row has no room for the stack difference
   array and delegates to `coverageRow`.
-- `@setRuntimeSafety(false)` covers `coverageRowFast` only. ReleaseSafe
-  emits a cold panic edge (bounds check + `integerPartOutOfBounds`) at every
-  checked cast, and inlined into the `addPiece → scanlineSweepVec` monolith
-  those blocks distort the backend's optimization badly enough to make the
-  fast path **6× slower** than the sweep (measured 6.0 µs vs 1.1 µs per row
-  on the λ fixture; 0.99 µs vs 1.1 µs with the checks scoped off). Every
-  index in the kernel is guarded by an adjacent explicit comparison — the
-  checks are unreachable by construction:
+- `@setRuntimeSafety(false)` covers `coverageRowFast` only.
+  Every kernel index has an explicit adjacent bound:
   - `out.len ≤ diff_cap` (the fallback branch), so `out.len + 1` cannot wrap;
   - `n_pieces ≤ curves.len × 4 ≤ batch_cap` by the `curves.len > batch_cap / 4`
     fallback (a division, so the threshold cannot overflow either);
@@ -103,20 +97,3 @@ required):
   partial-overlap piece (`span < 1`), a row with zero hits, a window
   clipping the extent on either side, and `out.len == 1`;
 - the real λ glyph fixture (`src/lambda_fixture.zig`), every row.
-
-## Measured
-
-ReleaseSafe, `--bench 300`, this host (2026-09-30). Render average is the
-raster cost; parse is ztex and is unaffected by the algorithm.
-
-| formula | sweep render avg | fast render avg | fast min vs sweep min |
-|---|---|---|---|
-| `\lambda` | 0.023 ms | 0.030 ms | 0.014 vs 0.011 ms |
-| `\int_0^\infty e^{-x^2}\,dx = \frac{\sqrt{\pi}}{2}` | 0.506 ms | 0.516 ms | 0.231 vs 0.374 ms |
-
-At app scale the two are within noise on the average — the fast path's win
-shows on the minimum for the wide formula, where the row work dominates. The
-per-row unit bench that motivated the path (0.83× narrow, 0.24× wide on the
-λ fixture and a 6-glyph copy) lived in a throwaway `src/_covbench.zig` that
-did not survive; `--bench` above is the reproducible harness, and the
-advantage grows with the number of curves per row.
