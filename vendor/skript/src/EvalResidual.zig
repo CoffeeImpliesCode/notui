@@ -68,7 +68,7 @@ fn sourceInfo(runtime: *Runtime, source: Value) skript.Error!SourceInfo {
     if (code.owner != @as(?*const anyopaque, runtime)) return error.Denied;
     if (code.id == 0 or code.revision == 0) return error.InvalidCode;
     if (closure.function_id == .invalid) return error.InvalidCode;
-    const function_index = @intFromEnum(closure.function_id);
+    const function_index = @backingInt(closure.function_id);
     if (function_index >= code.functions.len) return error.InvalidCode;
     const function = code.function(closure.function_id) orelse return error.InvalidCode;
     if (closure.arglist.len != function.parameter_count) return error.InvalidCode;
@@ -196,7 +196,7 @@ const Specializer = struct {
         try self.seedParameters();
         try self.seedCaptures();
 
-        const function_index = @intFromEnum(self.function.id);
+        const function_index = @backingInt(self.function.id);
         if (function_index >= self.source.functions.len) return error.InvalidCode;
         const block_start: usize = self.function.block_start;
         const block_end = std.math.add(
@@ -207,7 +207,7 @@ const Specializer = struct {
             return error.InvalidCode;
         if (block_end > self.source.function_blocks.len) return error.InvalidCode;
         const entry_id = self.source.function_blocks[block_start];
-        const entry_index = @intFromEnum(entry_id);
+        const entry_index = @backingInt(entry_id);
         if (entry_index >= self.source.blocks.len) return error.InvalidCode;
         const entry = self.source.blocks[entry_index];
         const node_start: usize = entry.node_start;
@@ -216,7 +216,7 @@ const Specializer = struct {
         if (node_end > self.source.block_nodes.len) return error.InvalidCode;
         for (self.source.block_nodes[node_start..node_end]) |node_id| {
             try self.ctx.chargeWork(1, 1, .code);
-            const node_index = @intFromEnum(node_id);
+            const node_index = @backingInt(node_id);
             if (node_index >= self.source.nodes.len) return error.InvalidCode;
             try self.visit(self.source.nodes[node_index]);
         }
@@ -236,7 +236,7 @@ const Specializer = struct {
         if (self.arguments.len != end - start) return error.ArityMismatch;
         for (self.source.parameters[start..end], self.arguments) |binding_id, value| {
             if (!isImmediateScalar(value)) continue;
-            const binding_index = @intFromEnum(binding_id);
+            const binding_index = @backingInt(binding_id);
             if (binding_index >= self.source.bindings.len) return error.InvalidCode;
             try self.setKnown(self.source.bindings[binding_index].value, value);
         }
@@ -262,13 +262,13 @@ const Specializer = struct {
                 if (isImmediateScalar(value)) try self.setKnown(node.result, value);
             },
             .local_read => |binding_id| {
-                const binding_index = @intFromEnum(binding_id);
+                const binding_index = @backingInt(binding_id);
                 if (binding_index >= self.source.bindings.len) return error.InvalidCode;
                 const value_id = self.source.bindings[binding_index].value;
                 if (self.getKnown(value_id)) |value| try self.setKnown(node.result, value);
             },
             .global_read => |global_id| {
-                const global_index = @intFromEnum(global_id);
+                const global_index = @backingInt(global_id);
                 if (global_index >= self.source.globals.len) return error.InvalidCode;
                 const global = self.source.globals[global_index];
                 const dependency = try self.readDependency(global.name) orelse return;
@@ -333,13 +333,13 @@ const Specializer = struct {
     }
 
     fn getKnown(self: *const Specializer, value_id: Code.ValueId) ?Value {
-        const index = @intFromEnum(value_id);
+        const index = @backingInt(value_id);
         if (value_id == .invalid or index >= self.known.len) return null;
         return self.known[index];
     }
 
     fn setKnown(self: *Specializer, value_id: Code.ValueId, value: Value) skript.Error!void {
-        const index = @intFromEnum(value_id);
+        const index = @backingInt(value_id);
         if (value_id == .invalid or index >= self.known.len) return error.InvalidCode;
         self.known[index] = value;
     }
@@ -385,7 +385,7 @@ const Specializer = struct {
             switch (node.operation) {
                 .ns_push, .ns_pop => return false,
                 .global_read => |global_id| {
-                    const index = @intFromEnum(global_id);
+                    const index = @backingInt(global_id);
                     if (index >= self.source.globals.len) return error.InvalidCode;
                     const global = self.source.globals[index];
                     const dependency = self.runtime.readDependency(
@@ -596,7 +596,7 @@ pub fn create(
     const source_closure = info.closure;
     const source_code = info.code;
     const source_function = info.function;
-    const source_function_index = @intFromEnum(source_closure.function_id);
+    const source_function_index = @backingInt(source_closure.function_id);
     try source_code.validate(ctx.scratch, ctx);
     if (options.arguments.len != source_closure.arglist.len) return error.ArityMismatch;
     const expected_arguments = try copyGuardValues(runtime.static, options.arguments);
@@ -764,8 +764,8 @@ fn validateModel(ctx: *const EvalContext, model: ?EvalContext.Version) skript.Er
     if (model) |expected| {
         if (expected.id == 0 or expected.revision == 0) return error.Denied;
     }
-    inline for (@typeInfo(EvalContext.EffectDecisionTable).@"struct".fields) |field| {
-        switch (@field(ctx.effects, field.name)) {
+    inline for (@typeInfo(EvalContext.EffectDecisionTable).@"struct".field_names) |name| {
+        switch (@field(ctx.effects, name)) {
             .model => |selected| {
                 const expected = model orelse return error.Denied;
                 if (!selected.eql(expected)) return error.Denied;
@@ -785,20 +785,20 @@ fn isImmediateScalar(value: Value) bool {
     {
         return true;
     }
-    const tag = @intFromEnum(value.typ);
+    const tag = @backingInt(value.typ);
     if (tag >= b.type_float and tag <= b.type_float_max) return true;
     if (tag >= b.type_uint and tag <= b.type_uint_max) return true;
     if (tag >= b.type_int and tag <= b.type_int_max) return true;
-    if (tag >= b.type_complex and tag <= @intFromEnum(b.type_c32)) return true;
+    if (tag >= b.type_complex and tag <= @backingInt(b.type_c32)) return true;
     return false;
 }
 
 fn isNumericScalar(value: Value) bool {
-    const tag = @intFromEnum(value.typ);
+    const tag = @backingInt(value.typ);
     if (tag >= b.type_float and tag <= b.type_float_max) return true;
     if (tag >= b.type_uint and tag <= b.type_uint_max) return true;
     if (tag >= b.type_int and tag <= b.type_int_max) return true;
-    if (tag >= b.type_complex and tag <= @intFromEnum(b.type_c32)) return true;
+    if (tag >= b.type_complex and tag <= @backingInt(b.type_c32)) return true;
     return false;
 }
 
@@ -897,7 +897,7 @@ fn validateFold(
     dependencies: []const Dependency,
     fold: Fold,
 ) skript.Error!void {
-    const index = @intFromEnum(fold.node);
+    const index = @backingInt(fold.node);
     if (index >= code.nodes.len) return error.InvalidCode;
     const node = code.nodes[index];
     if (node.id != fold.node) return error.InvalidCode;
@@ -960,7 +960,7 @@ fn validateFoldDependencies(
         if (node.function != function) continue;
         switch (node.operation) {
             .global_read => |global_id| {
-                const index = @intFromEnum(global_id);
+                const index = @backingInt(global_id);
                 if (index >= code.globals.len) return error.InvalidCode;
                 if (!try findDependencyBinding(
                     ctx,
@@ -998,7 +998,7 @@ fn buildCode(
     if (folds.len > 0) {
         const copied_nodes = try runtime.static.dupe(Code.Node, source.nodes);
         for (folds) |fold| {
-            const index = @intFromEnum(fold.node);
+            const index = @backingInt(fold.node);
             if (index >= copied_nodes.len) return error.InvalidCode;
             copied_nodes[index].operation = .{ .literal = fold.value };
         }
@@ -1039,7 +1039,7 @@ fn sourceIdentityValid(self: *const Residual) bool {
     if (source_code.id != self.source_code_id or source_code.revision != self.source_code_revision) return false;
     if (self.code.id != self.residual_code_id or self.code.revision != self.residual_code_revision) return false;
     if (self.source_closure.function_id != self.source_function) return false;
-    const index = @intFromEnum(self.source_function);
+    const index = @backingInt(self.source_function);
     if (index >= source_code.functions.len or index >= self.lowered_functions.len) return false;
     const function = source_code.function(self.source_function) orelse return false;
     if (self.source_closure.arglist.len != function.parameter_count) return false;
@@ -1053,7 +1053,7 @@ fn sourceIdentityValid(self: *const Residual) bool {
 
 fn makeClosure(self: *const Residual) skript.Error!Value {
     const source_closure = self.source_closure;
-    const index = @intFromEnum(source_closure.function_id);
+    const index = @backingInt(source_closure.function_id);
     if (index >= self.lowered_functions.len) return error.InvalidCode;
     const function = self.lowered_functions[index];
     const function_code = function.code orelse return error.InvalidCode;
@@ -1180,14 +1180,14 @@ test "specialization merge meters large fold comparisons on the supplied lineage
     var destination = std.ArrayList(Fold).initBuffer(&storage);
     for (0..destination_count) |index| {
         destination.appendAssumeCapacity(.{
-            .node = @enumFromInt(@as(u32, @intCast(index))),
+            .node = @fromBackingInt(@intCast(@as(u32, @intCast(index)))),
             .value = Value.i64(@intCast(index)),
         });
     }
     var source: [source_count]Fold = undefined;
     for (0..source_count) |index| {
         source[index] = .{
-            .node = @enumFromInt(@as(u32, @intCast(destination_count + index))),
+            .node = @fromBackingInt(@intCast(@as(u32, @intCast(destination_count + index)))),
             .value = Value.i64(@intCast(destination_count + index)),
         };
     }
@@ -1273,8 +1273,8 @@ test "specialization merge preserves duplicate rules and first occurrence order"
     var environment: ResidualTestContext = undefined;
     try environment.init(runtime, .{});
 
-    const first_fold: Fold = .{ .node = @enumFromInt(2), .value = Value.i64(20) };
-    const second_fold: Fold = .{ .node = @enumFromInt(1), .value = Value.i64(10) };
+    const first_fold: Fold = .{ .node = @fromBackingInt(@intCast(2)), .value = Value.i64(20) };
+    const second_fold: Fold = .{ .node = @fromBackingInt(@intCast(1)), .value = Value.i64(10) };
     var fold_storage: [4]Fold = undefined;
     var folds = std.ArrayList(Fold).initBuffer(&fold_storage);
     try appendFolds(

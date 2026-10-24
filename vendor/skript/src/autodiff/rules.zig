@@ -1262,7 +1262,7 @@ pub fn materializeCodeCallable(ctx: *EvalContext, body: CodeRule) Error!Value {
     if (!Value.isNil(body.callable)) return body.callable;
     if (function.capture_count != 0) return error.Unsupported;
     const program = try ctx.runtime.lowerCode(ctx.scratch, body.code);
-    const index = @intFromEnum(body.function);
+    const index = @backingInt(body.function);
     if (index >= program.fns.len) return error.InvalidCode;
     const lowered = program.fns[index];
     const ref = try ctx.runtime.store.create(skript.data.Closure);
@@ -1387,10 +1387,10 @@ pub fn scalarDispatch(
     if (args.len == 0 or args[0].typ != b.type_i64) return error.ArityMismatch;
     try ctx.chargeWork(1, 1, .native);
     const raw = args[0].obj.toInt(i64);
-    if (raw < @intFromEnum(ScalarOp.add) or raw > @intFromEnum(ScalarOp.realize_tangent)) {
+    if (raw < @backingInt(ScalarOp.add) or raw > @backingInt(ScalarOp.realize_tangent)) {
         return error.TypeMismatch;
     }
-    const operation: ScalarOp = @enumFromInt(raw);
+    const operation: ScalarOp = @fromBackingInt(@intCast(raw));
     const values = args[1..];
     return switch (operation) {
         .add => scalarBinary(ctx, .add, values),
@@ -1745,13 +1745,13 @@ test "scalar dispatch refuses fractional and overflowing i64 tangents" {
         ctx,
         .nil,
         .nil,
-        &.{ .i64(@intFromEnum(ScalarOp.div)), .i64(1), .i64(2) },
+        &.{ .i64(@backingInt(ScalarOp.div)), .i64(1), .i64(2) },
     ));
     try std.testing.expectError(error.Unsupported, scalarDispatch(
         ctx,
         .nil,
         .nil,
-        &.{ .i64(@intFromEnum(ScalarOp.add)), .i64(std.math.maxInt(i64)), .i64(1) },
+        &.{ .i64(@backingInt(ScalarOp.add)), .i64(std.math.maxInt(i64)), .i64(1) },
     ));
 }
 
@@ -1768,7 +1768,7 @@ fn addTestCodeParameter(
         .parameter,
         .{},
     );
-    builder.bindings.items[@intFromEnum(binding)].value = try builder.addValue(function);
+    builder.bindings.items[@backingInt(binding)].value = try builder.addValue(function);
     try builder.addParameter(function, binding);
     return builder.addNode(function, block, .{ .local_read = binding }, .{});
 }
@@ -1779,7 +1779,7 @@ fn makeTestCodeJvp(runtime: *skript.Runtime) !Value {
     builder.id = identity.id;
     builder.revision = identity.revision;
     const function = try builder.addFunction(null, .{});
-    builder.functions.items[@intFromEnum(function)].result_count = 2;
+    builder.functions.items[@backingInt(function)].result_count = 2;
     const block = try builder.addBlock(function);
     const primal = try addTestCodeParameter(&builder, runtime, function, block, "primal");
     const tangent = try addTestCodeParameter(&builder, runtime, function, block, "tangent");
@@ -1799,7 +1799,7 @@ fn makeTestCodeJvp(runtime: *skript.Runtime) !Value {
     const code = try builder.finish(runtime.context().scratch);
     code.owner = runtime;
     const program = try runtime.lowerCode(runtime.context().scratch, code);
-    const lowered = program.fns[@intFromEnum(function)];
+    const lowered = program.fns[@backingInt(function)];
     const reference = try runtime.store.create(skript.data.Closure);
     runtime.store.store(skript.data.Closure, reference.deref(skript.data.Closure), .{
         .parent_ns = runtime.root_ns,

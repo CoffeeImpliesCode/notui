@@ -12,7 +12,7 @@ pub fn build(b: *std.Build) void {
     const coverage = b.option(bool, "coverage", "Enable zig-cov") orelse false;
     const cov_rt = b.option([]const u8, "coverage-rt", "zig-cov-rt path") orelse null;
 
-    // Library dependency: zg — Unicode 16 text/width/graphemes. The only
+    // Library dependency: zg — Unicode 18 text/width/graphemes. The only
     // one the `notui` module itself imports (src/width.zig is the single
     // seam).
     const zg = b.dependency("zg", .{});
@@ -29,6 +29,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .enable_libffi = false,
+        .cli = false,
     });
 
     // ── vendored ztex (vendor/ztex) ──────────────────────
@@ -109,7 +110,7 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run notui");
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    run_cmd.addPassthruArgs();
     run_step.dependOn(&run_cmd.step);
 
     // ── examples ──────────────────────────
@@ -149,7 +150,7 @@ pub fn build(b: *std.Build) void {
         );
         const run_example_cmd = b.addRunArtifact(example_exe);
         run_example_cmd.step.dependOn(b.getInstallStep());
-        if (b.args) |args| run_example_cmd.addArgs(args);
+        run_example_cmd.addPassthruArgs();
         run_example_step.dependOn(&run_example_cmd.step);
 
         // The framework counter demo is also reachable via the shorter
@@ -226,7 +227,7 @@ pub fn build(b: *std.Build) void {
     );
     const run_skript_repl_cmd = b.addRunArtifact(skript_repl);
     run_skript_repl_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_skript_repl_cmd.addArgs(args);
+    run_skript_repl_cmd.addPassthruArgs();
     run_skript_repl_step.dependOn(&run_skript_repl_cmd.step);
 
     // ── formula TUI example ──────────────────────────
@@ -260,7 +261,7 @@ pub fn build(b: *std.Build) void {
     );
     const run_formula_tui_cmd = b.addRunArtifact(formula_tui);
     run_formula_tui_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_formula_tui_cmd.addArgs(args);
+    run_formula_tui_cmd.addPassthruArgs();
     run_formula_tui_step.dependOn(&run_formula_tui_cmd.step);
 
     // ── unit tests ──────────────────────────
@@ -316,8 +317,8 @@ pub fn build(b: *std.Build) void {
     // but does not install it.
     const bench_optimize: std.builtin.OptimizeMode = blk: {
         if (b.user_input_options.contains("optimize")) break :blk optimize;
-        if (b.release_mode != .off) break :blk optimize;
-        break :blk .ReleaseFast;
+        if (b.graph.release_mode != .off) break :blk optimize;
+        break :blk .fast;
     };
     const bench_zg = b.dependency("zg", .{ .optimize = bench_optimize });
     const bench_mod = b.createModule(.{

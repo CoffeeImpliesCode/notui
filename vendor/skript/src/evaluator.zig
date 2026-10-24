@@ -86,7 +86,7 @@ const Frame = struct {
     handlers: std.ArrayList(Handler) = .empty,
 
     fn get(self: *const Frame, id: Code.ValueId) Error!Slot {
-        const raw = @intFromEnum(id);
+        const raw = @backingInt(id);
         if (raw >= self.layout.code.values.len) return error.InvalidCode;
         if (self.layout.code.values[raw] != self.closure.function) return error.InvalidCode;
         const value = self.slots.items[self.layout.slots[raw]];
@@ -95,7 +95,7 @@ const Frame = struct {
     }
 
     fn set(self: *Frame, id: Code.ValueId, value: Slot) Error!void {
-        const raw = @intFromEnum(id);
+        const raw = @backingInt(id);
         if (raw >= self.layout.code.values.len) return error.InvalidCode;
         if (self.layout.code.values[raw] != self.closure.function) return error.InvalidCode;
         self.slots.items[self.layout.slots[raw]] = value;
@@ -381,17 +381,17 @@ const Session = struct {
 
     fn primitiveDatum(self: *Session, spec: *const Primitive.Spec) Error!Value {
         const name = try skript.intrinsics.string.storeString(&self.context, spec.stable_name);
-        var effect_names: [std.meta.fields(Context.EffectDecisionTable).len]Value = undefined;
+        var effect_names: [@typeInfo(Context.EffectDecisionTable).@"struct".field_names.len]Value = undefined;
         var count: usize = 0;
-        inline for (std.meta.fields(Context.EffectDecisionTable)) |field| {
-            if (@field(spec.effects, field.name)) {
-                effect_names[count] = try self.keyword(field.name);
+        inline for (@typeInfo(Context.EffectDecisionTable).@"struct".field_names) |field_name| {
+            if (@field(spec.effects, field_name)) {
+                effect_names[count] = try self.keyword(field_name);
                 count += 1;
             }
         }
         const values = [_]Value{
-            try self.keyword("id"),       Value.i64(@intFromEnum(spec.id)),
-            try self.keyword("revision"), Value.init(b.type_u64, @enumFromInt(spec.implementation_revision)),
+            try self.keyword("id"),       Value.i64(@backingInt(spec.id)),
+            try self.keyword("revision"), Value.init(b.type_u64, @fromBackingInt(@intCast(spec.implementation_revision))),
             try self.keyword("name"),     name,
             try self.keyword("effects"),  try self.makeList(effect_names[0..count]),
         };
@@ -492,7 +492,7 @@ const Session = struct {
         };
         @memset(layout.counts, 0);
         for (code.values, layout.slots) |function, *slot| {
-            const index = @intFromEnum(function);
+            const index = @backingInt(function);
             slot.* = layout.counts[index];
             layout.counts[index] += 1;
         }
@@ -806,7 +806,7 @@ const Session = struct {
         var frame = &self.frames.items[index];
         const saved_destination = if (tail) frame.destination else destination;
         const saved_count = if (tail) frame.result_count else count;
-        try frame.slots.resize(self.arena.allocator(), layout.counts[@intFromEnum(target.function)]);
+        try frame.slots.resize(self.arena.allocator(), layout.counts[@backingInt(target.function)]);
         try self.charge(frame.slots.items.len + args.len + target.captures.len);
         @memset(frame.slots.items, .empty);
         frame.closure = target;
@@ -819,7 +819,7 @@ const Session = struct {
         frame.handlers.clearRetainingCapacity();
         for (args, 0..) |arg, i| {
             const parameter = target.code.parameters[info.parameter_start + i];
-            try frame.set(target.code.bindings[@intFromEnum(parameter)].value, arg);
+            try frame.set(target.code.bindings[@backingInt(parameter)].value, arg);
         }
         for (target.captures, 0..) |capture, i| {
             try frame.set(
@@ -833,7 +833,7 @@ const Session = struct {
     fn binding(self: *Session, frame_index: usize, id: Code.BindingId) Error!Slot {
         const frame = &self.frames.items[frame_index];
         const code = frame.closure.code;
-        const entry = code.bindings[@intFromEnum(id)];
+        const entry = code.bindings[@backingInt(id)];
         if (entry.function == frame.closure.function) return frame.get(entry.value);
         const function = code.function(frame.closure.function) orelse return error.InvalidCode;
         for (code.captures[function.capture_start..][0..function.capture_count], 0..) |capture, i| {
@@ -866,7 +866,7 @@ const Session = struct {
         const names = try runtime.static.alloc(Code.Symbol, info.parameter_count);
         for (names, 0..) |*name, i| {
             name.* = code.bindings[
-                @intFromEnum(code.parameters[info.parameter_start + i])
+                @backingInt(code.parameters[info.parameter_start + i])
             ].name;
         }
         ref.deref(skript.data.Closure).* = .{
@@ -1291,7 +1291,7 @@ const Session = struct {
             const result = try self.deferredCall(prepared.callee, prepared.args);
             for (0..count) |i| {
                 const value = if (i == 0) result else try self.unknown(null);
-                try self.frames.items[frame_index].set(@enumFromInt(@intFromEnum(destination) + i), value);
+                try self.frames.items[frame_index].set(@fromBackingInt(@intCast(@backingInt(destination) + i)), value);
             }
             return;
         };
@@ -1331,7 +1331,7 @@ const Session = struct {
             .global_read => |id| {
                 const value = try self.readNamespace(
                     self.frames.items[index].namespace,
-                    code.globals[@intFromEnum(id)].name,
+                    code.globals[@backingInt(id)].name,
                 );
                 try self.frames.items[index].set(node.result, value);
             },
@@ -1341,7 +1341,7 @@ const Session = struct {
                 if (self.model_active and namespace < self.model_scope_start) return error.Denied;
                 try self.writeNamespace(
                     namespace,
-                    code.globals[@intFromEnum(write.cell)].name,
+                    code.globals[@backingInt(write.cell)].name,
                     try self.frames.items[index].get(write.value),
                 );
             },
@@ -1446,7 +1446,7 @@ const Session = struct {
     fn jump(self: *Session, index: usize, edge: Code.Edge) Error!void {
         const args = try self.operands(index, edge.args);
         var frame = &self.frames.items[index];
-        const block = frame.closure.code.blocks[@intFromEnum(edge.target)];
+        const block = frame.closure.code.blocks[@backingInt(edge.target)];
         if (args.len != block.param_count) return error.InvalidCode;
         for (frame.closure.code.block_parameters[block.param_start..][0..block.param_count], args) |id, value| {
             try frame.set(id, value);
@@ -1464,7 +1464,7 @@ const Session = struct {
             if (self.active_frames == 0) return error.InvalidCode;
             var frame = &self.frames.items[self.active_frames - 1];
             if (frame.handlers.pop()) |saved| {
-                const handler = frame.closure.code.handlers[@intFromEnum(saved.id)];
+                const handler = frame.closure.code.handlers[@backingInt(saved.id)];
                 frame.namespace = saved.namespace;
                 frame.block = handler.landing;
                 frame.cursor = 0;
@@ -1709,7 +1709,7 @@ const Session = struct {
         if (self.active_frames == 0) return error.InvalidCode;
         for (values, 0..) |value, i| {
             try self.frames.items[self.active_frames - 1].set(
-                @enumFromInt(@intFromEnum(destination) + i),
+                @fromBackingInt(@intCast(@backingInt(destination) + i)),
                 value,
             );
         }
@@ -1739,11 +1739,11 @@ const Session = struct {
         if (self.active_frames == 0) return error.InvalidCode;
         const index = self.active_frames - 1;
         const frame = self.frames.items[index];
-        const block = frame.closure.code.blocks[@intFromEnum(frame.block)];
+        const block = frame.closure.code.blocks[@backingInt(frame.block)];
         if (frame.cursor < block.node_count) {
             const id = frame.closure.code.block_nodes[block.node_start + frame.cursor];
             self.frames.items[index].cursor += 1;
-            try self.execute(index, frame.closure.code.nodes[@intFromEnum(id)]);
+            try self.execute(index, frame.closure.code.nodes[@backingInt(id)]);
             return null;
         }
         switch (block.terminator) {
@@ -1810,7 +1810,7 @@ const Session = struct {
             parsed.datum,
             null,
         );
-        const value = try self.makeClosure(code, @enumFromInt(0), namespace, &.{});
+        const value = try self.makeClosure(code, @fromBackingInt(@intCast(0)), namespace, &.{});
         return self.call(namespace, value, &.{});
     }
 };
@@ -2367,7 +2367,7 @@ test "Skript evaluator model lifts values and models a conditional receive" {
     const receive_id_entry = environment.context.registry.find("receive") orelse
         return error.TestUnexpectedResult;
     const receive_id = receive_id_entry.id;
-    try runtime.nsBind(runtime.root_ns, try runtime.store.getsym("receive-id"), Value.i64(@intFromEnum(receive_id)));
+    try runtime.nsBind(runtime.root_ns, try runtime.store.getsym("receive-id"), Value.i64(@backingInt(receive_id)));
     const model: Model = .{
         .version = .{ .id = 71, .revision = 3 },
         .lift_literal = try runtime.evalString("(fn (value) (if (number? value) (list :known (+ value 10)) :default))"),
@@ -2403,7 +2403,7 @@ test "evaluator primitive models see bound and explicit arithmetic alike" {
     try runtime.nsBind(
         runtime.root_ns,
         try runtime.store.getsym("modeled-add"),
-        Value.i64(@intFromEnum(add_id.id)),
+        Value.i64(@backingInt(add_id.id)),
     );
     const model: Model = .{
         .version = .{ .id = 95, .revision = 1 },

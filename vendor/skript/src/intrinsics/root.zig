@@ -255,9 +255,9 @@ pub fn makeWrapper(func: anytype) fn (*EvalContext, Value, Value, []const Value)
     const func_info = @typeInfo(@TypeOf(func)).@"fn";
     const arg_types = comptime blk: {
         // SAFETY: every element set by the following inline for
-        var types: [func_info.params.len]type = undefined;
-        for (func_info.params, 0..) |p, i| {
-            types[i] = p.type orelse @compileError("makeWrapper requires concrete parameter types");
+        var types: [func_info.param_types.len]type = undefined;
+        for (func_info.param_types, 0..) |param_type, i| {
+            types[i] = param_type orelse @compileError("makeWrapper requires concrete parameter types");
         }
         break :blk types;
     };
@@ -265,7 +265,7 @@ pub fn makeWrapper(func: anytype) fn (*EvalContext, Value, Value, []const Value)
 
     return struct {
         fn f(_: *EvalContext, _: Value, _: Value, args: []const Value) Error!Value {
-            if (args.len != func_info.params.len) return error.ArityMismatch;
+            if (args.len != func_info.param_types.len) return error.ArityMismatch;
 
             // SAFETY: every field set by the following inline for
             var call_args: args_tuple = undefined;
@@ -590,7 +590,7 @@ pub fn numericJoin(args: []const Value) ?Object {
 pub fn typeof(ctx: *EvalContext, _: Value, _: Value, args: []const Value) Error!Value {
     try arityAssert(args, 1);
     const arg = args[0];
-    const tag: u64 = @intFromEnum(arg.typ);
+    const tag: u64 = @backingInt(arg.typ);
     const typ = if (tag <= skript.builtins.type_last_idx)
         ctx.runtime.predefined_types.items[@as(usize, @intCast(tag))].*
     else
@@ -601,7 +601,7 @@ pub fn typeof(ctx: *EvalContext, _: Value, _: Value, args: []const Value) Error!
 /// Return true if `args[0]` is a predefined builtin type (index ≤ type_last_idx).
 pub fn isCoreType(_: *EvalContext, _: Value, _: Value, args: []const Value) Error!Value {
     try arityAssert(args, 1);
-    const idx = @intFromEnum(args[0].obj);
+    const idx = @backingInt(args[0].obj);
     return .bool(args[0].isType() and idx <= skript.builtins.type_last_idx);
 }
 
@@ -621,8 +621,8 @@ pub fn disasm(ctx: *EvalContext, _: Value, _: Value, args: []const Value) Error!
     const root_sites: []const @import("../reg_lower.zig").ClosureSite =
         if (closure.function_id == .invalid)
             &.{}
-        else if (@intFromEnum(closure.function_id) < closure.fns.len)
-            closure.fns[@intFromEnum(closure.function_id)].closure_sites
+        else if (@backingInt(closure.function_id) < closure.fns.len)
+            closure.fns[@backingInt(closure.function_id)].closure_sites
         else
             return error.InvalidCode;
     const count = if (root_sites.len == 0) 0 else closure.fns.len;
@@ -636,7 +636,7 @@ pub fn disasm(ctx: *EvalContext, _: Value, _: Value, args: []const Value) Error!
     var pending_end: usize = 0;
     var function = closure.function_id;
     if (count != 0 and function != .invalid) {
-        const index = @intFromEnum(function);
+        const index = @backingInt(function);
         if (index >= count) return error.InvalidCode;
         seen[index] = true;
     }
@@ -645,7 +645,7 @@ pub fn disasm(ctx: *EvalContext, _: Value, _: Value, args: []const Value) Error!
     var nregs = closure.nregs;
     while (true) {
         writer.print("function #{} regs={} words={}\n", .{
-            @intFromEnum(function), nregs, ir.len,
+            @backingInt(function), nregs, ir.len,
         }) catch return error.Unsupported;
         var index: usize = 0;
         while (index < ir.len) {
@@ -672,7 +672,7 @@ pub fn disasm(ctx: *EvalContext, _: Value, _: Value, args: []const Value) Error!
             if (inst.opcode == .make_closure) {
                 const site = skript.regvm.Formats.rdAndSidx(inst.payload)[1];
                 if (site >= sites.len) return error.InvalidCode;
-                writer.print(" -> fn#{}", .{@intFromEnum(sites[site].function)}) catch return error.Unsupported;
+                writer.print(" -> fn#{}", .{@backingInt(sites[site].function)}) catch return error.Unsupported;
             }
             if (inst.opcode == .lookup or inst.opcode == .lookup_val) {
                 const symbol = skript.regvm.Formats.rdAndSidx(inst.payload)[1];
@@ -684,7 +684,7 @@ pub fn disasm(ctx: *EvalContext, _: Value, _: Value, args: []const Value) Error!
         }
         for (sites) |site| {
             try ctx.chargeWork(1, 1, .native);
-            const site_index = @intFromEnum(site.function);
+            const site_index = @backingInt(site.function);
             if (site_index >= count) return error.InvalidCode;
             if (seen[site_index]) continue;
             seen[site_index] = true;
@@ -795,7 +795,7 @@ fn isPred(comptime pred: fn (u64) bool) Func {
     return struct {
         pub fn f(_: *EvalContext, _: Value, _: Value, args: []const Value) Error!Value {
             try arityAssert(args, 1);
-            return .bool(pred(@intFromEnum(args[0].typ)));
+            return .bool(pred(@backingInt(args[0].typ)));
         }
     }.f;
 }
@@ -834,7 +834,7 @@ pub fn method(ctx: *EvalContext, _: Value, _: Value, args: []const Value) Error!
 fn specAllBuiltin(spec: []const Value) bool {
     for (spec) |s| {
         if (s.typ != skript.builtins.type_type) return false;
-        if (@intFromEnum(s.obj) > skript.builtins.type_last_idx) return false;
+        if (@backingInt(s.obj) > skript.builtins.type_last_idx) return false;
     }
     return true;
 }

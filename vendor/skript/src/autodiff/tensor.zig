@@ -42,7 +42,7 @@ fn addTestParameter(
         .parameter,
         .{},
     );
-    builder.bindings.items[@intFromEnum(binding)].value = try builder.addValue(function);
+    builder.bindings.items[@backingInt(binding)].value = try builder.addValue(function);
     try builder.addParameter(function, binding);
     return builder.addNode(function, block, .{ .local_read = binding }, .{});
 }
@@ -68,7 +68,7 @@ fn makeTestKernel(runtime: *Runtime, kind: TestKernelKind, guard_valid: bool) !V
     builder.id = identity.id;
     builder.revision = identity.revision;
     const function = try builder.addFunction(null, .{});
-    builder.functions.items[@intFromEnum(function)].result_count = 2;
+    builder.functions.items[@backingInt(function)].result_count = 2;
     const block = try builder.addBlock(function);
     const arity: usize = switch (kind) {
         .unary_double, .tangent_error => 2,
@@ -164,7 +164,7 @@ fn makeTestKernel(runtime: *Runtime, kind: TestKernelKind, guard_valid: bool) !V
     const code = try builder.finish(runtime.context().scratch);
     code.owner = runtime;
     const program = try runtime.lowerCode(runtime.context().scratch, code);
-    const lowered = program.fns[@intFromEnum(function)];
+    const lowered = program.fns[@backingInt(function)];
 
     const guard_state = try runtime.static.create(TestGuardState);
     guard_state.* = .{ .valid = guard_valid };
@@ -984,7 +984,7 @@ fn permutation(
     if (holder.rank != 1 or holder.inner != .i64 or holder.shape[0] != @as(u32, @intCast(rank))) {
         return error.TypeMismatch;
     }
-    var seen: [max_rank]bool = .{false} ** max_rank;
+    var seen: [max_rank]bool = @splat(false);
     for (holder.data, 0..) |word, output_axis| {
         const old_axis: i64 = @bitCast(word);
         if (old_axis < 0 or old_axis >= @as(i64, @intCast(rank))) return error.Unsupported;
@@ -1563,7 +1563,7 @@ fn executeNestedMap(
     const rank = std.math.cast(usize, first.rank) orelse return error.Unsupported;
     if (rank > max_rank) return error.Unsupported;
     const axis = try nestedAxis(payload, lane_count, payload_count, rank);
-    var holders: [max_nested_lanes]?TensorHolder = .{null} ** max_nested_lanes;
+    var holders: [max_nested_lanes]?TensorHolder = @splat(null);
     var lane: usize = 0;
     while (lane < lane_count) : (lane += 1) {
         holders[lane] = try nestedTensorHolder(
@@ -1578,7 +1578,7 @@ fn executeNestedMap(
     const output_len = first.data.len;
     const data_len = try checkedMul(output_len, lane_count);
     const data = try allocTensorBacking(u64, ctx.runtime, data_len);
-    var active: [max_nested_lanes]bool = .{false} ** max_nested_lanes;
+    var active: [max_nested_lanes]bool = @splat(false);
     if (output_len == 0) {
         @memset(data, 0);
         @memset(active[0..lane_count], true);
@@ -1647,8 +1647,8 @@ fn executeNestedMap2(
     const first_right = try nestedTensorHolder(payload[1], null) orelse return error.TypeMismatch;
     if (first_left.rank > max_rank or first_right.rank > max_rank) return error.Unsupported;
     const layout = try tensor_intrin.Map2Layout.init(first_left.shape, first_right.shape);
-    var left_holders: [max_nested_lanes]?TensorHolder = .{null} ** max_nested_lanes;
-    var right_holders: [max_nested_lanes]?TensorHolder = .{null} ** max_nested_lanes;
+    var left_holders: [max_nested_lanes]?TensorHolder = @splat(null);
+    var right_holders: [max_nested_lanes]?TensorHolder = @splat(null);
     var lane: usize = 0;
     while (lane < lane_count) : (lane += 1) {
         const offset = lane * 2;
@@ -1663,7 +1663,7 @@ fn executeNestedMap2(
         ctx.runtime,
         try checkedMul(output_len, lane_count),
     );
-    var active: [max_nested_lanes]bool = .{false} ** max_nested_lanes;
+    var active: [max_nested_lanes]bool = @splat(false);
     if (output_len == 0) {
         @memset(data, 0);
         @memset(active[0..lane_count], true);
@@ -1727,8 +1727,8 @@ fn executeNestedOuter(
     const first_left = try nestedTensorHolder(payload[0], null) orelse return error.TypeMismatch;
     const first_right = try nestedTensorHolder(payload[1], null) orelse return error.TypeMismatch;
     if (first_left.rank != 1 or first_right.rank != 1) return error.Unsupported;
-    var left_holders: [max_nested_lanes]?TensorHolder = .{null} ** max_nested_lanes;
-    var right_holders: [max_nested_lanes]?TensorHolder = .{null} ** max_nested_lanes;
+    var left_holders: [max_nested_lanes]?TensorHolder = @splat(null);
+    var right_holders: [max_nested_lanes]?TensorHolder = @splat(null);
     var lane: usize = 0;
     while (lane < lane_count) : (lane += 1) {
         const offset = lane * 2;
@@ -1745,7 +1745,7 @@ fn executeNestedOuter(
         ctx.runtime,
         try checkedMul(output_len, lane_count),
     );
-    var active: [max_nested_lanes]bool = .{false} ** max_nested_lanes;
+    var active: [max_nested_lanes]bool = @splat(false);
     if (output_len == 0) {
         @memset(data, 0);
         @memset(active[0..lane_count], true);
@@ -1828,7 +1828,7 @@ fn executeNestedFoldLike(
         if (values.len != try checkedMul(first.data.len, lane_count / 2)) return error.ArityMismatch;
         @memset(values, .nil);
     }
-    var holders: [max_nested_lanes]?TensorHolder = .{null} ** max_nested_lanes;
+    var holders: [max_nested_lanes]?TensorHolder = @splat(null);
     var lane: usize = 0;
     while (lane < lane_count) : (lane += 1) {
         holders[lane] = try nestedTensorHolder(
@@ -1845,7 +1845,7 @@ fn executeNestedFoldLike(
     if (!scan and rank == 1) {
         const base = try cellBase(first.shape, axis, 0, &axis_strides);
         var accumulators: [max_nested_lanes]Value = undefined;
-        var active: [max_nested_lanes]bool = .{false} ** max_nested_lanes;
+        var active: [max_nested_lanes]bool = @splat(false);
         lane = 0;
         while (lane < lane_count) : (lane += 1) {
             accumulators[lane] = try nestedTensorWord(first.inner, holders[lane], base);
@@ -1912,7 +1912,7 @@ fn executeNestedFoldLike(
         ctx.runtime,
         try checkedMul(output_len, lane_count),
     );
-    var active: [max_nested_lanes]bool = .{false} ** max_nested_lanes;
+    var active: [max_nested_lanes]bool = @splat(false);
     if (output_len == 0) {
         @memset(data, 0);
         @memset(active[0..lane_count], true);
@@ -1930,7 +1930,7 @@ fn executeNestedFoldLike(
         break :blk shape;
     };
     if (first.data.len == 0 and scan) {
-        var empty_active: [max_nested_lanes]bool = .{false} ** max_nested_lanes;
+        var empty_active: [max_nested_lanes]bool = @splat(false);
         @memset(empty_active[0..lane_count], true);
         try nestedOutputData(
             ctx,
@@ -2148,12 +2148,12 @@ pub fn dispatch(ctx: *EvalContext, _: Value, _: Value, args: []const Value) Erro
     if (args.len < 2) return error.ArityMismatch;
     if (args[0].typ != b.type_i64) return error.TypeMismatch;
     const raw_operation = args[0].obj.toInt(i64);
-    if (raw_operation < @intFromEnum(Operation.stack) or
-        raw_operation > @intFromEnum(Operation.scan))
+    if (raw_operation < @backingInt(Operation.stack) or
+        raw_operation > @backingInt(Operation.scan))
     {
         return error.TypeMismatch;
     }
-    const operation: Operation = @enumFromInt(raw_operation);
+    const operation: Operation = @fromBackingInt(@intCast(raw_operation));
     const kernel = if (Value.isNil(args[1])) null else args[1];
     const payload = args[2..];
     if (payload.len % 2 != 0) return error.ArityMismatch;
@@ -2171,8 +2171,8 @@ pub fn dispatchNested(ctx: *EvalContext, _: Value, _: Value, args: []const Value
         return error.TypeMismatch;
     }
     const raw_operation = args[0].obj.toInt(i64);
-    if (raw_operation < @intFromEnum(Operation.stack) or
-        raw_operation > @intFromEnum(Operation.scan))
+    if (raw_operation < @backingInt(Operation.stack) or
+        raw_operation > @backingInt(Operation.scan))
     {
         return error.TypeMismatch;
     }
@@ -2181,7 +2181,7 @@ pub fn dispatchNested(ctx: *EvalContext, _: Value, _: Value, args: []const Value
     const lane_count = std.math.cast(usize, args[3].obj.toInt(i64)) orelse
         return error.Unsupported;
     if (lane_count > max_nested_lanes) return error.Unsupported;
-    const operation: Operation = @enumFromInt(raw_operation);
+    const operation: Operation = @fromBackingInt(@intCast(raw_operation));
     const kernel = if (Value.isNil(args[1])) null else args[1];
     var outputs: [max_nested_lanes]Value = undefined;
     try executeNested(ctx, operation, order, lane_count, args[4..], kernel, &outputs, null);
@@ -2639,7 +2639,7 @@ test "tensor JVP native dispatch boxes one proper result pair" {
     const runtime = try Runtime.init(std.testing.allocator, std.testing.io);
     defer runtime.deinit();
     const result = try dispatch(runtime.context(), .nil, .nil, &.{
-        Value.i64(@intFromEnum(Operation.stack)),
+        Value.i64(@backingInt(Operation.stack)),
         .nil,
         Value.i64(1),
         Value.i64(2),
@@ -2666,7 +2666,7 @@ test "tensor JVP native dispatch boxes one proper result pair" {
     try std.testing.expectError(
         error.ArityMismatch,
         dispatch(runtime.context(), .nil, .nil, &.{
-            Value.i64(@intFromEnum(Operation.stack)),
+            Value.i64(@backingInt(Operation.stack)),
             .nil,
             Value.i64(1),
         }),
@@ -2713,7 +2713,7 @@ test "tensor reshape charges tangent data and shape conversion work" {
     try std.testing.expectEqual(EvalContext.Budget.Resource.work, limited.budget.report().?.resource);
 
     const single = try makeI64Tensor(runtime.context(), &.{1});
-    const dimensions: [128]i64 = .{1} ** 128;
+    const dimensions: [128]i64 = @splat(1);
     const long_shape = try makeI64Tensor(runtime.context(), &dimensions);
     var shape_limit: LimitedHarness = undefined;
     try shape_limit.init(runtime, 32);

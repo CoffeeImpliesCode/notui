@@ -84,16 +84,16 @@ type: Type,
 test "button and modifier bit values" {
     const testing = std.testing;
 
-    try testing.expectEqual(@as(u8, 0), @intFromEnum(Button.left));
-    try testing.expectEqual(@as(u8, 1), @intFromEnum(Button.middle));
-    try testing.expectEqual(@as(u8, 2), @intFromEnum(Button.right));
-    try testing.expectEqual(@as(u8, 3), @intFromEnum(Button.none));
-    try testing.expectEqual(@as(u8, 64), @intFromEnum(Button.wheel_up));
-    try testing.expectEqual(@as(u8, 65), @intFromEnum(Button.wheel_down));
-    try testing.expectEqual(@as(u8, 66), @intFromEnum(Button.wheel_right));
-    try testing.expectEqual(@as(u8, 67), @intFromEnum(Button.wheel_left));
-    try testing.expectEqual(@as(u8, 128), @intFromEnum(Button.button_8));
-    try testing.expectEqual(@as(u8, 131), @intFromEnum(Button.button_11));
+    try testing.expectEqual(@as(u8, 0), @backingInt(Button.left));
+    try testing.expectEqual(@as(u8, 1), @backingInt(Button.middle));
+    try testing.expectEqual(@as(u8, 2), @backingInt(Button.right));
+    try testing.expectEqual(@as(u8, 3), @backingInt(Button.none));
+    try testing.expectEqual(@as(u8, 64), @backingInt(Button.wheel_up));
+    try testing.expectEqual(@as(u8, 65), @backingInt(Button.wheel_down));
+    try testing.expectEqual(@as(u8, 66), @backingInt(Button.wheel_right));
+    try testing.expectEqual(@as(u8, 67), @backingInt(Button.wheel_left));
+    try testing.expectEqual(@as(u8, 128), @backingInt(Button.button_8));
+    try testing.expectEqual(@as(u8, 131), @backingInt(Button.button_11));
 
     const mods: Modifiers = .{ .shift = true, .ctrl = true };
     const bits: u3 = @bitCast(mods);

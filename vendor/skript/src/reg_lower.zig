@@ -236,7 +236,7 @@ test "bytecode validation rejects malformed intrinsic extension and register win
     ));
     try std.testing.expectError(error.InvalidCode, validateBytecode(
         std.testing.allocator,
-        &.{ .make(@enumFromInt(0x32), 0), .make(.stop, 0) },
+        &.{ .make(@fromBackingInt(@intCast(0x32)), 0), .make(.stop, 0) },
         1,
         0,
         &.{},
@@ -298,7 +298,7 @@ const LowerState = struct {
     uses: []u32,
     live_values: [256]u32 = @splat(0),
     binding_regs: []?u8,
-    fixed_regs: std.StaticBitSet(256) = std.StaticBitSet(256).initEmpty(),
+    fixed_regs: std.StaticBitSet(256) = .empty,
     labels: []?usize,
     patches: std.ArrayList(Patch) = .empty,
     arithmetic_fallbacks: std.ArrayList(ArithmeticFallback) = .empty,
@@ -403,7 +403,7 @@ const LowerState = struct {
 
     fn valueIndex(self: *const LowerState, value: Code.ValueId) Error!usize {
         if (value == .invalid) return error.InvalidCode;
-        const index = @intFromEnum(value);
+        const index = @backingInt(value);
         if (index >= self.lowerer.code.values.len) return error.InvalidCode;
         if (self.lowerer.code.values[index] != self.function) return error.InvalidCode;
         return index;
@@ -431,7 +431,7 @@ const LowerState = struct {
             return error.RegisterOverflow;
         }
         for (0..count) |offset| {
-            const value: Code.ValueId = @enumFromInt(@as(u32, @intCast(first_index + offset)));
+            const value: Code.ValueId = @fromBackingInt(@intCast(@as(u32, @intCast(first_index + offset))));
             try self.assignValue(value, @intCast(@as(usize, base) + offset));
         }
     }
@@ -443,7 +443,7 @@ const LowerState = struct {
     }
 
     fn release(self: *LowerState, value: Code.ValueId) void {
-        const index = @intFromEnum(value);
+        const index = @backingInt(value);
         if (index >= self.uses.len) return;
         if (self.uses[index] != 0) {
             self.uses[index] -= 1;
@@ -549,7 +549,7 @@ const Lowerer = struct {
         var ordered: std.ArrayList(Code.BlockId) = .empty;
         errdefer ordered.deinit(self.scratch_allocator);
         for (blocks) |root_block| {
-            if (seen[@intFromEnum(root_block)]) continue;
+            if (seen[@backingInt(root_block)]) continue;
             const component_start = ordered.items.len;
             try stack.append(self.scratch_allocator, .{ .block = root_block });
             while (stack.pop()) |visit| {
@@ -558,7 +558,7 @@ const Lowerer = struct {
                     try ordered.append(self.scratch_allocator, visit.block);
                     continue;
                 }
-                const index = @intFromEnum(visit.block);
+                const index = @backingInt(visit.block);
                 if (seen[index]) continue;
                 seen[index] = true;
                 try stack.append(self.scratch_allocator, .{ .block = visit.block, .expanded = true });
@@ -572,7 +572,7 @@ const Lowerer = struct {
                     else => {},
                 }
                 if (block.handler != .invalid) {
-                    const handler = self.code.handlers[@intFromEnum(block.handler)];
+                    const handler = self.code.handlers[@backingInt(block.handler)];
                     try stack.append(self.scratch_allocator, .{ .block = handler.landing });
                 }
             }
@@ -594,7 +594,7 @@ const Lowerer = struct {
         errdefer self.deinitOutput();
         for (self.code.functions) |function| {
             const entry = try self.lowerFunction(function.id);
-            self.fns[@intFromEnum(function.id)] = entry;
+            self.fns[@backingInt(function.id)] = entry;
         }
         const top = self.fns[0];
         return .{
@@ -621,7 +621,7 @@ const Lowerer = struct {
         try self.emitMutableParameterFrame(&state);
         var keep_index: usize = 0;
         for (state.blocks) |block_id| {
-            const block_index = @intFromEnum(block_id);
+            const block_index = @backingInt(block_id);
             if (block_index >= self.code.blocks.len) return error.InvalidCode;
             state.labels[block_index] = state.buf.items.len;
             try self.lowerBlock(&state, block_id);
@@ -711,7 +711,7 @@ const Lowerer = struct {
             return error.OutOfMemory;
         errdefer self.output_allocator.free(out);
         for (self.code.parameters[first..last], 0..) |binding, index| {
-            const binding_index = @intFromEnum(binding);
+            const binding_index = @backingInt(binding);
             if (binding_index >= self.code.bindings.len) return error.InvalidCode;
             out[index] = self.code.bindings[binding_index].name;
         }
@@ -726,14 +726,14 @@ const Lowerer = struct {
             return error.OutOfMemory;
         errdefer self.output_allocator.free(out);
         for (self.code.captures[first..last], 0..) |binding, index| {
-            const binding_index = @intFromEnum(binding);
+            const binding_index = @backingInt(binding);
             if (binding_index >= self.code.bindings.len) return error.InvalidCode;
             out[index] = self.code.bindings[binding_index].name;
         }
         return out;
     }
     fn bindingValue(self: *const Lowerer, function: Code.FunctionId, binding_id: Code.BindingId) Error!Code.ValueId {
-        const binding_index = @intFromEnum(binding_id);
+        const binding_index = @backingInt(binding_id);
         if (binding_index >= self.code.bindings.len) return error.InvalidCode;
         const binding = self.code.bindings[binding_index];
         if (binding.function == function) return binding.value;
@@ -758,7 +758,7 @@ const Lowerer = struct {
 
         var mutable_count: u16 = 0;
         for (self.code.parameters[first..last]) |binding| {
-            const index = @intFromEnum(binding);
+            const index = @backingInt(binding);
             if (index >= self.code.bindings.len) return error.InvalidCode;
             if (!self.code.bindings[index].mutable) continue;
             if (mutable_count == std.math.maxInt(u16)) return error.Unsupported;
@@ -772,7 +772,7 @@ const Lowerer = struct {
             (@as(u24, ns_reg) << 16) | mutable_count,
         ));
         for (self.code.parameters[first..last]) |binding| {
-            const binding_index = @intFromEnum(binding);
+            const binding_index = @backingInt(binding);
             const info = self.code.bindings[binding_index];
             if (!info.mutable) continue;
             const source = state.binding_regs[binding_index] orelse return error.InvalidCode;
@@ -808,7 +808,7 @@ const Lowerer = struct {
         }, false);
         state.allocator.max_used = @intCast(fixed_count);
         for (self.code.parameters[parameter_first..parameter_last], 0..) |binding, index| {
-            const binding_index = @intFromEnum(binding);
+            const binding_index = @backingInt(binding);
             if (binding_index >= self.code.bindings.len) return error.InvalidCode;
             const value = self.code.bindings[binding_index].value;
             if (value == .invalid) return error.InvalidCode;
@@ -818,7 +818,7 @@ const Lowerer = struct {
             state.fixed_regs.set(reg);
         }
         for (self.code.captures[capture_first..capture_last], 0..) |binding, index| {
-            const binding_index = @intFromEnum(binding);
+            const binding_index = @backingInt(binding);
             if (binding_index >= self.code.bindings.len) return error.InvalidCode;
             const reg: u8 = @intCast(@as(usize, function.parameter_count) + index + 1);
             const capture_value = self.code.capture_values[capture_first + index];
@@ -827,7 +827,7 @@ const Lowerer = struct {
             state.fixed_regs.set(reg);
         }
         for (state.blocks) |block_id| {
-            const block_index = @intFromEnum(block_id);
+            const block_index = @backingInt(block_id);
             if (block_index >= self.code.blocks.len) return error.InvalidCode;
             const block = self.code.blocks[block_index];
             const first: usize = block.param_start;
@@ -850,12 +850,12 @@ const Lowerer = struct {
             },
             else => {},
         }
-        if (block.handler != .invalid) targets[2] = self.code.handlers[@intFromEnum(block.handler)].landing;
+        if (block.handler != .invalid) targets[2] = self.code.handlers[@backingInt(block.handler)].landing;
         var result: [3]?usize = .{ null, null, null };
-        const source_position = state.labels[@intFromEnum(block.id)] orelse unreachable;
+        const source_position = state.labels[@backingInt(block.id)] orelse unreachable;
         for (targets, &result) |target, *position| {
             if (target) |id| {
-                const target_position = state.labels[@intFromEnum(id)] orelse unreachable;
+                const target_position = state.labels[@backingInt(id)] orelse unreachable;
                 if (target_position <= source_position) position.* = target_position;
             }
         }
@@ -863,9 +863,9 @@ const Lowerer = struct {
     }
 
     fn prepareLoopUses(self: *Lowerer, state: *LowerState) Error!void {
-        for (state.blocks, 0..) |block, position| state.labels[@intFromEnum(block)] = position + 1;
+        for (state.blocks, 0..) |block, position| state.labels[@backingInt(block)] = position + 1;
         for (state.blocks) |block_id| {
-            const block = self.code.blocks[@intFromEnum(block_id)];
+            const block = self.code.blocks[@backingInt(block_id)];
             for (self.backedges(state, block)) |target| {
                 if (target == null) continue;
                 state.definition_positions = try self.scratch_allocator.alloc(usize, self.code.values.len);
@@ -882,7 +882,7 @@ const Lowerer = struct {
         const uses = state.use_positions orelse unreachable;
         for (state.blocks) |block_id| {
             try self.charge(1);
-            const targets = self.backedges(state, self.code.blocks[@intFromEnum(block_id)]);
+            const targets = self.backedges(state, self.code.blocks[@backingInt(block_id)]);
             if (targets[0] == null and targets[1] == null and targets[2] == null) continue;
             try self.charge(self.code.values.len);
             for (self.code.values, 0..) |owner, index| {
@@ -890,7 +890,7 @@ const Lowerer = struct {
                 for (targets) |maybe_target| {
                     const target = maybe_target orelse continue;
                     if (definitions[index] > target or uses[index] < target) continue;
-                    const value: Code.ValueId = @enumFromInt(@as(u32, @intCast(index)));
+                    const value: Code.ValueId = @fromBackingInt(@intCast(@as(u32, @intCast(index))));
                     try state.loop_keeps.append(self.scratch_allocator, .{ .block = block_id, .value = value });
                     state.uses[index] = std.math.add(u32, state.uses[index], 1) catch return error.InvalidCode;
                     break;
@@ -902,24 +902,24 @@ const Lowerer = struct {
     fn computeUses(self: *Lowerer, state: *LowerState) Error!void {
         for (state.blocks, 0..) |block_id, position| {
             state.current_position = position + 1;
-            const block_index = @intFromEnum(block_id);
+            const block_index = @backingInt(block_id);
             if (block_index >= self.code.blocks.len) return error.InvalidCode;
             const block = self.code.blocks[block_index];
             if (state.definition_positions) |positions| {
                 for (self.code.block_parameters[block.param_start..][0..block.param_count]) |value| {
-                    positions[@intFromEnum(value)] = state.current_position;
+                    positions[@backingInt(value)] = state.current_position;
                 }
             }
             const first: usize = block.node_start;
             const last = std.math.add(usize, first, block.node_count) catch return error.InvalidCode;
             if (last > self.code.block_nodes.len) return error.InvalidCode;
             for (self.code.block_nodes[first..last]) |node_id| {
-                const node_index = @intFromEnum(node_id);
+                const node_index = @backingInt(node_id);
                 if (node_index >= self.code.nodes.len) return error.InvalidCode;
                 const node = self.code.nodes[node_index];
                 if (state.definition_positions) |positions| {
                     for (0..node.resultCount()) |offset| {
-                        positions[@intFromEnum(node.result) + offset] = state.current_position;
+                        positions[@backingInt(node.result) + offset] = state.current_position;
                     }
                 }
                 switch (node.operation) {
@@ -974,14 +974,14 @@ const Lowerer = struct {
 
     fn lowerBlock(self: *Lowerer, state: *LowerState, block_id: Code.BlockId) Error!void {
         state.current_block = block_id;
-        const block_index = @intFromEnum(block_id);
+        const block_index = @backingInt(block_id);
         if (block_index >= self.code.blocks.len) return error.InvalidCode;
         const block = self.code.blocks[block_index];
         const first: usize = block.node_start;
         const last = std.math.add(usize, first, block.node_count) catch return error.InvalidCode;
         if (last > self.code.block_nodes.len) return error.InvalidCode;
         for (self.code.block_nodes[first..last]) |node_id| {
-            const node_index = @intFromEnum(node_id);
+            const node_index = @backingInt(node_id);
             if (node_index >= self.code.nodes.len) return error.InvalidCode;
             const node = self.code.nodes[node_index];
             try self.emitSource(state, node.source_index);
@@ -993,7 +993,7 @@ const Lowerer = struct {
             return error.InvalidCode;
         if (params_last > self.code.block_parameters.len) return error.InvalidCode;
         for (self.code.block_parameters[params_first..params_last]) |value| {
-            const index = @intFromEnum(value);
+            const index = @backingInt(value);
             if (index < state.uses.len and state.uses[index] == 0) state.release(value);
         }
     }
@@ -1039,7 +1039,7 @@ const Lowerer = struct {
             },
             .local_read => |binding| {
                 if (result_count != 1) return error.InvalidCode;
-                const binding_index = @intFromEnum(binding);
+                const binding_index = @backingInt(binding);
                 if (binding_index >= state.binding_regs.len) return error.InvalidCode;
                 const source_value = try self.bindingValue(state.function, binding);
                 if (self.code.bindings[binding_index].mutable) {
@@ -1075,7 +1075,7 @@ const Lowerer = struct {
             },
             .global_read => |cell| {
                 if (result_count != 1) return error.InvalidCode;
-                const cell_index = @intFromEnum(cell);
+                const cell_index = @backingInt(cell);
                 if (cell_index >= self.code.globals.len) return error.InvalidCode;
                 const rd = try state.allocBlock(1);
                 try state.assignResults(node.result, 1, rd);
@@ -1090,7 +1090,7 @@ const Lowerer = struct {
             },
             .global_write => |write| {
                 if (result_count != 0) return error.InvalidCode;
-                const cell_index = @intFromEnum(write.cell);
+                const cell_index = @backingInt(write.cell);
                 if (cell_index >= self.code.globals.len) return error.InvalidCode;
                 const source = try state.regFor(write.value);
                 const index = self.resolve.symbolIndex(
@@ -1131,11 +1131,11 @@ const Lowerer = struct {
             },
         }
         if (result_count != 0) {
-            const first = @intFromEnum(node.result);
+            const first = @backingInt(node.result);
             for (0..result_count) |offset| {
                 const index = first + offset;
                 if (index < state.uses.len and state.uses[index] == 0) {
-                    state.release(@as(Code.ValueId, @enumFromInt(@as(u32, @intCast(index)))));
+                    state.release(@as(Code.ValueId, @fromBackingInt(@intCast(@as(u32, @intCast(index))))));
                 }
             }
         }
@@ -1241,8 +1241,8 @@ const Lowerer = struct {
 
     fn arithmeticOpcode(self: *Lowerer, arith: Code.Arithmetic) ?regvm.Opcode {
         const same = arith.left_types == arith.right_types;
-        const i64_types = (@as(u64, 1) << @intFromEnum(builtins.type_i64));
-        const f64_types = (@as(u64, 1) << @intFromEnum(builtins.type_f64));
+        const i64_types = (@as(u64, 1) << @backingInt(builtins.type_i64));
+        const f64_types = (@as(u64, 1) << @backingInt(builtins.type_f64));
         if (same and arith.left_types == i64_types) {
             return switch (arith.op) {
                 .add => .add_i64,
@@ -1268,7 +1268,7 @@ const Lowerer = struct {
         if (!self.options.speculative_arith) return null;
         if (tsSingle(arith.left_types)) return arithOpcodeForType(arith.op, @ctz(arith.left_types));
         if (tsSingle(arith.right_types)) return arithOpcodeForType(arith.op, @ctz(arith.right_types));
-        return arithOpcodeForType(arith.op, @intFromEnum(builtins.type_i64));
+        return arithOpcodeForType(arith.op, @backingInt(builtins.type_i64));
     }
 
     fn emitGeneratedArithmetic(
@@ -1395,11 +1395,11 @@ const Lowerer = struct {
         call: Code.DirectCall,
     ) Error!void {
         if (result_count != call.result_count) return error.InvalidCode;
-        const target_index = @intFromEnum(call.function);
+        const target_index = @backingInt(call.function);
         if (target_index >= self.code.functions.len) return error.InvalidCode;
         const target = self.code.functions[target_index];
         const args = try state.range(call.args);
-        const top_level: Code.FunctionId = @enumFromInt(0);
+        const top_level: Code.FunctionId = @fromBackingInt(@intCast(0));
         if (call.function == state.function and state.function != top_level) {
             if (self.options.self_call and result_count == 1) {
                 try self.emitDirectSelfCall(state, args, result);
@@ -1430,7 +1430,7 @@ const Lowerer = struct {
         self_target: Code.FunctionId,
     ) Error!void {
         if (result_count == 0) return error.InvalidCode;
-        const top_level: Code.FunctionId = @enumFromInt(0);
+        const top_level: Code.FunctionId = @fromBackingInt(@intCast(0));
         try self.emitCallWindow(
             state,
             callee,
@@ -1618,14 +1618,14 @@ const Lowerer = struct {
     ) Error!bool {
         const function = self.code.function(state.function) orelse return error.InvalidCode;
         if (function.module_entry or closure.function != state.function) return false;
-        const block_index = @intFromEnum(state.current_block);
+        const block_index = @backingInt(state.current_block);
         if (block_index >= self.code.blocks.len) return error.InvalidCode;
         const call = switch (self.code.blocks[block_index].terminator) {
             .tail_call => |tail_call| tail_call,
             else => return false,
         };
         if (call.callee != result or call.self_target != state.function) return false;
-        const result_index = @intFromEnum(result);
+        const result_index = @backingInt(result);
         if (result_index >= state.uses.len or state.uses[result_index] != 1) return false;
         const captures = try state.range(closure.captures);
         const capture_start: usize = function.capture_start;
@@ -1648,7 +1648,7 @@ const Lowerer = struct {
         closure: Code.MakeClosure,
     ) Error!void {
         if (result_count != 1) return error.InvalidCode;
-        const child_index = @intFromEnum(closure.function);
+        const child_index = @backingInt(closure.function);
         if (child_index >= self.fns.len) return error.InvalidCode;
         const captures = try state.range(closure.captures);
         const child = self.code.functions[child_index];
@@ -1682,7 +1682,7 @@ const Lowerer = struct {
         function: Code.FunctionId,
         captures: []const Code.ValueId,
     ) Error!void {
-        if (@intFromEnum(function) >= self.fns.len) return error.InvalidCode;
+        if (@backingInt(function) >= self.fns.len) return error.InvalidCode;
         if (state.closure_sites.items.len > std.math.maxInt(u16)) return error.Unsupported;
         if (captures.len > std.math.maxInt(u8)) return error.Unsupported;
         const index: u16 = @intCast(state.closure_sites.items.len);
@@ -1700,7 +1700,7 @@ const Lowerer = struct {
     }
 
     fn lowerTryBegin(self: *Lowerer, state: *LowerState, handler_id: Code.HandlerId) Error!void {
-        const handler_index = @intFromEnum(handler_id);
+        const handler_index = @backingInt(handler_id);
         if (handler_index >= self.code.handlers.len) return error.InvalidCode;
         const handler = self.code.handlers[handler_index];
         if (handler.function != state.function) return error.InvalidCode;
@@ -1790,7 +1790,7 @@ const Lowerer = struct {
     }
 
     fn emitEdgeMoves(self: *Lowerer, state: *LowerState, edge: Code.Edge) Error!void {
-        const target_index = @intFromEnum(edge.target);
+        const target_index = @backingInt(edge.target);
         if (target_index >= self.code.blocks.len) return error.InvalidCode;
         const target = self.code.blocks[target_index];
         const args = try state.range(edge.args);
@@ -1836,8 +1836,8 @@ const Lowerer = struct {
 
     fn emitBranch(self: *Lowerer, state: *LowerState, branch: Code.Branch) Error!void {
         const condition = try state.regFor(branch.condition);
-        const then_index = @intFromEnum(branch.then_edge.target);
-        const else_index = @intFromEnum(branch.else_edge.target);
+        const then_index = @backingInt(branch.then_edge.target);
+        const else_index = @backingInt(branch.else_edge.target);
         if (then_index >= self.code.blocks.len or else_index >= self.code.blocks.len) return error.InvalidCode;
         const then_target = self.code.blocks[then_index];
         const else_target = self.code.blocks[else_index];
@@ -1894,7 +1894,7 @@ const Lowerer = struct {
     fn patch(self: *Lowerer, state: *LowerState) Error!void {
         _ = self;
         for (state.patches.items) |entry| {
-            const target_index = @intFromEnum(entry.target);
+            const target_index = @backingInt(entry.target);
             if (target_index >= state.labels.len) return error.InvalidCode;
             const target = state.labels[target_index] orelse return error.InvalidCode;
             const offset = @as(isize, @intCast(target)) - @as(isize, @intCast(entry.pos)) - 1;
@@ -1964,7 +1964,7 @@ fn tsSingle(types: u64) bool {
 }
 
 fn arithOpcodeForType(op: Code.ArithOp, type_index: u64) ?regvm.Opcode {
-    if (type_index == @intFromEnum(builtins.type_i64)) {
+    if (type_index == @backingInt(builtins.type_i64)) {
         return switch (op) {
             .add => .add_i64,
             .sub => .sub_i64,
@@ -1975,7 +1975,7 @@ fn arithOpcodeForType(op: Code.ArithOp, type_index: u64) ?regvm.Opcode {
             .greater => .gt_i64,
         };
     }
-    if (type_index == @intFromEnum(builtins.type_f64)) {
+    if (type_index == @backingInt(builtins.type_f64)) {
         return switch (op) {
             .add => .add_f64,
             .sub => .sub_f64,
@@ -1990,8 +1990,8 @@ fn arithOpcodeForType(op: Code.ArithOp, type_index: u64) ?regvm.Opcode {
 }
 
 const CopyMap = struct {
-    source: [256]u8 = [_]u8{0} ** 256,
-    valid: [256]bool = [_]bool{false} ** 256,
+    source: [256]u8 = @splat(0),
+    valid: [256]bool = @splat(false),
 
     fn resolve(self: *const CopyMap, register: u8) u8 {
         return if (self.valid[register]) self.source[register] else register;
@@ -2545,8 +2545,8 @@ test "copy propagation declines malformed capture metadata before changing input
     var ir = original;
     var capture_regs = [_]u8{1};
     const sites = [_]ClosureSite{
-        .{ .function = @enumFromInt(0), .capture_start = 0, .capture_count = 1 },
-        .{ .function = @enumFromInt(0), .capture_start = 1, .capture_count = 1 },
+        .{ .function = @fromBackingInt(@intCast(0)), .capture_start = 0, .capture_count = 1 },
+        .{ .function = @fromBackingInt(@intCast(0)), .capture_start = 1, .capture_count = 1 },
     };
     const result = try copyPropagate(std.testing.allocator, &ir, &sites, &capture_regs, null);
     try std.testing.expectEqualSlices(regvm.Inst, &original, result);

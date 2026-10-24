@@ -11,11 +11,11 @@ pub const PrimitiveId = enum(u32) {
 
     pub fn fromIndex(value: u32) PrimitiveId {
         std.debug.assert(value != std.math.maxInt(u32));
-        return @enumFromInt(value);
+        return @fromBackingInt(@intCast(value));
     }
 
     pub fn index(self: PrimitiveId) u32 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 
     pub fn isValid(self: PrimitiveId) bool {

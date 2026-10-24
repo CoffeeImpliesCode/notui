@@ -50,7 +50,7 @@ pub fn text(ref: Ref, max_bytes: usize) skript.Error![]const u8 {
     const unit = ref.unit orelse return error.Unsupported;
     if (ref.node == .none) return error.Unsupported;
 
-    const node_index: usize = @intCast(@intFromEnum(ref.node));
+    const node_index: usize = @intCast(@backingInt(ref.node));
     if (node_index >= unit.nodes.len) return error.Unsupported;
     const span = unit.nodes[node_index].span orelse return error.Unsupported;
     const bytes = unit.bytes orelse return error.Unsupported;
@@ -88,7 +88,7 @@ fn datumKind(value: Value) ?DatumKind {
     if (value.typ == builtins.type_string) return .string;
     if (value.typ == builtins.type_cons) return .cons;
     if (value.typ == builtins.type_c64) return .stored_complex;
-    const type_index = @intFromEnum(value.typ);
+    const type_index = @backingInt(value.typ);
     if (type_index >= builtins.type_int and type_index <= builtins.type_int_max) {
         return .immediate;
     }

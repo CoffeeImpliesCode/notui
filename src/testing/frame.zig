@@ -945,7 +945,7 @@ test "frame: a frame larger than the pipe capacity is captured whole" {
 
     const bytes = try session.run(&model, &[_]Step{.{ .input = "hi", .frames = 1 }});
     try testing.expectEqual(height * (width + 1), bytes.len);
-    try testing.expectEqualStrings("hi" ++ " " ** (width - 2) ++ "\n", bytes[0 .. width + 1]);
+    try testing.expectEqualStrings("hi" ++ @as([width - 2]u8, @splat(' ')) ++ "\n", bytes[0 .. width + 1]);
     // Every remaining row is blank: full-width spaces then a newline.
     var at: usize = width + 1;
     while (at < bytes.len) : (at += width + 1) {

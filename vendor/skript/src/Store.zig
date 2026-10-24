@@ -57,7 +57,7 @@ pub const Header = extern struct {
     allocation_type: ?*const AllocationType = null,
     extent: usize = 0,
     tag: u16 = 0,
-    _pad: [6]u8 = [_]u8{0} ** 6,
+    _pad: [6]u8 = @splat(0),
 };
 
 pub const header_size = @sizeOf(Header);
@@ -123,7 +123,7 @@ pub const Ref = packed struct(u64) {
     }
 
     pub fn toObject(self: Ref) Object {
-        return @enumFromInt(@as(u64, @bitCast(self)));
+        return @fromBackingInt(@intCast(@as(u64, @bitCast(self))));
     }
 
     pub fn bits(self: Ref) u64 {
@@ -218,11 +218,11 @@ pub const Object = enum(u64) {
     null = 0,
     _,
     pub fn fromRef(ref: Ref) Object {
-        return @enumFromInt(@as(u64, @bitCast(ref)));
+        return @fromBackingInt(@intCast(@as(u64, @bitCast(ref))));
     }
     pub fn toRef(self: Object) Ref {
         std.debug.assert(self != .null);
-        return @bitCast(@as(u64, @intFromEnum(self)));
+        return @bitCast(@as(u64, @backingInt(self)));
     }
     pub fn unwrapNull(self: Object) ?Object {
         return if (self == .null) null else self;
@@ -230,32 +230,32 @@ pub const Object = enum(u64) {
     pub fn from(val: anytype) Object {
         const t = comptime @TypeOf(val);
         return switch (@typeInfo(t)) {
-            .@"enum" => @enumFromInt(@as(u64, @intCast(@intFromEnum(val)))),
-            .int => |info| @enumFromInt(@as(u64, @as(@Int(.unsigned, info.bits), @bitCast(val)))),
-            else => @enumFromInt(@as(u64, @bitCast(val))),
+            .@"enum" => @fromBackingInt(@intCast(@as(u64, @intCast(@backingInt(val))))),
+            .int => |info| @fromBackingInt(@intCast(@as(u64, @as(@Int(.unsigned, info.bits), @bitCast(val))))),
+            else => @fromBackingInt(@intCast(@as(u64, @bitCast(val)))),
         };
     }
     pub fn as(self: Object, comptime T: type) T {
-        return @bitCast(@as(u64, @intFromEnum(self)));
+        return @bitCast(@as(u64, @backingInt(self)));
     }
     pub fn fromError(e: skript.Error) Object {
-        return @enumFromInt(@intFromEnum(ErrorObject.fromError(e)));
+        return @fromBackingInt(@intCast(@backingInt(ErrorObject.fromError(e))));
     }
     pub fn toError(self: Object) skript.Error {
-        return (@as(ErrorObject, @enumFromInt(@intFromEnum(self)))).toError();
+        return (@as(ErrorObject, @fromBackingInt(@intCast(@backingInt(self))))).toError();
     }
     pub fn fromPtr(ptr: anytype) Object {
-        return @enumFromInt(@intFromPtr(ptr));
+        return @fromBackingInt(@intCast(@intFromPtr(ptr)));
     }
     pub fn toPtr(self: Object, comptime Ptr: type) Ptr {
         std.debug.assert(self != .null);
-        return @ptrFromInt(@as(usize, @intCast(@intFromEnum(self))));
+        return @ptrFromInt(@as(usize, @intCast(@backingInt(self))));
     }
     pub fn fromInt(idx: anytype) Object {
-        return @enumFromInt(idx);
+        return @fromBackingInt(@intCast(idx));
     }
     pub fn toInt(self: Object, comptime Int: type) Int {
-        const raw: u64 = @intFromEnum(self);
+        const raw: u64 = @backingInt(self);
         const u = @Int(.unsigned, @bitSizeOf(Int));
         const t: u = @truncate(raw);
         if (@as(u64, t) != raw) @panic("toInt: illegal read");
@@ -280,10 +280,10 @@ pub const Object = enum(u64) {
         return self.as([2]f32)[0];
     }
     pub fn fromBool(v: bool) Object {
-        return @enumFromInt(@intFromBool(v));
+        return @fromBackingInt(@intCast(@intFromBool(v)));
     }
     pub fn toBool(self: Object) bool {
-        return @intFromEnum(self) != 0;
+        return @backingInt(self) != 0;
     }
 };
 
@@ -320,14 +320,14 @@ pub const ErrorObject = enum(u64) {
     RewriteCycle,
     RewriteLimit,
     pub fn fromError(e: skript.Error) ErrorObject {
-        inline for (@typeInfo(ErrorObject).@"enum".fields) |f| {
-            if (e == @field(skript.Error, f.name)) return @field(ErrorObject, f.name);
+        inline for (@typeInfo(ErrorObject).@"enum".field_names) |name| {
+            if (e == @field(skript.Error, name)) return @field(ErrorObject, name);
         }
         unreachable;
     }
     pub fn toError(self: ErrorObject) skript.Error {
-        inline for (@typeInfo(ErrorObject).@"enum".fields) |f| {
-            if (self == @field(ErrorObject, f.name)) return @field(skript.Error, f.name);
+        inline for (@typeInfo(ErrorObject).@"enum".field_names) |name| {
+            if (self == @field(ErrorObject, name)) return @field(skript.Error, name);
         }
         unreachable;
     }
@@ -437,15 +437,15 @@ fn hasTraceEdges(comptime T: type) bool {
     return switch (@typeInfo(T)) {
         .array => |info| hasTraceEdges(info.child),
         .@"struct" => |info| blk: {
-            inline for (info.fields) |field| {
-                if (!field.is_comptime and hasTraceEdges(field.type)) break :blk true;
+            inline for (info.field_types, info.field_attrs) |field_type, attrs| {
+                if (!attrs.@"comptime" and hasTraceEdges(field_type)) break :blk true;
             }
             break :blk false;
         },
         .optional => |info| hasTraceEdges(info.child),
         .@"union" => |info| blk: {
-            inline for (info.fields) |field| {
-                if (hasTraceEdges(field.type)) break :blk true;
+            inline for (info.field_types) |field_type| {
+                if (hasTraceEdges(field_type)) break :blk true;
             }
             break :blk false;
         },
@@ -511,9 +511,9 @@ fn traceValue(comptime T: type, value: *const T, visitor: *MarkVisitor) anyerror
         },
         .@"struct" => |info| {
             if (info.layout == .@"packed") return error.UntracedAllocation;
-            inline for (info.fields) |field| {
-                if (!field.is_comptime and hasTraceEdges(field.type)) {
-                    try traceValue(field.type, &@field(value.*, field.name), visitor);
+            inline for (info.field_names, info.field_types, info.field_attrs) |name, field_type, attrs| {
+                if (!attrs.@"comptime" and hasTraceEdges(field_type)) {
+                    try traceValue(field_type, &@field(value.*, name), visitor);
                 }
             }
         },
@@ -523,9 +523,9 @@ fn traceValue(comptime T: type, value: *const T, visitor: *MarkVisitor) anyerror
         .@"union" => |info| {
             if (info.tag_type) |Tag| {
                 const active = std.meta.activeTag(value.*);
-                inline for (info.fields) |field| {
-                    if (active == @field(Tag, field.name) and hasTraceEdges(field.type)) {
-                        try traceValue(field.type, &@field(value.*, field.name), visitor);
+                inline for (info.field_names, info.field_types) |name, field_type| {
+                    if (active == @field(Tag, name) and hasTraceEdges(field_type)) {
+                        try traceValue(field_type, &@field(value.*, name), visitor);
                     }
                 }
             } else {
@@ -554,7 +554,7 @@ fn traceValue(comptime T: type, value: *const T, visitor: *MarkVisitor) anyerror
 }
 
 fn traceTypeObject(object: Object, visitor: *MarkVisitor) anyerror!void {
-    if (@intFromEnum(object) <= skript.builtins.type_last_idx) return;
+    if (@backingInt(object) <= skript.builtins.type_last_idx) return;
     try visitor.visit(object.toRef());
 }
 
@@ -779,11 +779,11 @@ fn rejectStoreOwnedHostAddress(address: usize, visitor: *MarkVisitor) anyerror!v
 
 fn traceRuntimeValue(value: *const skript.Value, visitor: *MarkVisitor) anyerror!void {
     const b = skript.builtins;
-    if (@intFromEnum(value.typ) == b.type_last_idx + 1 and value.obj == .null) return;
+    if (@backingInt(value.typ) == b.type_last_idx + 1 and value.obj == .null) return;
     try traceTypeObject(value.typ, visitor);
     switch (value.typ) {
         b.type_nil => if (value.obj != .null) return error.UntracedAllocation,
-        b.type_bool => if (@intFromEnum(value.obj) > 1) return error.UntracedAllocation,
+        b.type_bool => if (@backingInt(value.obj) > 1) return error.UntracedAllocation,
         b.type_i8,
         b.type_i16,
         b.type_i32,
@@ -815,7 +815,7 @@ fn traceRuntimeValue(value: *const skript.Value, visitor: *MarkVisitor) anyerror
         b.type_symbol,
         => {
             if (value.obj == .null) return error.InvalidRef;
-            const address = std.math.cast(usize, @intFromEnum(value.obj)) orelse return error.InvalidRef;
+            const address = std.math.cast(usize, @backingInt(value.obj)) orelse return error.InvalidRef;
             try rejectStoreOwnedHostAddress(address, visitor);
         },
         b.type_opaque => {
@@ -824,7 +824,7 @@ fn traceRuntimeValue(value: *const skript.Value, visitor: *MarkVisitor) anyerror
             if (reference.tag != 0) {
                 try visitor.visit(reference);
             } else {
-                const address = std.math.cast(usize, @intFromEnum(value.obj)) orelse return error.InvalidRef;
+                const address = std.math.cast(usize, @backingInt(value.obj)) orelse return error.InvalidRef;
                 try traceOptionalStoreBacking(
                     address,
                     1,
@@ -839,7 +839,7 @@ fn traceRuntimeValue(value: *const skript.Value, visitor: *MarkVisitor) anyerror
         b.type_string => {
             if (value.obj == .null) return error.InvalidRef;
             // Strings may be backed by Store bytes or by a Runtime/host owner.
-            const address = std.math.cast(usize, @intFromEnum(value.obj)) orelse return error.InvalidRef;
+            const address = std.math.cast(usize, @backingInt(value.obj)) orelse return error.InvalidRef;
             try traceOptionalStoreBacking(
                 address,
                 1,
@@ -902,9 +902,8 @@ heap: []u8 = &.{},
 color_bitmap: []u8 = &.{},
 heap_brk: usize = 0,
 folios: std.ArrayList(*Folio) = .empty,
-folio_free_lists: [max_size_classes]?*Folio = [_]?*Folio{null} ** max_size_classes,
-active_folios: [max_size_classes]std.atomic.Value(usize) =
-    [_]std.atomic.Value(usize){std.atomic.Value(usize).init(0)} ** max_size_classes,
+folio_free_lists: [max_size_classes]?*Folio = @splat(null),
+active_folios: [max_size_classes]std.atomic.Value(usize) = @splat(.init(0)),
 large_head: ?*LargeObj = null,
 folio_count: u32 = 0,
 raw_allocation_count: std.atomic.Value(usize) = .init(0),
@@ -1912,7 +1911,7 @@ fn finalizeLiveAllocations(self: *Store) void {
 
 fn sweep(self: *Store) void {
     for (&self.active_folios) |*active| active.store(0, .release);
-    self.folio_free_lists = [_]?*Folio{null} ** max_size_classes;
+    self.folio_free_lists = @splat(null);
     for (self.folios.items) |folio| {
         folio.free_listed = false;
         const class: usize = folio.class;
@@ -2153,7 +2152,7 @@ fn colorAt(self: *Store, address: usize) Color {
     const unit = relative / 8;
     const byte_index = unit / 4;
     const shift: u3 = @intCast((unit % 4) * 2);
-    return @enumFromInt((self.color_bitmap[byte_index] >> shift) & 3);
+    return @fromBackingInt(@intCast((self.color_bitmap[byte_index] >> shift) & 3));
 }
 
 fn setColor(self: *Store, address: usize, color: Color) void {
@@ -2163,7 +2162,7 @@ fn setColor(self: *Store, address: usize, color: Color) void {
     const shift: u3 = @intCast((unit % 4) * 2);
     const mask: u8 = @as(u8, 3) << shift;
     self.color_bitmap[byte_index] =
-        (self.color_bitmap[byte_index] & ~mask) | (@as(u8, @intFromEnum(color)) << shift);
+        (self.color_bitmap[byte_index] & ~mask) | (@as(u8, @backingInt(color)) << shift);
 }
 
 fn allocBytes(self: *Store, size: usize, alignment: u29) !AllocatedBytes {

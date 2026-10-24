@@ -918,10 +918,10 @@ fn drawText(
         const swept = @typeInfo(coverage.QuadCurve).@"struct";
         std.debug.assert(drawn.layout == .@"extern" and swept.layout == .@"extern");
         std.debug.assert(@sizeOf(Curve) == @sizeOf(coverage.QuadCurve));
-        std.debug.assert(drawn.fields.len == swept.fields.len);
-        for (drawn.fields, swept.fields) |d, s| {
-            std.debug.assert(std.mem.eql(u8, d.name, s.name));
-            std.debug.assert(d.type == s.type);
+        std.debug.assert(drawn.field_names.len == swept.field_names.len);
+        for (drawn.field_names, swept.field_names, drawn.field_types, swept.field_types) |dn, sn, dt, st| {
+            std.debug.assert(std.mem.eql(u8, dn, sn));
+            std.debug.assert(dt == st);
         }
     }
     const cov_curves: []const coverage.QuadCurve =

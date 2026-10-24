@@ -1376,7 +1376,7 @@ test "editor: separate kills cycle with yankPop" {
 test "editor: a refused yank-pop preserves the text and the next ring entry" {
     var ed = try Editor.init(test_alloc, .{ .undo_depth = 0 });
     defer ed.deinit();
-    const long = "L" ** 80;
+    const long = &@as([80]u8, @splat('L'));
     try ed.insert(long);
     try ed.killToStart();
     try ed.insert("s");
@@ -1695,7 +1695,7 @@ test "editor: Region frames repaint after a same-length edit and a reallocation"
     // of hundred bytes are absorbed in place, which would leave the
     // premise below unmet and the hazard untested.
     const before = ed.line.items.ptr;
-    try ed.insert("x" ** 8192);
+    try ed.insert(&@as([8192]u8, @splat('x')));
     try ed.clear();
     try ed.insert("ef");
     try std.testing.expect(ed.line.items.ptr != before); // the premise
@@ -1908,7 +1908,7 @@ test "editor: draw and motion never allocate" {
     // Grow the line far past its initial capacity: `draw` reads the line
     // directly, so no reservation made on the edit path can size the
     // window it paints.
-    try ed.insert("x" ** 200);
+    try ed.insert(&@as([200]u8, @splat('x')));
     const real = ed.gpa;
 
     // From here on every allocation fails, so anything that reaches `gpa`
@@ -1920,7 +1920,7 @@ test "editor: draw and motion never allocate" {
     defer buf.deinit();
     _ = try ed.draw(&buf, 0, 0, .fromNanoseconds(0));
     var row: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("x" ** 39 ++ " ", rowStr(&buf, 0, &row));
+    try std.testing.expectEqualStrings(@as([39]u8, @splat('x')) ++ " ", rowStr(&buf, 0, &row));
     try std.testing.expect(!ed.advance(.fromNanoseconds(0)));
     ed.moveHome();
     ed.moveWordRight();

@@ -310,8 +310,8 @@ test "theme: style carries the attributes the token declares" {
     // it.
     for ([_]Token{ .text, .border, .success, .warning, .selection, .code_bg }) |token| {
         const s = Theme.dark.style(token, .truecolor);
-        inline for (@typeInfo(Style.Attrs).@"struct".fields) |field| {
-            try std.testing.expect(!@field(s.attrs, field.name));
+        inline for (@typeInfo(Style.Attrs).@"struct".field_names) |name| {
+            try std.testing.expect(!@field(s.attrs, name));
         }
     }
 

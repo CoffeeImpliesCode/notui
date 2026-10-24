@@ -62,7 +62,7 @@ fn chargeProbe(ctx: *EvalContext, map: *const Map, key: MapKey) Error!void {
     const capacity = map.capacity();
     const bound: u64 = if (capacity == 0) 1 else capacity;
     var cost: u64 = 1;
-    if (key.typ == @as(u8, @intCast(@intFromEnum(skript.builtins.type_string)))) {
+    if (key.typ == @as(u8, @intCast(@backingInt(skript.builtins.type_string)))) {
         const bytes = try ctx.stringBytes(
             key.obj.toPtr([*:0]const u8),
             skript.data.map_key_bytes_max,
@@ -70,7 +70,7 @@ fn chargeProbe(ctx: *EvalContext, map: *const Map, key: MapKey) Error!void {
         );
         const byte_count = std.math.cast(u64, bytes.len) orelse return error.Unsupported;
         cost = std.math.add(u64, byte_count, 1) catch return error.Unsupported;
-    } else if (key.typ == @as(u8, @intCast(@intFromEnum(skript.builtins.type_bytevector)))) {
+    } else if (key.typ == @as(u8, @intCast(@backingInt(skript.builtins.type_bytevector)))) {
         const bytes = key.obj.toRef().deref(Value.ByteVector).bytes;
         const byte_count = std.math.cast(u64, bytes.len) orelse return error.Unsupported;
         cost = std.math.add(u64, byte_count, 1) catch return error.Unsupported;
@@ -81,7 +81,7 @@ fn chargeProbe(ctx: *EvalContext, map: *const Map, key: MapKey) Error!void {
 /// Return a validated, non-owning lookup key with the `equal?` type contract.
 /// String and bytevector keys are limited to 1 MiB and cache their content hash.
 pub fn keyOf(ctx: *EvalContext, value: Value) Error!MapKey {
-    const typ: u8 = @intCast(@intFromEnum(value.typ));
+    const typ: u8 = @intCast(@backingInt(value.typ));
     if (value.typ == skript.builtins.type_symbol or value.typ == skript.builtins.type_keyword) {
         return .{ .typ = typ, .obj = value.obj };
     }
@@ -144,7 +144,7 @@ pub fn keyOf(ctx: *EvalContext, value: Value) Error!MapKey {
 
 /// Copy validated string and bytevector keys into the destination Store.
 pub fn ownKey(ctx: *EvalContext, key: MapKey) Error!MapKey {
-    if (key.typ == @as(u8, @intCast(@intFromEnum(skript.builtins.type_string)))) {
+    if (key.typ == @as(u8, @intCast(@backingInt(skript.builtins.type_string)))) {
         const bytes = try ctx.stringBytes(
             key.obj.toPtr([*:0]const u8),
             skript.data.map_key_bytes_max,
@@ -161,7 +161,7 @@ pub fn ownKey(ctx: *EvalContext, key: MapKey) Error!MapKey {
             .owned_ref = allocation.ref,
         };
     }
-    if (key.typ == @as(u8, @intCast(@intFromEnum(skript.builtins.type_bytevector)))) {
+    if (key.typ == @as(u8, @intCast(@backingInt(skript.builtins.type_bytevector)))) {
         const bytes = key.obj.toRef().deref(Value.ByteVector).bytes;
         if (bytes.len > skript.data.map_key_bytes_max) return error.Unsupported;
         try chargeWork(ctx, bytes.len);
@@ -190,7 +190,7 @@ fn discardOwnedKey(store: *skript.Store, key: MapKey) void {
 
 /// Reconstruct the exact Value represented by a stored MapKey.
 pub fn keyValue(key: MapKey) Value {
-    return Value.init(@enumFromInt(key.typ), key.obj);
+    return Value.init(@fromBackingInt(@intCast(key.typ)), key.obj);
 }
 
 /// Create a new map from alternating key-value pairs.
@@ -563,7 +563,7 @@ test "map: bytevector key scans honor the finite work budget" {
     const runtime = try initTestingRuntime();
     defer runtime.deinit();
 
-    const bytes = [_]u8{0xFF} ** 64;
+    const bytes: [64]u8 = @splat(0xFF);
     const key = try testingByteVector(runtime, &bytes);
     const map = try create(runtime.context(), .nil, .nil, &.{ key, .i64(1) });
 
@@ -586,7 +586,7 @@ test "map: string key scans honor the finite work budget" {
     const runtime = try initTestingRuntime();
     defer runtime.deinit();
 
-    const bytes = [_]u8{'x'} ** 64;
+    const bytes: [64]u8 = @splat('x');
     const key = try intrin.string.storeString(runtime.context(), &bytes);
     const map = try create(runtime.context(), .nil, .nil, &.{ key, .i64(1) });
 

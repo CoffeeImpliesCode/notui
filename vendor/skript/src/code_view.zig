@@ -90,7 +90,7 @@ const Encoder = struct {
 
     fn value(self: *Encoder, item: Value) Error!Value {
         const b = skript.builtins;
-        const tag = @intFromEnum(item.typ);
+        const tag = @backingInt(item.typ);
         if (item.isNil() or item.typ == b.type_bool or item.typ == b.type_symbol or
             item.typ == b.type_keyword or item.typ == b.type_string or item.typ == b.type_cons or
             (tag >= b.type_float and tag <= b.type_complex_max))
@@ -115,7 +115,7 @@ const Encoder = struct {
                     try self.label("function"),
                     .u64(owner.id),
                     .u64(owner.revision),
-                    .u64(@intFromEnum(closure.function_id)),
+                    .u64(@backingInt(closure.function_id)),
                 });
             }
             return self.opaqueValue("closure");
@@ -126,7 +126,7 @@ const Encoder = struct {
     fn program(self: *Encoder, root: Code.FunctionId) Error!Value {
         const reachable = try self.scratch.alloc(bool, self.code.functions.len);
         @memset(reachable, false);
-        reachable[@intFromEnum(root)] = true;
+        reachable[@backingInt(root)] = true;
         const used_globals = try self.scratch.alloc(bool, self.code.globals.len);
         @memset(used_globals, false);
         var pending: std.ArrayList(Code.FunctionId) = .empty;
@@ -136,25 +136,25 @@ const Encoder = struct {
             try self.charge();
             const function = self.code.function(pending.items[cursor]) orelse return error.InvalidCode;
             for (self.code.function_blocks[function.block_start..][0..function.block_count]) |block_id| {
-                const block = self.code.blocks[@intFromEnum(block_id)];
+                const block = self.code.blocks[@backingInt(block_id)];
                 for (self.code.block_nodes[block.node_start..][0..block.node_count]) |node_id| {
                     try self.charge();
-                    const node = self.code.nodes[@intFromEnum(node_id)];
+                    const node = self.code.nodes[@backingInt(node_id)];
                     const target = switch (node.operation) {
                         .make_closure => |closure| closure.function,
                         .direct_call => |call| call.function,
                         .global_read => |cell| {
-                            used_globals[@intFromEnum(cell)] = true;
+                            used_globals[@backingInt(cell)] = true;
                             continue;
                         },
                         .global_write => |write| {
-                            used_globals[@intFromEnum(write.cell)] = true;
+                            used_globals[@backingInt(write.cell)] = true;
                             continue;
                         },
                         else => continue,
                     };
-                    if (!reachable[@intFromEnum(target)]) {
-                        reachable[@intFromEnum(target)] = true;
+                    if (!reachable[@backingInt(target)]) {
+                        reachable[@backingInt(target)] = true;
                         try pending.append(self.scratch, target);
                     }
                 }
@@ -197,7 +197,7 @@ const Encoder = struct {
                 return error.Unsupported;
             view = try self.encode(OriginView{
                 .code = .{ .id = origin.code.id, .revision = origin.code.revision },
-                .function = @intFromEnum(origin.function),
+                .function = @backingInt(origin.function),
                 .origin = view,
             }, origin_depth);
         }
@@ -210,23 +210,23 @@ const Encoder = struct {
         if (block_ids.len > self.remaining) return error.Unsupported;
         const blocks = try self.scratch.alloc(Value, block_ids.len);
         for (block_ids, blocks) |block_id, *out| {
-            const block = self.code.blocks[@intFromEnum(block_id)];
+            const block = self.code.blocks[@backingInt(block_id)];
             const node_ids = self.code.block_nodes[block.node_start..][0..block.node_count];
             if (node_ids.len > self.remaining) return error.Unsupported;
             const nodes = try self.scratch.alloc(Code.Node, node_ids.len);
-            for (node_ids, nodes) |node_id, *node| node.* = self.code.nodes[@intFromEnum(node_id)];
+            for (node_ids, nodes) |node_id, *node| node.* = self.code.nodes[@backingInt(node_id)];
             out.* = try self.encode(.{
                 .id = block.id,
                 .parameters = self.code.block_parameters[block.param_start..][0..block.param_count],
                 .nodes = nodes,
                 .terminator = block.terminator,
-                .handler = if (block.handler == .invalid) null else self.code.handlers[@intFromEnum(block.handler)],
+                .handler = if (block.handler == .invalid) null else self.code.handlers[@backingInt(block.handler)],
             }, 2);
         }
         const binding_ids = self.code.function_bindings[function.binding_start..][0..function.binding_count];
         if (binding_ids.len > self.remaining) return error.Unsupported;
         const bindings = try self.scratch.alloc(Code.Binding, binding_ids.len);
-        for (binding_ids, bindings) |binding_id, *binding| binding.* = self.code.bindings[@intFromEnum(binding_id)];
+        for (binding_ids, bindings) |binding_id, *binding| binding.* = self.code.bindings[@backingInt(binding_id)];
         return self.encode(.{
             .id = function.id,
             .name = function.name,
@@ -251,7 +251,7 @@ const Encoder = struct {
         if (T == Code.Symbol) return .symbol(item);
         if (T == SourceUnit.Ref) {
             const unit = item.unit orelse return .nil;
-            return self.list(&.{ .u64(@intFromEnum(unit.id)), .u64(@intFromEnum(item.node)) });
+            return self.list(&.{ .u64(@backingInt(unit.id)), .u64(@backingInt(item.node)) });
         }
         if (T == Code.OperandRange) {
             return self.encode(self.code.operands[item.start..][0..item.len], depth + 1);
@@ -262,15 +262,15 @@ const Encoder = struct {
             .void => return .nil,
             .optional => return if (item) |present| self.encode(present, depth + 1) else .nil,
             .@"enum" => |info| {
-                if (!info.is_exhaustive) return .u64(@intFromEnum(item));
+                if (info.mode == .nonexhaustive) return .u64(@backingInt(item));
                 return self.label(@tagName(item));
             },
             .@"union" => |info| {
-                inline for (info.fields) |field| {
-                    if (std.mem.eql(u8, @tagName(item), field.name)) {
+                inline for (info.field_names) |name| {
+                    if (std.mem.eql(u8, @tagName(item), name)) {
                         return self.list(&.{
-                            try self.label(field.name),
-                            try self.encode(@field(item, field.name), depth + 1),
+                            try self.label(name),
+                            try self.encode(@field(item, name), depth + 1),
                         });
                     }
                 }
@@ -278,9 +278,9 @@ const Encoder = struct {
             },
             .@"struct" => |info| {
                 var fields: std.ArrayList(Value) = .empty;
-                inline for (info.fields) |field| {
-                    try fields.append(self.scratch, try self.label(field.name));
-                    try fields.append(self.scratch, try self.encode(@field(item, field.name), depth + 1));
+                inline for (info.field_names) |name| {
+                    try fields.append(self.scratch, try self.label(name));
+                    try fields.append(self.scratch, try self.encode(@field(item, name), depth + 1));
                 }
                 return self.list(fields.items);
             },
@@ -309,7 +309,7 @@ test "bound snapshots reject invalid code ranges" {
     var malformed_origin = closure_code.*;
     const functions = try std.testing.allocator.dupe(Code.Function, malformed_origin.functions);
     defer std.testing.allocator.free(functions);
-    functions[@intFromEnum(closure.function_id)].origin = .{
+    functions[@backingInt(closure.function_id)].origin = .{
         .code = &malformed_origin,
         .function = closure.function_id,
     };
@@ -369,7 +369,7 @@ test "bound snapshots expose redacted generated origins" {
         try Inspect.at(origin_code, 3),
     );
     try std.testing.expectEqual(
-        Value.u64(@intFromEnum(source_closure.function_id)),
+        Value.u64(@backingInt(source_closure.function_id)),
         try Inspect.at(origin, 3),
     );
     try std.testing.expectEqual(Value.nil, try Inspect.at(origin, 5));

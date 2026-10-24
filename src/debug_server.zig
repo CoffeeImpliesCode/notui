@@ -423,7 +423,7 @@ test "snapshot: status is NUL padded, truncating at its capacity" {
     try testing.expectEqualStrings("idle", snap.statusText());
     try testing.expectEqual(@as(usize, 4), snap.statusText().len);
 
-    const exact = "x" ** Snapshot.status_capacity;
+    const exact = &@as([Snapshot.status_capacity]u8, @splat('x'));
     snap.setStatus(exact);
     try testing.expectEqual(@as(usize, Snapshot.status_capacity), snap.statusText().len);
 
@@ -434,7 +434,7 @@ test "snapshot: status is NUL padded, truncating at its capacity" {
 
 test "snapshot: a status longer than the capacity truncates" {
     var snap: Snapshot = .{};
-    snap.setStatus("y" ** (Snapshot.status_capacity + 3));
+    snap.setStatus(&@as([Snapshot.status_capacity + 3]u8, @splat('y')));
     try testing.expectEqual(@as(usize, Snapshot.status_capacity), snap.statusText().len);
     try testing.expectEqual(@as(u8, 'y'), snap.status[Snapshot.status_capacity - 1]);
 }

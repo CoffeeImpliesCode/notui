@@ -157,7 +157,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/root.zig"),
             .target = wasm_target,
-            .optimize = .ReleaseSmall,
+            .optimize = .small,
         }),
         .linkage = .static,
     });

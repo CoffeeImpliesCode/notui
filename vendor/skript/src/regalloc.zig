@@ -6,7 +6,7 @@ const max_regs = 256;
 /// Allocates registers from a free list with a hint-based approach.
 pub const RegAlloc = struct {
     /// Bitmap of free registers (1 = free).
-    free: std.StaticBitSet(max_regs) = std.StaticBitSet(max_regs).initEmpty(),
+    free: std.StaticBitSet(max_regs) = .empty,
     /// Next register to try (hint for better cache behavior).
     next_hint: u8 = 1, // r0 reserved for return value
     /// Number of registers used (renaming counter for debug).

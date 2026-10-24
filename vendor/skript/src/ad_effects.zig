@@ -220,7 +220,7 @@ const Scanner = struct {
         if (last > item.code.function_blocks.len) return error.Unsupported;
 
         for (item.code.function_blocks[first..last]) |block_id| {
-            const block_index = @intFromEnum(block_id);
+            const block_index = @backingInt(block_id);
             if (block_index >= item.code.blocks.len) return error.Unsupported;
             const block = item.code.blocks[block_index];
             if (block.function != item.function_id) return error.Unsupported;
@@ -231,7 +231,7 @@ const Scanner = struct {
             if (node_last > item.code.block_nodes.len) return error.Unsupported;
             for (item.code.block_nodes[node_first..node_last]) |node_id| {
                 try self.step();
-                const node_index = @intFromEnum(node_id);
+                const node_index = @backingInt(node_id);
                 if (node_index >= item.code.nodes.len) return error.Unsupported;
                 const node = item.code.nodes[node_index];
                 if (node.function != item.function_id) return error.Unsupported;
@@ -261,7 +261,7 @@ const Scanner = struct {
         switch (operation) {
             .literal, .quote, .local_read, .try_begin, .try_end, .ns_push, .ns_pop => {},
             .global_read => |cell| {
-                const global = item.code.globals[@intFromEnum(cell)];
+                const global = item.code.globals[@backingInt(cell)];
                 if (global.binding == .invalid) {
                     _ = self.readGlobal(item.namespace, global.name) catch |err| switch (err) {
                         error.Unbound => return,
@@ -271,9 +271,9 @@ const Scanner = struct {
             },
             .global_write => |write| {
                 if (write.assign_existing) return error.Unsupported;
-                const cell = item.code.globals[@intFromEnum(write.cell)];
+                const cell = item.code.globals[@backingInt(write.cell)];
                 if (cell.binding == .invalid) return error.Unsupported;
-                const binding = item.code.bindings[@intFromEnum(cell.binding)];
+                const binding = item.code.bindings[@backingInt(cell.binding)];
                 if (binding.function != item.function_id) return error.Unsupported;
             },
             .arithmetic => |arith| {
@@ -535,7 +535,7 @@ const Scanner = struct {
     }
 
     fn typePtr(self: *Scanner, value: Value) *const skript.Type {
-        const tag = @intFromEnum(value.obj);
+        const tag = @backingInt(value.obj);
         if (tag <= skript.builtins.type_last_idx) {
             return self.rt.predefined_types.items[@as(usize, @intCast(tag))];
         }
@@ -557,7 +557,7 @@ const Scanner = struct {
         binding_id: Code.BindingId,
         depth: usize,
     ) Error!Resolved {
-        const binding_index = @intFromEnum(binding_id);
+        const binding_index = @backingInt(binding_id);
         if (binding_index >= item.code.bindings.len) return .unknown;
         const binding = item.code.bindings[binding_index];
         var initializer: Code.ValueId = .invalid;
@@ -601,7 +601,7 @@ const Scanner = struct {
             return error.Unsupported;
         if (last > item.code.function_blocks.len) return error.Unsupported;
         for (item.code.function_blocks[first..last]) |block_id| {
-            const block_index = @intFromEnum(block_id);
+            const block_index = @backingInt(block_id);
             if (block_index >= item.code.blocks.len) return error.Unsupported;
             const block = item.code.blocks[block_index];
             const node_first: usize = block.node_start;
@@ -610,14 +610,14 @@ const Scanner = struct {
             if (node_last > item.code.block_nodes.len) return error.Unsupported;
             for (item.code.block_nodes[node_first..node_last]) |node_id| {
                 try self.step();
-                const node_index = @intFromEnum(node_id);
+                const node_index = @backingInt(node_id);
                 if (node_index >= item.code.nodes.len) return error.Unsupported;
                 const node = item.code.nodes[node_index];
                 if (node.result != value_id) continue;
                 return switch (node.operation) {
                     .literal => |literal| .{ .value = literal },
                     .global_read => |cell| blk: {
-                        const global_index = @intFromEnum(cell);
+                        const global_index = @backingInt(cell);
                         if (global_index >= item.code.globals.len) break :blk .unknown;
                         const global = item.code.globals[global_index];
                         if (global.binding != .invalid) {
@@ -630,7 +630,7 @@ const Scanner = struct {
                         break :blk .{ .value = dependency.value };
                     },
                     .local_read => |binding_id| blk: {
-                        const binding_index = @intFromEnum(binding_id);
+                        const binding_index = @backingInt(binding_id);
                         if (binding_index >= item.code.bindings.len) break :blk .unknown;
                         const local = item.code.bindings[binding_index];
                         if (local.function != item.function_id) {

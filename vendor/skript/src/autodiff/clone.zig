@@ -18,7 +18,7 @@ pub fn append(
     for (source.functions) |function| {
         const id = try builder.addFunction(function.name, function.source);
         std.debug.assert(id == function.id);
-        const output = &builder.functions.items[@intFromEnum(id)];
+        const output = &builder.functions.items[@backingInt(id)];
         output.has_rest = function.has_rest;
         output.result_count = function.result_count;
         output.module_entry = function.module_entry;
@@ -48,19 +48,19 @@ pub fn append(
     for (source.handlers, 0..) |handler, index| {
         const exception = try mapped(values, handler.exception);
         const id = try builder.addHandler(handler.function, handler.protected, handler.landing, exception);
-        std.debug.assert(@intFromEnum(id) == index);
+        std.debug.assert(@backingInt(id) == index);
     }
     for (source.nodes) |node| {
         const result = try builder.addNode(node.function, node.block, node.operation, node.source);
         const id = builder.lastNodeId() orelse return error.InvalidCode;
         std.debug.assert(id == node.id);
-        builder.nodes.items[@intFromEnum(id)].source_index = node.source_index;
+        builder.nodes.items[@backingInt(id)].source_index = node.source_index;
         for (0..node.resultCount()) |index| {
-            values[@intFromEnum(node.result) + index] = @enumFromInt(@intFromEnum(result) + index);
+            values[@backingInt(node.result) + index] = @fromBackingInt(@intCast(@backingInt(result) + index));
         }
     }
     for (source.bindings) |binding| {
-        builder.bindings.items[@intFromEnum(binding.id)].value = try mapped(values, binding.value);
+        builder.bindings.items[@backingInt(binding.id)].value = try mapped(values, binding.value);
     }
     const operands = try scratch.alloc(Code.ValueId, source.operands.len);
     defer scratch.free(operands);
@@ -68,7 +68,7 @@ pub fn append(
     const range = try builder.addOperands(operands);
     std.debug.assert(range.start == 0);
     for (source.nodes) |node| {
-        builder.nodes.items[@intFromEnum(node.id)].operation = try remapOperation(values, node.operation);
+        builder.nodes.items[@backingInt(node.id)].operation = try remapOperation(values, node.operation);
     }
     for (source.blocks) |block| try builder.setTerminator(block.id, try remapTerminator(values, block.terminator));
 }
@@ -76,26 +76,26 @@ pub fn append(
 fn copyInputs(builder: *Code.Builder, source: *const Code.Code, values: []Code.ValueId) Error!void {
     for (source.functions) |function| {
         for (source.parameters[function.parameter_start..][0..function.parameter_count]) |binding| {
-            const original = source.bindings[@intFromEnum(binding)].value;
-            values[@intFromEnum(original)] = try builder.addValue(function.id);
+            const original = source.bindings[@backingInt(binding)].value;
+            values[@backingInt(original)] = try builder.addValue(function.id);
             try builder.addParameter(function.id, binding);
         }
         const start: usize = function.capture_start;
         for (source.captures[start..][0..function.capture_count], 0..) |binding, index| {
             const original = source.capture_values[start + index];
-            values[@intFromEnum(original)] = try builder.addCapture(function.id, binding);
+            values[@backingInt(original)] = try builder.addCapture(function.id, binding);
         }
     }
     for (source.blocks) |block| {
         for (source.block_parameters[block.param_start..][0..block.param_count]) |value| {
-            values[@intFromEnum(value)] = try builder.addBlockParam(block.id, block.function);
+            values[@backingInt(value)] = try builder.addBlockParam(block.id, block.function);
         }
     }
 }
 
 fn mapped(values: []const Code.ValueId, value: Code.ValueId) Error!Code.ValueId {
     if (value == .invalid) return .invalid;
-    const index = @intFromEnum(value);
+    const index = @backingInt(value);
     if (index >= values.len or values[index] == .invalid) return error.InvalidCode;
     return values[index];
 }
@@ -149,7 +149,7 @@ test "clone preserves variadic function metadata and parameter bindings" {
         try runtime.store.getsym("variadic-clone"),
         .{},
     );
-    const info = &source_builder.functions.items[@intFromEnum(function)];
+    const info = &source_builder.functions.items[@backingInt(function)];
     info.has_rest = true;
     info.result_count = 2;
     info.ad_level = 7;
@@ -165,7 +165,7 @@ test "clone preserves variadic function metadata and parameter bindings" {
         .{},
     );
     const fixed_value = try source_builder.addValue(function);
-    source_builder.bindings.items[@intFromEnum(fixed_binding)].value = fixed_value;
+    source_builder.bindings.items[@backingInt(fixed_binding)].value = fixed_value;
     try source_builder.addParameter(function, fixed_binding);
     const rest_binding = try source_builder.addBinding(
         function,
@@ -174,7 +174,7 @@ test "clone preserves variadic function metadata and parameter bindings" {
         .{},
     );
     const rest_value = try source_builder.addValue(function);
-    source_builder.bindings.items[@intFromEnum(rest_binding)].value = rest_value;
+    source_builder.bindings.items[@backingInt(rest_binding)].value = rest_value;
     try source_builder.addParameter(function, rest_binding);
     try source_builder.setTerminator(
         block,
@@ -197,10 +197,10 @@ test "clone preserves variadic function metadata and parameter bindings" {
     const parameters = cloned.parameters[cloned_info.parameter_start..][0..cloned_info.parameter_count];
     try std.testing.expectEqualStrings(
         "fixed",
-        cloned.bindings[@intFromEnum(parameters[0])].name.*,
+        cloned.bindings[@backingInt(parameters[0])].name.*,
     );
     try std.testing.expectEqualStrings(
         "rest",
-        cloned.bindings[@intFromEnum(parameters[1])].name.*,
+        cloned.bindings[@backingInt(parameters[1])].name.*,
     );
 }

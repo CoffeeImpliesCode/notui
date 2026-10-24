@@ -448,7 +448,7 @@ pub fn registerAccess(inst: Inst) RegisterAccess {
             break :blk builtinAccess(.{
                 .index = intrinsic_index,
                 .base = base,
-                .argc = @intFromEnum(opcode) - @intFromEnum(Opcode.call_builtin_0),
+                .argc = @backingInt(opcode) - @backingInt(Opcode.call_builtin_0),
                 .size = 1,
             });
         },
@@ -473,7 +473,7 @@ pub fn registerAccess(inst: Inst) RegisterAccess {
 /// (0x50-0x98); a new opcode outside them silently degrades
 /// `registerAccess` to `conservative` and the VM rejects the instruction.
 pub fn isArithmetic(opcode: Opcode) bool {
-    const raw = @intFromEnum(opcode);
+    const raw = @backingInt(opcode);
     return (raw >= 0x40 and raw <= 0x47) or (raw >= 0x50 and raw <= 0x98);
 }
 
@@ -573,7 +573,7 @@ pub fn formatRegInst(w: *std.Io.Writer, ip: [*]const Inst, rt: *Runtime) std.Io.
         else => if (isArithmetic(inst.opcode))
             try printArith(w, inst)
         else
-            try w.print("<unknown opcode {x}>", .{@intFromEnum(inst.opcode)}),
+            try w.print("<unknown opcode {x}>", .{@backingInt(inst.opcode)}),
     }
     return instructionSize(inst.opcode);
 }
@@ -622,7 +622,7 @@ test "direct intrinsic words decode every arity and full table indices" {
         const first = Inst.make(case.opcode, (300 << 8) | 7);
         const ir = [_]Inst{ first, Formats.extensionWord(case.argc) };
         try std.testing.expectEqual(
-            (@as(u32, @intFromEnum(case.opcode)) << 24) | (300 << 8) | 7,
+            (@as(u32, @backingInt(case.opcode)) << 24) | (300 << 8) | 7,
             @as(u32, @bitCast(first)),
         );
         const call = try decodeBuiltin(&ir, 0);
@@ -633,7 +633,7 @@ test "direct intrinsic words decode every arity and full table indices" {
         try std.testing.expectEqual(case.size, instructionSize(case.opcode));
     }
     try std.testing.expectError(error.InvalidCode, decodeBuiltin(
-        &.{Inst.make(@enumFromInt(0x32), 0)},
+        &.{Inst.make(@fromBackingInt(@intCast(0x32)), 0)},
         0,
     ));
 }

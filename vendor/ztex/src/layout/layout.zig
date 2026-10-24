@@ -156,7 +156,7 @@ fn layoutInner(
             fm,
             style,
             size_pt,
-            @enumFromInt(n.data),
+            @fromBackingInt(@intCast(n.data)),
             cramped,
         ),
         // A forced math style (\displaystyle \textstyle \scriptstyle
@@ -167,7 +167,7 @@ fn layoutInner(
         // cramped bit clears (forced styles are uncramped — the classic
         // escape from a denominator's cramped textstyle).
         .mathstyle => blk: {
-            const ms: Style = @enumFromInt(n.data);
+            const ms: Style = @fromBackingInt(@intCast(n.data));
             const gl = fm.glue(fm);
             break :blk layoutInner(
                 list,
@@ -462,9 +462,9 @@ inline fn quadEm(_: Style) f32 {
 
 /// Glue units (0-3) between two adjacent atoms in the current style.
 fn glueUnits(l: Role, r: Role, style: Style) u8 {
-    const i: usize = @intFromEnum(l);
-    const j: usize = @intFromEnum(r);
-    return glue_table[i][j][@intFromEnum(style)];
+    const i: usize = @backingInt(l);
+    const j: usize = @backingInt(r);
+    return glue_table[i][j][@backingInt(style)];
 }
 
 /// Scale a 10pt-base metric to the current size.
@@ -2270,7 +2270,7 @@ fn opTailIc(
         // beside italic tail (TeX appends delta only when the op is NOT
         // limits). \displaylimits/\nolimits keep the default/beside tail.
         if ((n.data & atom.LimitsBits.mask) == atom.LimitsBits.force) return 0;
-        const op: atom.BigOp = @enumFromInt(n.data & atom.LimitsBits.value_mask);
+        const op: atom.BigOp = @fromBackingInt(@intCast(n.data & atom.LimitsBits.value_mask));
         if (bigOpLimits(op)) return 0;
         const base_adv = bigOpInk(op, false).advance;
         const disp_adv = bigOpInk(op, true).disp_advance;
@@ -2322,7 +2322,7 @@ fn layoutScript(
     const forced_limits = op_bits == atom.LimitsBits.force;
     const forced_beside = op_bits == atom.LimitsBits.force_beside;
     const default_limits = if (base_u_atom.tag == .op)
-        bigOpLimits(@enumFromInt(base_u_atom.data & atom.LimitsBits.value_mask))
+        bigOpLimits(@fromBackingInt(@intCast(base_u_atom.data & atom.LimitsBits.value_mask)))
     else if (base_u_atom.tag == .opname)
         (base_u_atom.data & atom.LimitsBits.value_mask) != 0
     else
@@ -2373,7 +2373,7 @@ fn layoutScript(
             // The text ∑ (ic 0) puts both scripts at the advance 1.056em.
             // The old "sup at box + ic" convention matched the display ∫
             // only because 0.665 + 0.332 ≈ 0.999.
-            const op: atom.BigOp = @enumFromInt(base_u_atom.data & atom.LimitsBits.value_mask);
+            const op: atom.BigOp = @fromBackingInt(@intCast(base_u_atom.data & atom.LimitsBits.value_mask));
             const ink = bigOpInk(op, style == .display);
             if (style == .display and !bigOpLimits(op)) {
                 const base_adv = bigOpInk(op, false).advance;
@@ -2879,7 +2879,7 @@ fn layoutOp(
 ) !u32 {
     const n = ast.node(idx);
     const span = ast.span(idx);
-    const op: atom.BigOp = @enumFromInt(n.data & atom.LimitsBits.value_mask);
+    const op: atom.BigOp = @fromBackingInt(@intCast(n.data & atom.LimitsBits.value_mask));
     const cp = bigOpCodepoint(op);
     const display = style == .display;
     const ink = bigOpInk(op, display);
@@ -2940,7 +2940,7 @@ fn layoutMathChoice(
     cstyle: atom.CharStyle,
 ) !u32 {
     const branch: Style = style; // branch i is set at style i
-    const child = ast.child(idx, @intFromEnum(branch));
+    const child = ast.child(idx, @backingInt(branch));
     const gl = fm.glue(fm);
     return layoutInner(
         list,
@@ -3147,7 +3147,7 @@ fn layoutText(
 ) !u32 {
     const n = ast.node(idx);
     const span = ast.span(idx);
-    const tstyle: atom.CharStyle = @enumFromInt(n.data);
+    const tstyle: atom.CharStyle = @fromBackingInt(@intCast(n.data));
     // strip the surrounding braces: text bytes are span.start+1 .. span.end-1
     const inner = ast.src[span.start + 1 .. span.end - 1];
 
@@ -3271,7 +3271,7 @@ test "layout: big operator limits in display style become a vbox" {
     defer a.deinit();
     try a.pushToken(.{ .tag = .char, .start = 0, .end = 1 });
     try a.pushToken(.{ .tag = .char, .start = 1, .end = 2 });
-    const op = try a.createLeaf(.op, 0, 0, @intFromEnum(atom.BigOp.sum));
+    const op = try a.createLeaf(.op, 0, 0, @backingInt(atom.BigOp.sum));
     const sup = try a.createLeaf(.char, 0, 1, 0); // 'a'
     const sub = try a.createLeaf(.char, 1, 1, 0); // 'b'
     const children = [_]atom.Node{ a.node(op), a.node(sup), a.node(sub) };
@@ -3297,7 +3297,7 @@ test "layout: big operator beside scripts in text style is a script box" {
     defer a.deinit();
     try a.pushToken(.{ .tag = .char, .start = 0, .end = 1 });
     try a.pushToken(.{ .tag = .char, .start = 1, .end = 2 });
-    const op = try a.createLeaf(.op, 0, 0, @intFromEnum(atom.BigOp.sum));
+    const op = try a.createLeaf(.op, 0, 0, @backingInt(atom.BigOp.sum));
     const sup = try a.createLeaf(.char, 0, 1, 0);
     const children = [_]atom.Node{ a.node(op), a.node(sup) };
     const script = try a.createNode(.script, 0, 1, &children, atom.ScriptBits.sup);
@@ -3312,7 +3312,7 @@ test "layout: \\limits forces over/under in TEXT style (TeX applies \\limits in 
     defer a.deinit();
     try a.pushToken(.{ .tag = .char, .start = 0, .end = 1 });
     try a.pushToken(.{ .tag = .char, .start = 1, .end = 2 });
-    const op = try a.createLeaf(.op, 0, 0, @intFromEnum(atom.BigOp.sum) | atom.LimitsBits.force);
+    const op = try a.createLeaf(.op, 0, 0, @backingInt(atom.BigOp.sum) | atom.LimitsBits.force);
     const sub = try a.createLeaf(.char, 1, 1, 0);
     const children = [_]atom.Node{ a.node(op), a.node(sub) };
     const script = try a.createNode(.script, 0, 2, &children, atom.ScriptBits.sub);
@@ -3333,7 +3333,7 @@ test "layout: \\nolimits forces beside scripts in DISPLAY style" {
     defer a.deinit();
     try a.pushToken(.{ .tag = .char, .start = 0, .end = 1 });
     try a.pushToken(.{ .tag = .char, .start = 1, .end = 2 });
-    const op = try a.createLeaf(.op, 0, 0, @intFromEnum(atom.BigOp.sum) | atom.LimitsBits.force_beside);
+    const op = try a.createLeaf(.op, 0, 0, @backingInt(atom.BigOp.sum) | atom.LimitsBits.force_beside);
     const sup = try a.createLeaf(.char, 0, 1, 0);
     const children = [_]atom.Node{ a.node(op), a.node(sup) };
     const script = try a.createNode(.script, 0, 1, &children, atom.ScriptBits.sup);
@@ -3353,7 +3353,7 @@ test "layout: \\limits on \\int in display style becomes a limits vbox" {
     defer a.deinit();
     try a.pushToken(.{ .tag = .char, .start = 0, .end = 1 });
     try a.pushToken(.{ .tag = .char, .start = 1, .end = 2 });
-    const op = try a.createLeaf(.op, 0, 0, @intFromEnum(atom.BigOp.int) | atom.LimitsBits.force);
+    const op = try a.createLeaf(.op, 0, 0, @backingInt(atom.BigOp.int) | atom.LimitsBits.force);
     const sub = try a.createLeaf(.char, 1, 1, 0);
     const children = [_]atom.Node{ a.node(op), a.node(sub) };
     const script = try a.createNode(.script, 0, 2, &children, atom.ScriptBits.sub);
@@ -3399,7 +3399,7 @@ test "layout: text yields one char box per grapheme" {
     try a.pushToken(.{ .tag = .char, .start = 2, .end = 3 });
     try a.pushToken(.{ .tag = .char, .start = 3, .end = 4 });
     try a.pushToken(.{ .tag = .r_group, .start = 4, .end = 5 });
-    const t = try a.createLeaf(.text, 0, 5, @intFromEnum(atom.CharStyle.roman));
+    const t = try a.createLeaf(.text, 0, 5, @backingInt(atom.CharStyle.roman));
     const b = try layout(&list, &a, t, &fm_default, .text, 10, .italic);
     const tb = list.get(b);
     try testing.expectEqual(.hbox, tb.kind);
@@ -3418,7 +3418,7 @@ test "layout: text with a CJK char uses the DisplayWidth fallback" {
     try a.pushToken(.{ .tag = .l_group, .start = 0, .end = 1 });
     try a.pushToken(.{ .tag = .char, .start = 1, .end = 4 });
     try a.pushToken(.{ .tag = .r_group, .start = 4, .end = 5 });
-    const t = try a.createLeaf(.text, 0, 3, @intFromEnum(atom.CharStyle.roman));
+    const t = try a.createLeaf(.text, 0, 3, @backingInt(atom.CharStyle.roman));
     const b = try layout(&list, &a, t, &fm_default, .text, 10, .italic);
     const tb = list.get(b);
     try testing.expectEqual(.hbox, tb.kind);
@@ -3441,7 +3441,7 @@ test "layout: styled wraps a char with the declared style" {
     defer a.deinit();
     try a.pushToken(.{ .tag = .char, .start = 0, .end = 1 });
     const c = try a.createLeaf(.char, 0, 1, 0);
-    const st = try a.createNode(.styled, 0, 1, &.{a.node(c)}, @intFromEnum(atom.CharStyle.roman));
+    const st = try a.createNode(.styled, 0, 1, &.{a.node(c)}, @backingInt(atom.CharStyle.roman));
     const b = try layout(&list, &a, st, &fm_default, .text, 10, .italic);
     const cb = list.get(b);
     try testing.expectEqual(.char, cb.kind);
@@ -3552,11 +3552,11 @@ test "layout: mathstyle wrapper forces style and rescales size" {
     try a.pushToken(.{ .tag = .char, .start = 0, .end = 1 });
     const c = try a.createLeaf(.char, 0, 1, 0);
     // \scriptstyle in display context: content shrinks to script size (7pt)
-    const ms1 = try a.createNode(.mathstyle, 0, 1, &.{a.node(c)}, @intFromEnum(atom.MathStyle.script));
+    const ms1 = try a.createNode(.mathstyle, 0, 1, &.{a.node(c)}, @backingInt(atom.MathStyle.script));
     const b1 = try layout(&list, &a, ms1, &fm_default, .display, 10, .italic);
     try testing.expectApproxEqAbs(@as(f32, 7.0), list.get(b1).size, 0.01);
     // \displaystyle in a script context: content grows back to text size (10pt)
-    const ms2 = try a.createNode(.mathstyle, 0, 1, &.{a.node(c)}, @intFromEnum(atom.MathStyle.display));
+    const ms2 = try a.createNode(.mathstyle, 0, 1, &.{a.node(c)}, @backingInt(atom.MathStyle.display));
     const b2 = try layout(&list, &a, ms2, &fm_default, .script, 7, .italic);
     try testing.expectApproxEqAbs(@as(f32, 10.0), list.get(b2).size, 0.01);
 }

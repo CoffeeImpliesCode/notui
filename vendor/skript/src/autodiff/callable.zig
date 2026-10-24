@@ -176,7 +176,7 @@ pub fn bind(ctx: *EvalContext, source: Value, primals: []const Value) Error!Valu
         try ctx.chargeWork(1, 1, .transform);
         const binding = switch (node.operation) {
             .local_read => |value| value,
-            .global_read => |cell| code.globals[@intFromEnum(cell)].binding,
+            .global_read => |cell| code.globals[@backingInt(cell)].binding,
             else => continue,
         };
         for (parameters, primals) |parameter, primal| {
@@ -229,7 +229,7 @@ fn materialize(
         .release = &release,
     };
     const lowered = try ctx.runtime.lowerCode(ctx.scratch, code);
-    const function = lowered.fns[@intFromEnum(original.function_id)];
+    const function = lowered.fns[@backingInt(original.function_id)];
     var closure = original.*;
     closure.code = code;
     closure.ir = function.ir;
@@ -365,21 +365,21 @@ pub fn incoming(
     code: *const Code.Code,
     value: Code.ValueId,
 ) Error!?[]Code.ValueId {
-    if (value == .invalid or @intFromEnum(value) >= code.values.len) return null;
+    if (value == .invalid or @backingInt(value) >= code.values.len) return null;
     for (code.nodes) |node| {
         try ctx.chargeWork(1, 1, .transform);
         if (node.result != value) continue;
         const binding = switch (node.operation) {
             .local_read => |id| id,
             .global_read => |id| blk: {
-                const cell = code.globals[@intFromEnum(id)];
+                const cell = code.globals[@backingInt(id)];
                 if (cell.binding == .invalid) return null;
                 var writes: usize = 0;
                 for (code.nodes) |write| {
                     try ctx.chargeWork(1, 1, .transform);
                     if (write.operation != .global_write or
                         write.operation.global_write.cell != id) continue;
-                    const bound_value = code.bindings[@intFromEnum(cell.binding)].value;
+                    const bound_value = code.bindings[@backingInt(cell.binding)].value;
                     if (write.operation.global_write.value != bound_value) return null;
                     writes += 1;
                 }
@@ -388,13 +388,13 @@ pub fn incoming(
             },
             else => return null,
         };
-        const local = code.bindings[@intFromEnum(binding)];
+        const local = code.bindings[@backingInt(binding)];
         const sources = try ctx.scratch.dupe(Code.ValueId, &.{local.value});
         return sources;
     }
     for (code.blocks) |block| {
         try ctx.chargeWork(@as(usize, block.param_count) + 1, 1, .transform);
-        if (block.function != code.values[@intFromEnum(value)]) continue;
+        if (block.function != code.values[@backingInt(value)]) continue;
         const parameters = code.block_parameters[block.param_start..][0..block.param_count];
         const index = std.mem.indexOfScalar(Code.ValueId, parameters, value) orelse continue;
         const sources = try incomingEdges(ctx, code, block.id, index);
@@ -454,7 +454,7 @@ pub fn joinAncestors(
 }
 
 fn enqueue(marked: []bool, queue: []Code.ValueId, length: *usize, value: Code.ValueId) Error!void {
-    const index = @intFromEnum(value);
+    const index = @backingInt(value);
     if (index >= marked.len) return error.InvalidCode;
     if (marked[index]) return;
     std.debug.assert(length.* < queue.len);

@@ -355,7 +355,7 @@ fn primitiveCallWithSnapshot(
                 const tag = try internScalar(
                     ctx,
                     region,
-                    .{ .signed = @intFromEnum(operation) },
+                    .{ .signed = @backingInt(operation) },
                     .signed_integer,
                 );
                 const operands = try ctx.scratch.alloc(Expr.NodeId, arguments.len + 1);
@@ -390,7 +390,7 @@ fn primitiveCall(
 
 fn opaqueIdentity(primitive: Primitive.PrimitiveId, revision: u64) Expr.OpaqueIdentity {
     var hasher = std.hash.Fnv1a_64.init();
-    var values = [_]u64{ @intFromEnum(primitive), revision };
+    var values = [_]u64{ @backingInt(primitive), revision };
     hasher.update(std.mem.sliceAsBytes(values[0..]));
     return .{ .id = hasher.final() | 1, .revision = revision | 1 };
 }
@@ -806,7 +806,7 @@ fn nodeView(ctx: *EvalContext, snapshot: *const Expr.Snapshot, node: Expr.Node) 
     defer pairs.deinit(ctx.scratch);
     try pairs.appendSlice(ctx.scratch, &.{
         try keyword(ctx, "id"),
-        Value.u64(@intFromEnum(node.id)),
+        Value.u64(@backingInt(node.id)),
         try keyword(ctx, "kind"),
         try symbol(ctx, @tagName(std.meta.activeTag(node.kind))),
         try keyword(ctx, "domain"),
@@ -815,7 +815,7 @@ fn nodeView(ctx: *EvalContext, snapshot: *const Expr.Snapshot, node: Expr.Node) 
     const operands = try snapshot.operands(node);
     const operand_values = try ctx.scratch.alloc(Value, operands.len);
     defer ctx.scratch.free(operand_values);
-    for (operands, 0..) |operand, index| operand_values[index] = Value.u64(@intFromEnum(operand));
+    for (operands, 0..) |operand, index| operand_values[index] = Value.u64(@backingInt(operand));
     try pairs.appendSlice(ctx.scratch, &.{ try keyword(ctx, "operands"), try listValue(ctx, operand_values) });
     switch (node.kind) {
         .scalar => |value| try pairs.appendSlice(ctx.scratch, &.{ try keyword(ctx, "scalar"), switch (value.value) {
@@ -831,7 +831,7 @@ fn nodeView(ctx: *EvalContext, snapshot: *const Expr.Snapshot, node: Expr.Node) 
         }),
         .free_variable => |value| try pairs.appendSlice(ctx.scratch, &.{
             try keyword(ctx, "region"),
-            Value.u64(@intFromEnum(value.identity.region)),
+            Value.u64(@backingInt(value.identity.region)),
             try keyword(ctx, "local"),
             Value.u64(value.identity.local),
             try keyword(ctx, "name"),
@@ -839,7 +839,7 @@ fn nodeView(ctx: *EvalContext, snapshot: *const Expr.Snapshot, node: Expr.Node) 
         }),
         .primitive_call => |value| try pairs.appendSlice(ctx.scratch, &.{
             try keyword(ctx, "primitive"),
-            Value.u64(@intFromEnum(value.identity.primitive)),
+            Value.u64(@backingInt(value.identity.primitive)),
             try keyword(ctx, "registry-revision"),
             Value.u64(value.identity.registry_revision),
             try keyword(ctx, "rule-revision"),
@@ -847,11 +847,11 @@ fn nodeView(ctx: *EvalContext, snapshot: *const Expr.Snapshot, node: Expr.Node) 
         }),
         .conditional => |value| try pairs.appendSlice(ctx.scratch, &.{
             try keyword(ctx, "predicate"),
-            Value.u64(@intFromEnum(value.predicate)),
+            Value.u64(@backingInt(value.predicate)),
             try keyword(ctx, "then"),
-            Value.u64(@intFromEnum(value.then_branch)),
+            Value.u64(@backingInt(value.then_branch)),
             try keyword(ctx, "else"),
-            Value.u64(@intFromEnum(value.else_branch)),
+            Value.u64(@backingInt(value.else_branch)),
         }),
         .opaque_call => |value| try pairs.appendSlice(ctx.scratch, &.{
             try keyword(ctx, "opaque-id"),
@@ -915,7 +915,7 @@ pub fn exprView(ctx: *EvalContext, ns: Value, object: Value, args: []const Value
         try keyword(ctx, "handle"),
         Value.u64(id.local()),
         try keyword(ctx, "root"),
-        Value.u64(@intFromEnum(snapshot.root())),
+        Value.u64(@backingInt(snapshot.root())),
         try keyword(ctx, "nodes"),
         try listValue(ctx, nodes),
     });
@@ -1005,13 +1005,13 @@ pub fn simplifyExpr(ctx: *EvalContext, ns: Value, object: Value, args: []const V
     const scalar = try scalarIdentity(ctx, snapshot);
     const dispatch: Expr.DispatchRewriteOperators = .{
         .primitive = scalar,
-        .add = @intCast(@intFromEnum(rules.ScalarOp.add)),
-        .multiply = @intCast(@intFromEnum(rules.ScalarOp.mul)),
-        .divide = @intCast(@intFromEnum(rules.ScalarOp.div)),
-        .zero_like = @intCast(@intFromEnum(rules.ScalarOp.zero_like)),
-        .one_like = @intCast(@intFromEnum(rules.ScalarOp.one_like)),
-        .coerce_tangent = @intCast(@intFromEnum(rules.ScalarOp.coerce_tangent)),
-        .realize_tangent = @intCast(@intFromEnum(rules.ScalarOp.realize_tangent)),
+        .add = @intCast(@backingInt(rules.ScalarOp.add)),
+        .multiply = @intCast(@backingInt(rules.ScalarOp.mul)),
+        .divide = @intCast(@backingInt(rules.ScalarOp.div)),
+        .zero_like = @intCast(@backingInt(rules.ScalarOp.zero_like)),
+        .one_like = @intCast(@backingInt(rules.ScalarOp.one_like)),
+        .coerce_tangent = @intCast(@backingInt(rules.ScalarOp.coerce_tangent)),
+        .realize_tangent = @intCast(@backingInt(rules.ScalarOp.realize_tangent)),
     };
     var result = try region.rewrite(ctx, &copied, .{
         .policy = .formal_real,
@@ -1418,12 +1418,12 @@ test "direct symbolic host entries charge the supplied allocation lineage" {
     var region = try Expr.Region.init(
         std.testing.allocator,
         context,
-        .{ .identity = @enumFromInt(7_302) },
+        .{ .identity = @fromBackingInt(@intCast(7_302)) },
     );
     defer region.deinit();
     const scalar = try internScalar(context, &region, .{ .signed = 1 }, .signed_integer);
     const element_count = 256;
-    const elements = [_]Expr.NodeId{scalar} ** element_count;
+    const elements: [element_count]Expr.NodeId = @splat(scalar);
     const root = try region.intern(context, .{ .list = .{ .elements = &elements } });
     var handle = try region.handle(context, root);
     defer handle.deinit();

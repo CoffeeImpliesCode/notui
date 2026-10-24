@@ -14,7 +14,6 @@ const std = @import("std");
 const zg = @import("zg");
 const DisplayWidth = @import("DisplayWidth");
 const Graphemes = @import("Graphemes");
-const builtin = @import("builtin");
 
 /// Terminal cell segmentation and width policy.
 pub const Mode = enum {
@@ -328,8 +327,7 @@ pub fn printableAsciiPrefix(str: []const u8) usize {
         const ok = (v -% @as(V, @splat(0x20))) < @as(V, @splat(0x5f));
         const bad: u32 = ~@as(u32, @bitCast(ok));
         if (bad != 0) {
-            // Lane 0 becomes the high mask bit on big-endian targets.
-            const at = if (builtin.target.cpu.arch.endian() == .big) @clz(bad) else @ctz(bad);
+            const at = @ctz(bad);
             return i + at;
         }
     }

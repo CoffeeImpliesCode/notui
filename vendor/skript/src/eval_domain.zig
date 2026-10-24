@@ -170,7 +170,7 @@ pub fn primitive(
     const intrinsics = &ctx.runtime.intrinsics;
     for (rules) |rule| {
         if (spec.id != intrinsics.primitiveId(rule.builtin)) continue;
-        if (spec.invoke.native != intrinsics.funcs[@intFromEnum(rule.builtin)]) return null;
+        if (spec.invoke.native != intrinsics.funcs[@backingInt(rule.builtin)]) return null;
         for (arguments) |argument| {
             const typ = switch (argument) {
                 .known => |value| value.typ,
@@ -1214,7 +1214,7 @@ test "tensor join keeps only common copied shape facts" {
         else => return error.TestUnexpectedResult,
     }
 
-    const mutable_alias = skript.Value.init(b.type_map, @enumFromInt(1));
+    const mutable_alias = skript.Value.init(b.type_map, @fromBackingInt(@intCast(1)));
     const alias_join = try join(arena.allocator(), ctx, .{
         .known = mutable_alias,
     }, .{

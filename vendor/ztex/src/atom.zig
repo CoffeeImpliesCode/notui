@@ -163,7 +163,7 @@ pub const EnvBits = struct {
 /// and so does every node `ztex.parse` builds. A `data` whose low nibble is
 /// 9-15 names no environment and traps in a checked build mode.
 pub inline fn envKind(data: u32) EnvKind {
-    return @enumFromInt(data & EnvBits.kind_mask);
+    return @fromBackingInt(@intCast(data & EnvBits.kind_mask));
 }
 
 /// Number of array colspec nibbles `data` claims, 0-15 from bits 4-7.
@@ -192,7 +192,7 @@ pub inline fn envColSpec(data: u32, i: usize) ?u32 {
 /// the truncated length — so a longer spec decodes as "no spec" past column
 /// 5, and `envColSpec` answers `null` there.
 pub inline fn envData(kind: EnvKind, colspec: []const u8) u32 {
-    var data: u32 = @intFromEnum(kind);
+    var data: u32 = @backingInt(kind);
     const n = @min(colspec.len, EnvBits.max_spec_cols);
     data |= @as(u32, @intCast(n)) << EnvBits.count_shift;
     for (colspec[0..n], 0..) |b, i| {
@@ -247,7 +247,7 @@ pub const FractionBits = struct {
 /// (\dfrac → .display, \tfrac → .text), and \cfrac's parts-at-display flag.
 /// The thickness bits are left at 0; `fracThicknessBits` ORs them in.
 pub inline fn fracData(line: bool, forced: ?MathStyle, parts_display: bool) u32 {
-    const code: u32 = if (forced) |f| @as(u32, @intFromEnum(f)) + 1 else 0;
+    const code: u32 = if (forced) |f| @as(u32, @backingInt(f)) + 1 else 0;
     return @intFromBool(line) |
         (code << FractionBits.forced_shift) |
         (@as(u32, @intFromBool(parts_display)) << 5);
@@ -264,8 +264,8 @@ pub inline fn fracLine(data: u32) bool {
 pub inline fn fracForcedStyle(data: u32) ?MathStyle {
     const code = (data >> FractionBits.forced_shift) & FractionBits.forced_mask;
     if (code == 0) return null;
-    if (code > @typeInfo(MathStyle).@"enum".fields.len) return null;
-    return @enumFromInt(code - 1);
+    if (code > @typeInfo(MathStyle).@"enum".field_names.len) return null;
+    return @fromBackingInt(@intCast(code - 1));
 }
 
 /// \cfrac flag: lay out BOTH parts in display style (amsmath's continued
@@ -695,7 +695,7 @@ test "atom: genfrac thickness saturates instead of overflowing the cast" {
 test "atom: packed decoders answer null past their field" {
     // A hand-built `data` claiming 15 packed colspec columns: only six
     // nibbles exist, so column 6 and beyond name nothing.
-    const data = (@as(u32, 15) << EnvBits.count_shift) | @intFromEnum(EnvKind.array);
+    const data = (@as(u32, 15) << EnvBits.count_shift) | @backingInt(EnvKind.array);
     try testing.expectEqual(@as(usize, 15), envSpecCount(data));
     try testing.expectEqual(@as(?u32, EnvBits.col_l), envColSpec(data, 0));
     try testing.expectEqual(@as(?u32, null), envColSpec(data, EnvBits.max_spec_cols));

@@ -1354,10 +1354,10 @@ test "coverageRowFast == coverageRow on the lambda glyph" {
         const here = @typeInfo(QuadCurve).@"struct";
         std.debug.assert(declared.layout == .@"extern" and here.layout == .@"extern");
         std.debug.assert(@sizeOf(fixture.QuadCurve) == @sizeOf(QuadCurve));
-        std.debug.assert(declared.fields.len == here.fields.len);
-        for (declared.fields, here.fields) |d, h| {
-            std.debug.assert(std.mem.eql(u8, d.name, h.name));
-            std.debug.assert(d.type == h.type);
+        std.debug.assert(declared.field_names.len == here.field_names.len);
+        for (declared.field_names, here.field_names, declared.field_types, here.field_types) |dn, hn, dt, ht| {
+            std.debug.assert(std.mem.eql(u8, dn, hn));
+            std.debug.assert(dt == ht);
         }
     }
     const src: []const QuadCurve = std.mem.bytesAsSlice(

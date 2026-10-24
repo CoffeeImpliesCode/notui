@@ -389,8 +389,8 @@ pub const Tty = struct {
         raw.lflag.ISIG = false;
 
         // Control characters: read with 0.1s timeout
-        raw.cc[@intFromEnum(posix.V.MIN)] = 0;
-        raw.cc[@intFromEnum(posix.V.TIME)] = 1;
+        raw.cc[@backingInt(posix.V.MIN)] = 0;
+        raw.cc[@backingInt(posix.V.TIME)] = 1;
 
         return raw;
     }
@@ -407,7 +407,7 @@ pub const Tty = struct {
     /// async-signal-safe-ish paths, and failure still exits.
     fn handleTermSignal(sig: posix.SIG) callconv(.c) void {
         restoreTerminal();
-        std.process.exit(@intCast(128 + @intFromEnum(sig)));
+        std.process.exit(@intCast(128 + @backingInt(sig)));
     }
 
     /// Reset the signal handlers to their defaults (libvaxis
@@ -548,8 +548,8 @@ test "tty: rawTermios clears input processing, sets MIN/TIME" {
     orig.lflag.IEXTEN = true;
     orig.lflag.ISIG = true;
     orig.lflag.NOFLSH = true; // must survive — rawTermios copies, not zeroes
-    orig.cc[@intFromEnum(posix.V.MIN)] = 17;
-    orig.cc[@intFromEnum(posix.V.TIME)] = 0;
+    orig.cc[@backingInt(posix.V.MIN)] = 17;
+    orig.cc[@backingInt(posix.V.TIME)] = 0;
 
     const raw = Tty.rawTermios(orig);
 
@@ -571,8 +571,8 @@ test "tty: rawTermios clears input processing, sets MIN/TIME" {
     // untouched fields preserved
     try std.testing.expect(raw.lflag.NOFLSH);
     // MIN=0/TIME=1
-    try std.testing.expectEqual(@as(u8, 0), raw.cc[@intFromEnum(posix.V.MIN)]);
-    try std.testing.expectEqual(@as(u8, 1), raw.cc[@intFromEnum(posix.V.TIME)]);
+    try std.testing.expectEqual(@as(u8, 0), raw.cc[@backingInt(posix.V.MIN)]);
+    try std.testing.expectEqual(@as(u8, 1), raw.cc[@backingInt(posix.V.TIME)]);
 }
 
 test "tty: isTty is false for a regular file" {
@@ -623,8 +623,8 @@ test "tty: makeRaw/restore round-trip on a real PTY pair" {
     try std.testing.expect(!during.lflag.ISIG);
     try std.testing.expect(!during.lflag.IEXTEN);
     try std.testing.expect(!during.iflag.IXON);
-    try std.testing.expectEqual(@as(u8, 0), during.cc[@intFromEnum(posix.V.MIN)]);
-    try std.testing.expectEqual(@as(u8, 1), during.cc[@intFromEnum(posix.V.TIME)]);
+    try std.testing.expectEqual(@as(u8, 0), during.cc[@backingInt(posix.V.MIN)]);
+    try std.testing.expectEqual(@as(u8, 1), during.cc[@backingInt(posix.V.TIME)]);
 
     tty.restore();
     const after = posix.tcgetattr(pty.slave.handle) catch return;
@@ -678,10 +678,10 @@ test "tty: a full pipe transport reports would-block instead of blocking" {
 
     // Nobody drains the read end, so the kernel buffer fills. A
     // blocking descriptor would have parked the loop right here.
-    try std.testing.expect(try fillUntilBlocked(&tty, "x" ** 4096));
+    try std.testing.expect(try fillUntilBlocked(&tty, &@as([4096]u8, @splat('x'))));
     // The refusal is repeatable and consumes nothing: the frame is
     // still the caller's to retry.
-    try std.testing.expectEqual(@as(usize, 0), try tty.tryWrite("x" ** 4096));
+    try std.testing.expectEqual(@as(usize, 0), try tty.tryWrite(&@as([4096]u8, @splat('x'))));
     try std.testing.expectEqual(@as(usize, 0), try tty.tryWrite("x"));
 }
 
@@ -698,8 +698,8 @@ test "tty: a full terminal transport reports would-block instead of blocking" {
 
     // The master end is open but unread, so the tty's output buffer
     // fills and the descriptor reports EAGAIN.
-    try std.testing.expect(try fillUntilBlocked(&tty, "x" ** 4096));
-    try std.testing.expectEqual(@as(usize, 0), try tty.tryWrite("x" ** 4096));
+    try std.testing.expect(try fillUntilBlocked(&tty, &@as([4096]u8, @splat('x'))));
+    try std.testing.expectEqual(@as(usize, 0), try tty.tryWrite(&@as([4096]u8, @splat('x'))));
 }
 
 test "tty: a short transport write keeps the frame's bytes in order" {
@@ -711,7 +711,7 @@ test "tty: a short transport write keeps the frame's bytes in order" {
 
     // 256 KiB: several times a default 64 KiB pipe, so the transport
     // is guaranteed to run dry mid-frame and defer the remainder.
-    const frame = "0123456789abcdef" ** 16384;
+    const frame = &@as([262144]u8, @bitCast(@as([16384][16]u8, @splat("0123456789abcdef".*))));
     var q = try output.OutputQueue.init(std.testing.allocator, .{
         .capacity = frame.len,
         .watermark = 1024,

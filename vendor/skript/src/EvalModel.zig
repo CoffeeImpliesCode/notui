@@ -28,18 +28,18 @@ pub fn validate(self: Model, context: *const Context) skript.Error!void {
         if (code.owner != @as(?*const anyopaque, context.runtime)) return error.Denied;
         if (closure.arglist.len != arity) return error.ArityMismatch;
     }
-    inline for (std.meta.fields(Context.EffectDecisionTable)) |field| {
-        if (@field(context.effects, field.name) == .model) {
-            if (!@field(context.effects, field.name).model.eql(self.version)) return error.Denied;
+    inline for (@typeInfo(Context.EffectDecisionTable).@"struct".field_names) |name| {
+        if (@field(context.effects, name) == .model) {
+            if (!@field(context.effects, name).model.eql(self.version)) return error.Denied;
         }
     }
 }
 
 pub fn authorizes(self: Model, context: *const Context, effects: skript.Primitive.EffectSet) bool {
     if (effects._reserved != 0) return false;
-    inline for (std.meta.fields(Context.EffectDecisionTable)) |field| {
-        if (@field(effects, field.name)) {
-            switch (@field(context.effects, field.name)) {
+    inline for (@typeInfo(Context.EffectDecisionTable).@"struct".field_names) |name| {
+        if (@field(effects, name)) {
+            switch (@field(context.effects, name)) {
                 .model => |version| if (!version.eql(self.version)) return false,
                 .allow => {},
                 .deny => return false,

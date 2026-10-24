@@ -101,10 +101,10 @@ const ComparedPairs = struct {
         }
 
         const pair: GraphPair = .{
-            .a_type = @intFromEnum(a.typ),
-            .b_type = @intFromEnum(b.typ),
-            .a = @intFromEnum(a.obj),
-            .b = @intFromEnum(b.obj),
+            .a_type = @backingInt(a.typ),
+            .b_type = @backingInt(b.typ),
+            .a = @backingInt(a.obj),
+            .b = @backingInt(b.obj),
         };
         var index = graphPairHash(pair) & (self.slots.len - 1);
         var probes: usize = 0;

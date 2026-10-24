@@ -208,13 +208,13 @@ pub const AnsiColor = enum(u8) {
 
     /// SGR foreground code (30-37, 90-97).
     pub fn fgCode(self: AnsiColor) u8 {
-        const base: u8 = @intFromEnum(self);
+        const base: u8 = @backingInt(self);
         return if (base < 8) 30 + base else 90 + base - 8;
     }
 
     /// SGR background code (40-47, 100-107).
     pub fn bgCode(self: AnsiColor) u8 {
-        const base: u8 = @intFromEnum(self);
+        const base: u8 = @backingInt(self);
         return if (base < 8) 40 + base else 100 + base - 8;
     }
 
@@ -248,7 +248,7 @@ pub const AnsiColor = enum(u8) {
 pub fn ansi256ToRgb(n: u8) Color.Rgb {
     if (n < 16) {
         // Standard colors
-        return @as(AnsiColor, @enumFromInt(n)).toRgb();
+        return @as(AnsiColor, @fromBackingInt(@intCast(n))).toRgb();
     } else if (n < 232) {
         // 6x6x6 color cube
         const idx = n - 16;
@@ -298,7 +298,7 @@ pub fn rgbToAnsi(r: u8, g: u8, b: u8) AnsiColor {
     var best_dist: u32 = std.math.maxInt(u32);
     var i: u8 = 0;
     while (i < 16) : (i += 1) {
-        const c: AnsiColor = @enumFromInt(i);
+        const c: AnsiColor = @fromBackingInt(@intCast(i));
         const rgb = c.toRgb();
         const d = sqDist(r, g, b, rgb.r, rgb.g, rgb.b);
         if (d < best_dist) {

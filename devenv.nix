@@ -5,7 +5,7 @@ let
   # fresh clone on another host evaluates without local paths baked in.
   # NOTUI_SCRATCH_ROOT names a private root on a physical disk. A host setup
   # that exports HOST_SCRATCH_ROOT supplies the fallback. Never use NFS: Zig
-  # 0.16 needs renameat2(RENAME_NOREPLACE) for its caches and d_type from
+  # 0.17 needs renameat2(RENAME_NOREPLACE) for its caches and d_type from
   # readdir for package unpacking, and NFS provides neither.
   scratchRoot =
     let
@@ -19,17 +19,14 @@ let
   # shared root can hold a dangling or foreign `p/`.
   zigGlobalCache = "${scratchRoot}/zig-global";
   zigLocalCache = "${scratchRoot}/zig-local";
-  # Zig 0.16 always unpacks fetched packages into project-local zig-pkg/ and
-  # has no setting to move it. On NFS, readdir returns DT_UNKNOWN and the
-  # fetch fails with "illegal file type 'unknown'", so zig-pkg is a symlink
-  # to this directory.
+  # Keep the project package directory on local storage as well.
   zigPkg = "${scratchRoot}/zig-pkg";
 in
 rec {
-  # zig 0.16 dev environment.
+  # Zig 0.17 development environment.
   # https://devenv.sh/basics/
   packages = with pkgs; [
-    zig
+    # Keep the manifest-selected Zig shim on PATH.
     inetutils # hostname is required by zig-gate.
     util-linux # mountpoint is required by zig-gate.
     bash
@@ -72,6 +69,10 @@ rec {
   };
 
   enterShell = ''
+    if [ "$(zig version)" != "0.17.0" ]; then
+      echo "notui requires Zig 0.17.0 on PATH" >&2
+      return 1
+    fi
     for d in "$ZIG_GLOBAL_CACHE_DIR" "$ZIG_LOCAL_CACHE_DIR" "${zigPkg}"; do
       [ -d "$d" ] || (umask 077 && mkdir -p -- "$d")
     done
@@ -94,6 +95,6 @@ rec {
     # container wrappers rebuild PATH and drop the user bin directory.
     # Appended, so the nix tools from `packages` stay in front.
     export PATH="$PATH:$HOME/.local/bin"
-    zig-gate "$@" && zig build bench -Doptimize=ReleaseFast
+    zig-gate "$@" && zig build bench -Doptimize=fast
   '';
 }

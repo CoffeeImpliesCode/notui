@@ -59,8 +59,8 @@ first_report: Report,
 
 pub fn init(io: std.Io, lineage_id: u64, limits: Limits) Budget {
     var available: Charge = .{};
-    inline for (@typeInfo(Charge).@"struct".fields) |field| {
-        @field(available, field.name) = @field(limits, field.name);
+    inline for (@typeInfo(Charge).@"struct".field_names) |name| {
+        @field(available, name) = @field(limits, name);
     }
     return .{
         .io = io,
@@ -233,14 +233,14 @@ fn chargeWithLease(self: *Budget, lease: ?*Lease, amount: Charge, backend: Backe
     self.mutex.lockUncancelable(self.io);
     defer self.mutex.unlock(self.io);
     if (self.isExhausted()) return error.Exhausted;
-    inline for (@typeInfo(Charge).@"struct".fields) |field| {
-        const wanted = @field(amount, field.name);
-        const available = @field(self.remaining, field.name);
+    inline for (@typeInfo(Charge).@"struct".field_names) |name| {
+        const wanted = @field(amount, name);
+        const available = @field(self.remaining, name);
         if (wanted > available) {
             return self.failLocked(
-                @field(Resource, field.name),
+                @field(Resource, name),
                 .quota,
-                @field(self.limits, field.name),
+                @field(self.limits, name),
                 available,
                 wanted,
                 backend,
@@ -248,8 +248,8 @@ fn chargeWithLease(self: *Budget, lease: ?*Lease, amount: Charge, backend: Backe
         }
     }
     if (lease) |leaf| try self.checkLeaseLocked(leaf, amount.work, backend);
-    inline for (@typeInfo(Charge).@"struct".fields) |field| {
-        @field(self.remaining, field.name) -= @field(amount, field.name);
+    inline for (@typeInfo(Charge).@"struct".field_names) |name| {
+        @field(self.remaining, name) -= @field(amount, name);
     }
     if (lease) |leaf| {
         var cursor: ?*Lease = leaf;
@@ -279,8 +279,8 @@ fn checkLeaseLocked(self: *Budget, leaf: *Lease, work: u64, backend: Backend) Er
 
 fn consumedLocked(self: *const Budget) Charge {
     var used: Charge = .{};
-    inline for (@typeInfo(Charge).@"struct".fields) |field| {
-        @field(used, field.name) = @field(self.limits, field.name) - @field(self.remaining, field.name);
+    inline for (@typeInfo(Charge).@"struct".field_names) |name| {
+        @field(used, name) = @field(self.limits, name) - @field(self.remaining, name);
     }
     return used;
 }

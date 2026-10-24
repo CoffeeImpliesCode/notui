@@ -43,11 +43,11 @@ pub const NodeId = enum(u32) {
 
     pub fn fromIndex(offset: usize) Error!NodeId {
         if (offset >= std.math.maxInt(u32)) return error.LimitExceeded;
-        return @enumFromInt(@as(u32, @intCast(offset)));
+        return @fromBackingInt(@intCast(@as(u32, @intCast(offset))));
     }
 
     pub fn index(self: NodeId) usize {
-        return @intCast(@intFromEnum(self));
+        return @intCast(@backingInt(self));
     }
 
     pub fn isValid(self: NodeId) bool {
@@ -62,11 +62,11 @@ pub const NameId = enum(u32) {
 
     pub fn fromIndex(offset: usize) Error!NameId {
         if (offset >= std.math.maxInt(u32)) return error.LimitExceeded;
-        return @enumFromInt(@as(u32, @intCast(offset)));
+        return @fromBackingInt(@intCast(@as(u32, @intCast(offset))));
     }
 
     pub fn index(self: NameId) usize {
-        return @intCast(@intFromEnum(self));
+        return @intCast(@backingInt(self));
     }
 
     pub fn isValid(self: NameId) bool {
@@ -105,7 +105,7 @@ pub const RegionId = enum(u64) {
 
     pub fn fromInt(value: u64) Error!RegionId {
         if (value == 0) return error.InvalidIdentity;
-        return @enumFromInt(value);
+        return @fromBackingInt(@intCast(value));
     }
 
     pub fn isValid(self: RegionId) bool {
@@ -1143,8 +1143,8 @@ pub const Region = struct {
                             options.limits,
                         );
                         if (replacement != source_id) {
-                            const replacement_result = memo.get(@intFromEnum(replacement)) orelse replacement;
-                            memo.putAssumeCapacity(@intFromEnum(source_id), replacement_result);
+                            const replacement_result = memo.get(@backingInt(replacement)) orelse replacement;
+                            memo.putAssumeCapacity(@backingInt(source_id), replacement_result);
                             continue;
                         }
                     }
@@ -1160,9 +1160,9 @@ pub const Region = struct {
                     &builder,
                     options,
                 );
-                memo.putAssumeCapacity(@intFromEnum(source_id), rewritten);
+                memo.putAssumeCapacity(@backingInt(source_id), rewritten);
             }
-            root_id = memo.get(@intFromEnum(root_id)) orelse return error.InvalidNode;
+            root_id = memo.get(@backingInt(root_id)) orelse return error.InvalidNode;
             if (root_id == previous_root) break;
         }
         return self.handle(active_context, root_id);
@@ -1704,7 +1704,7 @@ fn buildNodeKind(storage: *Storage, spec: NodeSpec) NodeKind {
 
 fn appendNameAssume(storage: *Storage, bytes: []const u8) NameId {
     const start = storage.names.items.len;
-    const id: NameId = @enumFromInt(storage.name_refs.items.len);
+    const id: NameId = @fromBackingInt(@intCast(storage.name_refs.items.len));
     storage.names.appendSliceAssumeCapacity(bytes);
     storage.name_refs.appendAssumeCapacity(.{
         .start = @intCast(start),
@@ -1860,59 +1860,59 @@ fn nameEqual(storage: *const Storage, id: NameId, value: []const u8) bool {
 
 fn hashNodeSpec(storage: *const Storage, spec: NodeSpec) u64 {
     var hasher = hasher_type.init();
-    hashU8(&hasher, @intFromEnum(std.meta.activeTag(spec)));
+    hashU8(&hasher, @backingInt(std.meta.activeTag(spec)));
     hashOrigin(&hasher, specOrigin(spec));
     switch (spec) {
         .scalar => |value| {
-            hashU8(&hasher, @intFromEnum(value.domain));
+            hashU8(&hasher, @backingInt(value.domain));
             hashScalar(&hasher, value.value);
         },
         .static_atom => |value| {
-            hashU8(&hasher, @intFromEnum(value.kind));
+            hashU8(&hasher, @backingInt(value.kind));
             hashBytes(&hasher, value.bytes);
         },
         .free_variable => |value| {
-            hashU64(&hasher, @intFromEnum(value.identity.region));
+            hashU64(&hasher, @backingInt(value.identity.region));
             hashU32(&hasher, value.identity.local);
-            hashU8(&hasher, @intFromEnum(value.domain));
-            hashU8(&hasher, @intFromEnum(value.assumptions));
+            hashU8(&hasher, @backingInt(value.domain));
+            hashU8(&hasher, @backingInt(value.assumptions));
         },
         .primitive_call => |value| {
             hashPrimitive(&hasher, value.identity);
-            hashU8(&hasher, @intFromEnum(value.domain));
+            hashU8(&hasher, @backingInt(value.domain));
             hashNodeIds(&hasher, value.arguments);
         },
         .conditional => |value| {
-            hashU8(&hasher, @intFromEnum(value.domain));
-            hashU32(&hasher, @intFromEnum(value.predicate));
-            hashU32(&hasher, @intFromEnum(value.then_branch));
-            hashU32(&hasher, @intFromEnum(value.else_branch));
+            hashU8(&hasher, @backingInt(value.domain));
+            hashU32(&hasher, @backingInt(value.predicate));
+            hashU32(&hasher, @backingInt(value.then_branch));
+            hashU32(&hasher, @backingInt(value.else_branch));
         },
         .opaque_call => |value| {
             hashU64(&hasher, value.identity.id);
             hashU64(&hasher, value.identity.revision);
-            hashU8(&hasher, @intFromEnum(value.domain));
-            hashU8(&hasher, @intFromEnum(value.effects));
-            hashU8(&hasher, @intFromEnum(value.linearity));
+            hashU8(&hasher, @backingInt(value.domain));
+            hashU8(&hasher, @backingInt(value.effects));
+            hashU8(&hasher, @backingInt(value.linearity));
             hashNodeIds(&hasher, value.arguments);
         },
         .list => |value| {
-            hashU8(&hasher, @intFromEnum(value.domain));
+            hashU8(&hasher, @backingInt(value.domain));
             hashNodeIds(&hasher, value.elements);
         },
         .map => |value| {
-            hashU8(&hasher, @intFromEnum(value.domain));
+            hashU8(&hasher, @backingInt(value.domain));
             hashLabels(&hasher, value.labels);
             hashNodeIds(&hasher, value.values);
         },
         .tensor => |value| {
-            hashU8(&hasher, @intFromEnum(value.dtype));
-            hashU8(&hasher, @intFromEnum(value.domain));
+            hashU8(&hasher, @backingInt(value.dtype));
+            hashU8(&hasher, @backingInt(value.domain));
             hashU32s(&hasher, value.shape);
             hashNodeIds(&hasher, value.elements);
         },
         .record => |value| {
-            hashU8(&hasher, @intFromEnum(value.domain));
+            hashU8(&hasher, @backingInt(value.domain));
             hashBytes(&hasher, value.type_label);
             hashLabels(&hasher, value.field_labels);
             hashNodeIds(&hasher, value.fields);
@@ -1930,7 +1930,7 @@ fn hashPrimitive(hasher: *hasher_type, identity: PrimitiveIdentity) void {
 }
 
 fn hashScalar(hasher: *hasher_type, value: Scalar) void {
-    hashU8(hasher, @intFromEnum(std.meta.activeTag(value)));
+    hashU8(hasher, @backingInt(std.meta.activeTag(value)));
     switch (value) {
         .f64_bits => |bits| hashU64(hasher, bits),
         .f32_bits => |bits| hashU32(hasher, bits),
@@ -1942,7 +1942,7 @@ fn hashScalar(hasher: *hasher_type, value: Scalar) void {
 
 fn hashNodeIds(hasher: *hasher_type, values: []const NodeId) void {
     hashU64(hasher, @intCast(values.len));
-    for (values) |value| hashU32(hasher, @intFromEnum(value));
+    for (values) |value| hashU32(hasher, @backingInt(value));
 }
 
 fn hashU32s(hasher: *hasher_type, values: []const u32) void {
@@ -1959,7 +1959,7 @@ fn hashLabels(hasher: *hasher_type, values: []const []const u8) void {
 }
 
 fn hashOrigin(hasher: *hasher_type, origin: Origin) void {
-    hashU8(hasher, @intFromEnum(std.meta.activeTag(origin)));
+    hashU8(hasher, @backingInt(std.meta.activeTag(origin)));
     switch (origin) {
         .none => {},
         .source => |source| {
@@ -2133,7 +2133,7 @@ fn collectPostorder(
     var seen: std.AutoHashMapUnmanaged(u32, void) = .empty;
     defer seen.deinit(allocator);
 
-    try seen.put(allocator, @intFromEnum(root), {});
+    try seen.put(allocator, @backingInt(root), {});
     try frames.append(allocator, .{ .id = root, .next_child = 0 });
     var edge_count: usize = 0;
 
@@ -2152,9 +2152,9 @@ fn collectPostorder(
             edge_count += 1;
             const child = storage.edges.items[child_position];
             frame.next_child += 1;
-            if (seen.contains(@intFromEnum(child))) continue;
+            if (seen.contains(@backingInt(child))) continue;
             if (seen.count() >= limits.max_nodes) return error.LimitExceeded;
-            try seen.put(allocator, @intFromEnum(child), {});
+            try seen.put(allocator, @backingInt(child), {});
             try frames.append(allocator, .{ .id = child, .next_child = 0 });
         } else {
             const completed_id = frame.id;
@@ -2202,13 +2202,13 @@ fn snapshotFromStorage(
 
     for (order.items, 0..) |source_id, index| {
         const local_id = try NodeId.fromIndex(index);
-        mapping.putAssumeCapacity(@intFromEnum(source_id), local_id);
+        mapping.putAssumeCapacity(@backingInt(source_id), local_id);
     }
 
     for (order.items, 0..) |source_id, index| {
         try charge(context, 1, 1);
         const source_node = try checkedNodeInStorage(source, source_id);
-        const local_id: NodeId = @enumFromInt(@as(u32, @intCast(index)));
+        const local_id: NodeId = @fromBackingInt(@intCast(@as(u32, @intCast(index))));
         const copied = try cloneNodeToStorage(
             source,
             source_node,
@@ -2219,7 +2219,7 @@ fn snapshotFromStorage(
         );
         result.storage.nodes.appendAssumeCapacity(copied);
     }
-    result.root_id = mapping.get(@intFromEnum(root)) orelse return error.InvalidNode;
+    result.root_id = mapping.get(@backingInt(root)) orelse return error.InvalidNode;
     return result;
 }
 fn cloneNodeToStorage(
@@ -2248,9 +2248,9 @@ fn cloneNodeToStorage(
             .domain = value.domain,
         } },
         .conditional => |value| .{ .conditional = .{
-            .predicate = mapping.get(@intFromEnum(value.predicate)) orelse return error.InvalidNode,
-            .then_branch = mapping.get(@intFromEnum(value.then_branch)) orelse return error.InvalidNode,
-            .else_branch = mapping.get(@intFromEnum(value.else_branch)) orelse return error.InvalidNode,
+            .predicate = mapping.get(@backingInt(value.predicate)) orelse return error.InvalidNode,
+            .then_branch = mapping.get(@backingInt(value.then_branch)) orelse return error.InvalidNode,
+            .else_branch = mapping.get(@backingInt(value.else_branch)) orelse return error.InvalidNode,
             .arguments = try cloneEdges(source, value.arguments, mapping, destination, accounting),
             .domain = value.domain,
         } },
@@ -2321,7 +2321,7 @@ fn cloneEdges(
     const result: Range = .{ .start = @intCast(destination.edges.items.len), .len = @intCast(values.len) };
     for (values) |value| {
         destination.edges.appendAssumeCapacity(
-            mapping.get(@intFromEnum(value)) orelse return error.InvalidNode,
+            mapping.get(@backingInt(value)) orelse return error.InvalidNode,
         );
     }
     return result;
@@ -2379,8 +2379,8 @@ fn resolveCustomChain(
         if (steps >= limits.max_rule_steps) return error.RewriteLimit;
         steps += 1;
         try charge(context, 1, 0);
-        if (seen.contains(@intFromEnum(current))) return error.RewriteCycle;
-        try seen.put(builder.region.allocator, @intFromEnum(current), {});
+        if (seen.contains(@backingInt(current))) return error.RewriteCycle;
+        try seen.put(builder.region.allocator, @backingInt(current), {});
         const node_value = try checkedNodeInStorage(
             control.storage.load(.acquire) orelse return error.Expired,
             current,
@@ -2734,7 +2734,7 @@ fn rewriteNode(
             try arguments.ensureTotalCapacity(region.allocator, original_arguments.len);
             var changed = false;
             for (original_arguments) |argument| {
-                const mapped = memo.get(@intFromEnum(argument)) orelse argument;
+                const mapped = memo.get(@backingInt(argument)) orelse argument;
                 arguments.appendAssumeCapacity(mapped);
                 if (mapped != argument) changed = true;
             }
@@ -2800,7 +2800,7 @@ fn rewriteStructuredNode(
     try mapped.ensureTotalCapacity(region.allocator, original.len);
     var changed = false;
     for (original) |child| {
-        const next = memo.get(@intFromEnum(child)) orelse child;
+        const next = memo.get(@backingInt(child)) orelse child;
         mapped.appendAssumeCapacity(next);
         if (next != child) changed = true;
     }
@@ -3094,7 +3094,7 @@ test "account-backed region initialization charges each allocation once" {
     var region = try Region.init(
         runtime.gpa,
         &metered.context,
-        .{ .identity = @enumFromInt(61) },
+        .{ .identity = @fromBackingInt(@intCast(61)) },
     );
     defer region.deinit();
     const after = metered.ledger.snapshot();
@@ -3117,7 +3117,7 @@ test "repeated intern does not consume allocation budget" {
     var region = try Region.init(
         runtime.gpa,
         &metered.context,
-        .{ .identity = @enumFromInt(62) },
+        .{ .identity = @fromBackingInt(@intCast(62)) },
     );
     defer region.deinit();
 
@@ -3147,7 +3147,7 @@ test "unaccounted region allocator charges actual capacity allocations" {
     var region = try Region.init(
         probe.allocator(),
         &metered.context,
-        .{ .identity = @enumFromInt(63) },
+        .{ .identity = @fromBackingInt(@intCast(63)) },
     );
     defer region.deinit();
 
@@ -3180,7 +3180,7 @@ test "snapshot charges persistent and temporary allocations against limits" {
     var source_region = try Region.init(
         std.testing.allocator,
         null,
-        .{ .identity = @enumFromInt(64) },
+        .{ .identity = @fromBackingInt(@intCast(64)) },
     );
     defer source_region.deinit();
     const root = try testSnapshotRoot(&source_region);
@@ -3234,7 +3234,7 @@ test "postorder traversal enforces edge limit independently of node limit" {
     var region = try Region.init(
         std.testing.allocator,
         null,
-        .{ .identity = @enumFromInt(65) },
+        .{ .identity = @fromBackingInt(@intCast(65)) },
     );
     defer region.deinit();
     const left = try region.intern(null, .{ .scalar = .{
@@ -3280,7 +3280,7 @@ test "owned regions resolve immutable runtime identity only at initialization" {
         &owner,
         &TestOwnerResolver.resolve,
         &metered.context,
-        .{ .identity = @enumFromInt(66) },
+        .{ .identity = @fromBackingInt(@intCast(66)) },
     );
     defer region.deinit();
 
@@ -3309,7 +3309,7 @@ test "owned region rejects a foreign runtime before allocation debit" {
             &owner,
             &TestOwnerResolver.resolve,
             &foreign.context,
-            .{ .identity = @enumFromInt(67) },
+            .{ .identity = @fromBackingInt(@intCast(67)) },
         ),
     );
     const after = foreign.ledger.snapshot();
@@ -3320,7 +3320,7 @@ test "owned region rejects a foreign runtime before allocation debit" {
         &owner,
         &TestOwnerResolver.resolve,
         owner_runtime.context(),
-        .{ .identity = @enumFromInt(69) },
+        .{ .identity = @fromBackingInt(@intCast(69)) },
     );
     defer region.deinit();
     const foreign_scope = foreign.context.activate();
@@ -3346,7 +3346,7 @@ test "standalone regions accept explicit contexts from different runtimes" {
     var region = try Region.init(
         std.testing.allocator,
         first_runtime.context(),
-        .{ .identity = @enumFromInt(68) },
+        .{ .identity = @fromBackingInt(@intCast(68)) },
     );
     defer region.deinit();
 
@@ -3361,7 +3361,7 @@ test "standalone regions accept explicit contexts from different runtimes" {
 }
 
 test "same-spelled free variables remain distinct while labels remain static" {
-    var region = try Region.init(std.testing.allocator, null, .{ .identity = @enumFromInt(41) });
+    var region = try Region.init(std.testing.allocator, null, .{ .identity = @fromBackingInt(@intCast(41)) });
     defer region.deinit();
 
     const first = try region.freshVariable(null, "x", .real, .none);
@@ -3402,7 +3402,7 @@ test "same-spelled free variables remain distinct while labels remain static" {
 }
 
 test "hash consing checks identities revisions origins and complete equality" {
-    var region = try Region.init(std.testing.allocator, null, .{ .identity = @enumFromInt(42) });
+    var region = try Region.init(std.testing.allocator, null, .{ .identity = @fromBackingInt(@intCast(42)) });
     defer region.deinit();
 
     const x = try region.freshVariable(null, "x", .real, .none);
@@ -3447,7 +3447,7 @@ test "hash consing checks identities revisions origins and complete equality" {
 }
 
 test "region copies names labels shapes and opaque call metadata" {
-    var region = try Region.init(std.testing.allocator, null, .{ .identity = @enumFromInt(43) });
+    var region = try Region.init(std.testing.allocator, null, .{ .identity = @fromBackingInt(@intCast(43)) });
     defer region.deinit();
 
     var variable_name = [_]u8{ 'a', 'l', 'p', 'h', 'a' };
@@ -3500,7 +3500,7 @@ test "region copies names labels shapes and opaque call metadata" {
 }
 
 test "floating literals preserve NaN payloads and signed zero" {
-    var region = try Region.init(std.testing.allocator, null, .{ .identity = @enumFromInt(44) });
+    var region = try Region.init(std.testing.allocator, null, .{ .identity = @fromBackingInt(@intCast(44)) });
     defer region.deinit();
 
     const nan_a_bits: u64 = 0x7ff8_0000_0000_0041;
@@ -3531,7 +3531,7 @@ test "floating literals preserve NaN payloads and signed zero" {
 }
 
 test "strict IEEE rewrites preserve zero NaN and unknown division" {
-    var region = try Region.init(std.testing.allocator, null, .{ .identity = @enumFromInt(45) });
+    var region = try Region.init(std.testing.allocator, null, .{ .identity = @fromBackingInt(@intCast(45)) });
     defer region.deinit();
 
     const multiply = testPrimitive(3, 1);
@@ -3607,7 +3607,7 @@ const NonzeroFact = struct {
 };
 
 test "division rewrite requires explicit nonzero and finite facts" {
-    var region = try Region.init(std.testing.allocator, null, .{ .identity = @enumFromInt(46) });
+    var region = try Region.init(std.testing.allocator, null, .{ .identity = @fromBackingInt(@intCast(46)) });
     defer region.deinit();
 
     const divide = testPrimitive(4, 1);
@@ -3641,7 +3641,7 @@ test "formal real constants preserve primitive call result domains" {
     var region = try Region.init(
         std.testing.allocator,
         null,
-        .{ .identity = @enumFromInt(54) },
+        .{ .identity = @fromBackingInt(@intCast(54)) },
     );
     defer region.deinit();
 
@@ -3735,7 +3735,7 @@ test "strict IEEE keeps formal dispatch identities observable" {
     var region = try Region.init(
         std.testing.allocator,
         null,
-        .{ .identity = @enumFromInt(55) },
+        .{ .identity = @fromBackingInt(@intCast(55)) },
     );
     defer region.deinit();
 
@@ -3832,7 +3832,7 @@ test "formal dispatch rewrites canonical square derivative and converges" {
     var region = try Region.init(
         std.testing.allocator,
         null,
-        .{ .identity = @enumFromInt(56) },
+        .{ .identity = @fromBackingInt(@intCast(56)) },
     );
     defer region.deinit();
 
@@ -3951,7 +3951,7 @@ test "rewrite performs multiple bounded traversal passes" {
     var region = try Region.init(
         std.testing.allocator,
         null,
-        .{ .identity = @enumFromInt(58) },
+        .{ .identity = @fromBackingInt(@intCast(58)) },
     );
     defer region.deinit();
 
@@ -4024,7 +4024,7 @@ test "dispatch rewrite matching requires primitive tag and arity" {
     var region = try Region.init(
         std.testing.allocator,
         null,
-        .{ .identity = @enumFromInt(57) },
+        .{ .identity = @fromBackingInt(@intCast(57)) },
     );
     defer region.deinit();
 
@@ -4084,7 +4084,7 @@ const RewriteCycle = struct {
 };
 
 test "custom rewrite cycles stop at the explicit fixed point bound" {
-    var region = try Region.init(std.testing.allocator, null, .{ .identity = @enumFromInt(47) });
+    var region = try Region.init(std.testing.allocator, null, .{ .identity = @fromBackingInt(@intCast(47)) });
     defer region.deinit();
 
     const first = try region.intern(null, .{ .scalar = .{ .value = .{ .signed = 1 }, .domain = .signed_integer } });
@@ -4102,7 +4102,7 @@ test "custom rewrite cycles stop at the explicit fixed point bound" {
 
 test "region quotas reject growth without corrupting published nodes" {
     var region = try Region.init(std.testing.allocator, null, .{
-        .identity = @enumFromInt(48),
+        .identity = @fromBackingInt(@intCast(48)),
         .limits = .{
             .max_nodes = 1,
             .max_edges = 4,
@@ -4130,7 +4130,7 @@ test "region quotas reject growth without corrupting published nodes" {
 }
 
 test "closing rejects acquisitions while active readers finish safely" {
-    var region = try Region.init(std.testing.allocator, null, .{ .identity = @enumFromInt(50) });
+    var region = try Region.init(std.testing.allocator, null, .{ .identity = @fromBackingInt(@intCast(50)) });
     const value = try region.intern(null, .{ .scalar = .{ .value = .{ .signed = 17 }, .domain = .signed_integer } });
     var handle = try region.handle(null, value);
     var reader = try handle.acquire(null);
@@ -4146,7 +4146,7 @@ test "closing rejects acquisitions while active readers finish safely" {
 }
 
 test "list map tensor and record nodes expose structured metadata" {
-    var region = try Region.init(std.testing.allocator, null, .{ .identity = @enumFromInt(51) });
+    var region = try Region.init(std.testing.allocator, null, .{ .identity = @fromBackingInt(@intCast(51)) });
     defer region.deinit();
 
     const one = try region.intern(null, .{ .scalar = .{ .value = Scalar.fromF64(1.0), .domain = .real } });
@@ -4186,7 +4186,7 @@ test "list map tensor and record nodes expose structured metadata" {
 }
 
 test "conditional nodes preserve branches through snapshots and rewrites" {
-    var region = try Region.init(std.testing.allocator, null, .{ .identity = @enumFromInt(53) });
+    var region = try Region.init(std.testing.allocator, null, .{ .identity = @fromBackingInt(@intCast(53)) });
     defer region.deinit();
 
     const multiply = testPrimitive(9, 1);
@@ -4235,7 +4235,7 @@ test "conditional nodes preserve branches through snapshots and rewrites" {
 
 test "bounded snapshot traverses a 16384 node chain iteratively" {
     var region = try Region.init(std.testing.allocator, null, .{
-        .identity = @enumFromInt(52),
+        .identity = @fromBackingInt(@intCast(52)),
         .limits = .{
             .max_nodes = 16_384,
             .max_edges = 16_383,

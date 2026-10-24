@@ -2626,14 +2626,14 @@ test "metrics: unknown codepoint falls back to estimate" {
 
 test "metrics: glue parameters are positive" {
     const gp = default.glue(&default);
-    inline for (@typeInfo(GlueParams).@"struct".fields) |f| {
+    inline for (@typeInfo(GlueParams).@"struct".field_names) |name| {
         // bigop_spacing5 is 0.0 in Latin Modern Math (the MATH-table
         // big-op padding, measured: fontspec fd13 = 0pt on the OT math
         // font); every other parameter must be strictly positive.
-        if (comptime std.mem.eql(u8, f.name, "bigop_spacing5")) {
+        if (comptime std.mem.eql(u8, name, "bigop_spacing5")) {
             try testing.expectEqual(@as(f32, 0.0), gp.bigop_spacing5);
         } else {
-            try testing.expect(@field(gp, f.name) > 0.0);
+            try testing.expect(@field(gp, name) > 0.0);
         }
     }
 }

@@ -150,14 +150,14 @@ fn operandSlice(code: *const Code.Code, range: Code.OperandRange) Error![]const 
 
 fn valueInfo(values: []const SourceValue, value: Code.ValueId) Error!SourceValue {
     if (value == .invalid) return error.InvalidCode;
-    const index = @intFromEnum(value);
+    const index = @backingInt(value);
     if (index >= values.len) return error.InvalidCode;
     return values[index];
 }
 
 fn setValue(values: []SourceValue, value: Code.ValueId, info: SourceValue) Error!void {
     if (value == .invalid) return error.InvalidCode;
-    const index = @intFromEnum(value);
+    const index = @backingInt(value);
     if (index >= values.len) return error.InvalidCode;
     values[index] = info;
 }
@@ -420,12 +420,12 @@ fn primitiveId(ctx: *EvalContext, native: skript.FuncPtr) Error!Primitive.Primit
 fn scalarTag(value: Value) ?rules.ScalarOp {
     if (value.typ != b.type_i64) return null;
     const raw = value.obj.toInt(i64);
-    if (raw < @intFromEnum(rules.ScalarOp.add) or
-        raw > @intFromEnum(rules.ScalarOp.realize_tangent))
+    if (raw < @backingInt(rules.ScalarOp.add) or
+        raw > @backingInt(rules.ScalarOp.realize_tangent))
     {
         return null;
     }
-    return @enumFromInt(raw);
+    return @fromBackingInt(@intCast(raw));
 }
 
 fn sourcePrimitive(
@@ -604,7 +604,7 @@ const Analyzer = struct {
             return error.ArityMismatch;
         }
         for (self.source.parameters[first..last], 0..) |binding_id, index| {
-            const binding_index = @intFromEnum(binding_id);
+            const binding_index = @backingInt(binding_id);
             if (binding_index >= self.source.bindings.len) return error.InvalidCode;
             const binding = self.source.bindings[binding_index];
             try setValue(self.values, binding.value, .{
@@ -802,7 +802,7 @@ const Analyzer = struct {
                             retained.* = resolved;
                             algebra = retained;
                             if (classes[1].algebra == null and !tree.isNumeric(prototype.?)) {
-                                self.values[@intFromEnum(actual_args[1])].algebra = retained;
+                                self.values[@backingInt(actual_args[1])].algebra = retained;
                             }
                         }
                     }
@@ -937,11 +937,11 @@ const Analyzer = struct {
     }
 
     fn analyzeCellWrite(self: *Analyzer, cell: Code.GlobalCellId, value: Code.ValueId) Error!void {
-        const cell_index = @intFromEnum(cell);
+        const cell_index = @backingInt(cell);
         if (cell_index >= self.source.globals.len) return error.InvalidCode;
         const target = self.source.globals[cell_index];
         if (target.binding == .invalid) return error.Unsupported;
-        const binding_index = @intFromEnum(target.binding);
+        const binding_index = @backingInt(target.binding);
         if (binding_index >= self.source.bindings.len) return error.InvalidCode;
         const definition = self.source.bindings[binding_index];
         if (definition.kind != .let and definition.kind != .definition) return error.Unsupported;
@@ -980,8 +980,8 @@ const Analyzer = struct {
                 .zero = try zeroValue(self.ctx, value, 0),
             },
             .local_read => |binding| {
-                if (@intFromEnum(binding) >= self.source.bindings.len) return error.InvalidCode;
-                const definition = self.source.bindings[@intFromEnum(binding)];
+                if (@backingInt(binding) >= self.source.bindings.len) return error.InvalidCode;
+                const definition = self.source.bindings[@backingInt(binding)];
                 const target = if (definition.function == self.function_id) definition.value else blk: {
                     const first = self.function.capture_start;
                     const last = first + self.function.capture_count;
@@ -996,10 +996,10 @@ const Analyzer = struct {
                 info.definition = node.id;
             },
             .global_read => |global| {
-                if (@intFromEnum(global) >= self.source.globals.len) return error.InvalidCode;
-                const cell = self.source.globals[@intFromEnum(global)];
+                if (@backingInt(global) >= self.source.globals.len) return error.InvalidCode;
+                const cell = self.source.globals[@backingInt(global)];
                 if (cell.binding != .invalid) {
-                    const binding_index = @intFromEnum(cell.binding);
+                    const binding_index = @backingInt(cell.binding);
                     if (binding_index >= self.source.bindings.len) return error.InvalidCode;
                     const definition = self.source.bindings[binding_index];
                     if ((definition.kind == .let or definition.kind == .definition) and
@@ -1049,7 +1049,7 @@ const Analyzer = struct {
             return error.Unsupported;
         }
         const block_id = self.source.function_blocks[block_start];
-        const block_index = @intFromEnum(block_id);
+        const block_index = @backingInt(block_id);
         if (block_index >= self.source.blocks.len) return error.InvalidCode;
         const block = &self.source.blocks[block_index];
         if (block.function != self.function_id or block.param_count != 0) return error.Unsupported;
@@ -1058,7 +1058,7 @@ const Analyzer = struct {
             return error.InvalidCode;
         if (node_end > self.source.block_nodes.len) return error.InvalidCode;
         for (self.source.block_nodes[node_start..node_end]) |node_id| {
-            const node_index = @intFromEnum(node_id);
+            const node_index = @backingInt(node_id);
             if (node_index >= self.source.nodes.len) return error.InvalidCode;
             try self.analyzeNode(self.source.nodes[node_index]);
         }
@@ -1203,7 +1203,7 @@ const Transposer = struct {
     }
 
     fn valueSpaceId(self: *Transposer, value: Code.ValueId, source: SourceRef) Error!Code.ValueId {
-        const index = @intFromEnum(value);
+        const index = @backingInt(value);
         if (index >= self.space_ids.len) return error.InvalidCode;
         if (self.space_ids[index] == 0) {
             const domains = self.spaces orelse return error.Unsupported;
@@ -1269,7 +1269,7 @@ const Transposer = struct {
     fn emitConstant(self: *Transposer, value: Code.ValueId, depth: usize) Error!Code.ValueId {
         if (depth >= max_analysis_depth) return error.Unsupported;
         if (value == .invalid) return error.InvalidCode;
-        const index = @intFromEnum(value);
+        const index = @backingInt(value);
         if (index >= self.generated_values.len) return error.InvalidCode;
         if (self.generated_values[index] != .invalid) return self.generated_values[index];
         const info = self.analysis.values[index];
@@ -1287,16 +1287,16 @@ const Transposer = struct {
         }
         const node_id = info.definition;
         if (node_id == .invalid) return error.Unsupported;
-        const node_index = @intFromEnum(node_id);
+        const node_index = @backingInt(node_id);
         if (node_index >= self.source.nodes.len) return error.InvalidCode;
         const node = self.source.nodes[node_index];
         const result = switch (node.operation) {
             .literal => |literal| try self.emitLiteral(literal, node.source),
             .quote => |quoted| self.emitNode(.{ .quote = quoted }, node.source) catch return error.OutOfMemory,
             .global_read => |global| blk: {
-                const cell = self.source.globals[@intFromEnum(global)];
+                const cell = self.source.globals[@backingInt(global)];
                 if (cell.binding != .invalid) {
-                    const binding_index = @intFromEnum(cell.binding);
+                    const binding_index = @backingInt(cell.binding);
                     if (binding_index >= self.source.bindings.len) return error.InvalidCode;
                     const definition = self.source.bindings[binding_index];
                     if ((definition.kind != .let and definition.kind != .definition) or
@@ -1307,8 +1307,8 @@ const Transposer = struct {
                 break :blk try self.emitNode(.{ .global_read = generated_global }, node.source);
             },
             .local_read => |binding| blk: {
-                if (@intFromEnum(binding) >= self.source.bindings.len) return error.InvalidCode;
-                break :blk try self.emitConstant(self.source.bindings[@intFromEnum(binding)].value, depth + 1);
+                if (@backingInt(binding) >= self.source.bindings.len) return error.InvalidCode;
+                break :blk try self.emitConstant(self.source.bindings[@backingInt(binding)].value, depth + 1);
             },
             .arithmetic => |arithmetic| blk: {
                 const left = try self.emitConstant(arithmetic.left, depth + 1);
@@ -1375,7 +1375,7 @@ const Transposer = struct {
         source: SourceRef,
     ) Error!Code.ValueId {
         const primitive = try primitiveId(self.ctx, &rules.scalarDispatch);
-        const tag = try self.emitNode(.{ .literal = .i64(@intFromEnum(operation)) }, source);
+        const tag = try self.emitNode(.{ .literal = .i64(@backingInt(operation)) }, source);
         var operands = std.ArrayList(Code.ValueId).empty;
         defer operands.deinit(self.ctx.scratch);
         try operands.append(self.ctx.scratch, tag);
@@ -1392,7 +1392,7 @@ const Transposer = struct {
         };
         if (slot.* != .invalid) return slot.*;
         const helper = try self.builder.addFunction(null, self.analysis.function.source);
-        self.builder.functions.items[@intFromEnum(helper)].result_count = 1;
+        self.builder.functions.items[@backingInt(helper)].result_count = 1;
         const block = try self.builder.addBlock(helper);
         const first_name = try self.runtime.store.getsym("$__skript_ad_scalar_left");
         const second_name = try self.runtime.store.getsym("$__skript_ad_scalar_right");
@@ -1403,7 +1403,7 @@ const Transposer = struct {
             self.analysis.function.source,
         );
         const first_value = try self.builder.addValue(helper);
-        self.builder.bindings.items[@intFromEnum(first_binding)].value = first_value;
+        self.builder.bindings.items[@backingInt(first_binding)].value = first_value;
         try self.builder.addParameter(helper, first_binding);
         var args: [2]Code.ValueId = undefined;
         if (operation == .neg) {
@@ -1416,7 +1416,7 @@ const Transposer = struct {
                 self.analysis.function.source,
             );
             const second_value = try self.builder.addValue(helper);
-            self.builder.bindings.items[@intFromEnum(second_binding)].value = second_value;
+            self.builder.bindings.items[@backingInt(second_binding)].value = second_value;
             try self.builder.addParameter(helper, second_binding);
             args = .{ first_value, second_value };
         }
@@ -1435,7 +1435,7 @@ const Transposer = struct {
         source: SourceRef,
     ) Error!Code.ValueId {
         const primitive = try primitiveId(self.ctx, &rules.scalarDispatch);
-        const tag = try self.builder.addNode(function, block, .{ .literal = .i64(@intFromEnum(operation)) }, source);
+        const tag = try self.builder.addNode(function, block, .{ .literal = .i64(@backingInt(operation)) }, source);
         var operands = std.ArrayList(Code.ValueId).empty;
         defer operands.deinit(self.ctx.scratch);
         try operands.append(self.ctx.scratch, tag);
@@ -1591,7 +1591,7 @@ const Transposer = struct {
     }
 
     fn addAdjoint(self: *Transposer, source_value: Code.ValueId, contribution: Code.ValueId) Error!void {
-        const index = @intFromEnum(source_value);
+        const index = @backingInt(source_value);
         if (index >= self.adjoints.len) return error.InvalidCode;
         if (self.analysis.values[index].class == .constant) return;
         if (self.adjoints[index] == .invalid) {
@@ -1690,7 +1690,7 @@ const Transposer = struct {
 
     fn mapScale(self: *Transposer, tensor: Code.ValueId, factor: Code.ValueId, source: SourceRef) Error!Code.ValueId {
         const helper = try self.builder.addFunction(null, self.analysis.function.source);
-        self.builder.functions.items[@intFromEnum(helper)].result_count = 1;
+        self.builder.functions.items[@backingInt(helper)].result_count = 1;
         const block = try self.builder.addBlock(helper);
         const parameter_name = try self.runtime.store.getsym("$__skript_ad_map_value");
         const parameter_binding = try self.builder.addBinding(
@@ -1700,7 +1700,7 @@ const Transposer = struct {
             self.analysis.function.source,
         );
         const parameter = try self.builder.addValue(helper);
-        self.builder.bindings.items[@intFromEnum(parameter_binding)].value = parameter;
+        self.builder.bindings.items[@backingInt(parameter_binding)].value = parameter;
         try self.builder.addParameter(helper, parameter_binding);
         const capture_name = try self.runtime.store.getsym("$__skript_ad_map_factor");
         const capture_binding = try self.builder.addBinding(
@@ -1709,7 +1709,7 @@ const Transposer = struct {
             .let,
             self.analysis.function.source,
         );
-        self.builder.bindings.items[@intFromEnum(capture_binding)].value = factor;
+        self.builder.bindings.items[@backingInt(capture_binding)].value = factor;
         const captured = try self.builder.addCapture(helper, capture_binding);
         const result = try self.emitHelperNode(helper, block, .mul, &.{ captured, parameter }, source);
         try self.builder.setTerminator(block, .{ .return_values = try self.builder.addOperands(&.{result}) });
@@ -1741,8 +1741,8 @@ const Transposer = struct {
         const max_transpose_rank: usize = 8;
         if (rank > max_transpose_rank) return error.Unsupported;
         try self.ctx.chargeWork(@intCast(rank), 1, .transform);
-        var seen: [max_transpose_rank]bool = .{false} ** max_transpose_rank;
-        var inverse: [max_transpose_rank]Value = .{Value.nil} ** max_transpose_rank;
+        var seen: [max_transpose_rank]bool = @splat(false);
+        var inverse: [max_transpose_rank]Value = @splat(Value.nil);
         const rank_i64 = std.math.cast(i64, rank) orelse return error.Unsupported;
         for (holder.data, 0..) |word, output_axis| {
             const old_axis: i64 = @bitCast(word);
@@ -1767,7 +1767,7 @@ const Transposer = struct {
             const function = rule.code.function(rule.function) orelse return error.InvalidCode;
             if (function.capture_count != 0) return error.Unsupported;
             const program = try self.runtime.lowerCode(self.ctx.scratch, rule.code);
-            const index = @intFromEnum(rule.function);
+            const index = @backingInt(rule.function);
             if (index >= program.fns.len) return error.InvalidCode;
             const lowered = program.fns[index];
             const reference = try self.runtime.store.create(Closure);
@@ -2302,21 +2302,21 @@ const Transposer = struct {
             .ns_push, .ns_pop => return,
             else => {},
         }
-        const result_index = @intFromEnum(node.result);
+        const result_index = @backingInt(node.result);
         if (result_index >= self.adjoints.len) return error.InvalidCode;
         const cotangent = self.adjoints[result_index];
         if (cotangent == .invalid) return;
         switch (node.operation) {
             .global_read => |global| {
-                const cell = self.source.globals[@intFromEnum(global)];
+                const cell = self.source.globals[@backingInt(global)];
                 if (cell.binding == .invalid) return;
-                const alias = self.analysis.values[@intFromEnum(node.result)].alias;
+                const alias = self.analysis.values[@backingInt(node.result)].alias;
                 if (alias != .invalid) try self.addAdjoint(alias, cotangent);
             },
             .local_read => |binding| {
-                const binding_index = @intFromEnum(binding);
+                const binding_index = @backingInt(binding);
                 if (binding_index >= self.source.bindings.len) return error.InvalidCode;
-                try self.addAdjoint(self.analysis.values[@intFromEnum(node.result)].alias, cotangent);
+                try self.addAdjoint(self.analysis.values[@backingInt(node.result)].alias, cotangent);
             },
             .arithmetic => |arithmetic| try self.reverseArithmetic(node, arithmetic, cotangent),
             .primitive_call => |call| try self.reversePrimitive(node, call, cotangent),
@@ -2337,18 +2337,18 @@ const Transposer = struct {
         const block = self.analysis.block;
         if (self.analysis.partial) {
             for (self.source.block_nodes[block.node_start..][0..block.node_count]) |id| {
-                const node = self.source.nodes[@intFromEnum(id)];
+                const node = self.source.nodes[@backingInt(id)];
                 if (node.result != .invalid and
-                    self.analysis.values[@intFromEnum(node.result)].constant_kind == .operation)
+                    self.analysis.values[@backingInt(node.result)].constant_kind == .operation)
                 {
                     _ = try self.emitConstant(node.result, 0);
                 }
             }
         } else if (self.analysis.primal_result != .invalid) {
             for (self.source.block_nodes[block.node_start..][0..block.node_count]) |id| {
-                const node = self.source.nodes[@intFromEnum(id)];
+                const node = self.source.nodes[@backingInt(id)];
                 if (node.result != .invalid and
-                    self.analysis.values[@intFromEnum(node.result)].constant_kind == .operation)
+                    self.analysis.values[@backingInt(node.result)].constant_kind == .operation)
                 {
                     _ = try self.emitConstant(node.result, 0);
                 }
@@ -2379,7 +2379,7 @@ const Transposer = struct {
         while (node_index > node_start) {
             node_index -= 1;
             const id = self.source.block_nodes[node_index];
-            const node = self.source.nodes[@intFromEnum(id)];
+            const node = self.source.nodes[@backingInt(id)];
             try self.reverseNode(node);
         }
         const prefix: usize = if (primal == .invalid) 0 else 1;
@@ -2388,8 +2388,8 @@ const Transposer = struct {
         defer self.ctx.scratch.free(results);
         if (prefix != 0) results[0] = primal;
         for (self.parameter_bindings[first..], results[prefix..], first..) |binding, *result, index| {
-            const value = self.source.bindings[@intFromEnum(binding)].value;
-            result.* = self.adjoints[@intFromEnum(value)];
+            const value = self.source.bindings[@backingInt(binding)].value;
+            result.* = self.adjoints[@backingInt(value)];
             if (result.* == .invalid) {
                 if ((try self.sourceValue(value)).algebra != null) {
                     const id = try self.valueSpaceId(value, self.analysis.function.source);
@@ -2524,7 +2524,7 @@ fn materialize(
     guard: *const skript.data.ClosureGuard,
     captures: []const Value,
 ) Error!Value {
-    const index = @intFromEnum(function);
+    const index = @backingInt(function);
     if (index >= program.fns.len) return error.InvalidCode;
     const lowered = program.fns[index];
     if (lowered.capture_syms.len != captures.len) return error.InvalidCode;
@@ -2724,7 +2724,7 @@ fn generateWithConstants(
     builder.id = identity.id;
     builder.revision = identity.revision;
     const function_id = try builder.addFunction(null, info.function.source);
-    const generated_function = &builder.functions.items[@intFromEnum(function_id)];
+    const generated_function = &builder.functions.items[@backingInt(function_id)];
     const result_count = if (mode == .partial)
         input_prototypes.len - constant_parameters
     else if (constant_parameters == 0)
@@ -2772,7 +2772,7 @@ fn generateWithConstants(
         const name = try ctx.runtime.store.getsym(name_text);
         const binding = try builder.addBinding(function_id, name, .parameter, info.function.source);
         value.* = try builder.addValue(function_id);
-        builder.bindings.items[@intFromEnum(binding)].value = value.*;
+        builder.bindings.items[@backingInt(binding)].value = value.*;
         try builder.addParameter(function_id, binding);
     }
 
@@ -2801,7 +2801,7 @@ fn generateWithConstants(
     @memset(transposer.space_ids, 0);
     if (constant_parameters != 0) {
         for (parameter_bindings[0..constant_parameters], input_values[0..constant_parameters]) |binding, value| {
-            transposer.generated_values[@intFromEnum(info.code.bindings[@intFromEnum(binding)].value)] = value;
+            transposer.generated_values[@backingInt(info.code.bindings[@backingInt(binding)].value)] = value;
         }
     }
     if (mode == .partial) {

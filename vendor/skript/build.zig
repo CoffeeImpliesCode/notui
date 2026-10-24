@@ -1,8 +1,4 @@
 const std = @import("std");
-// Vendored emcc build helpers (build_web.zig) — imported locally, NOT from
-// the zemscripten dependency, so build.zig never comptime-imports a
-// possibly-absent lazy dep.
-const web_tools = @import("build_web.zig");
 
 const platform = @import("src/platform.zig");
 const builtin = @import("builtin");
@@ -77,7 +73,7 @@ pub fn build(b: *std.Build) !void {
         const grammar_root = if (std.fs.path.isAbsolute(grammar_path_option))
             grammar_path_option
         else
-            b.pathFromRoot(grammar_path_option);
+            try b.root.joinString(b.allocator, grammar_path_option);
         const parser_path = b.pathJoin(&.{ grammar_root, "src/parser.c" });
         const grammar_include_path = b.pathJoin(&.{ grammar_root, "src" });
         const scm_path = b.pathJoin(&.{ grammar_root, "queries/highlights.scm" });
@@ -184,9 +180,7 @@ pub fn build(b: *std.Build) !void {
         run_step.dependOn(&run_cmd.step);
         run_cmd.step.dependOn(b.getInstallStep());
 
-        if (b.args) |args| {
-            run_cmd.addArgs(args);
-        }
+        run_cmd.addPassthruArgs();
     } else {
         const missing_cli = b.addFail(
             "`run` requires the CLI; remove -Dcli=false or build the library only",
@@ -262,9 +256,8 @@ pub fn build(b: *std.Build) !void {
 
     // Run tests directly, bypassing zig's slow --listen=- IPC protocol (~3.5x faster).
     const test_fast = b.step("test-fast", "Run tests directly (compiles then runs, no IPC overhead)");
-    const run_fast = b.addSystemCommand(&.{
-        b.getInstallPath(.bin, test_install.dest_sub_path),
-    });
+    const run_fast = std.Build.Step.Run.create(b, "run tests directly");
+    run_fast.addFileArg(test_exe.getEmittedBin());
     run_fast.step.dependOn(&test_install.step);
     test_fast.dependOn(&run_fast.step);
 
@@ -291,133 +284,6 @@ pub fn build(b: *std.Build) !void {
     });
     const docs_step = b.step("docs", "Generate documentation");
     docs_step.dependOn(&install_docs.step);
-
-    // Emscripten web build — OPTIONAL and lazy.
-    // `zig build web`: compiles the language core + a minimal web entry
-    // (src/web.zig) for wasm32-emscripten and links it with emcc into
-    // zig-out/web/ (skript.js + skript.wasm + index.html). emcc comes from
-    // the devenv's `emscripten` package; the vendored zemscripten package
-    // resolves it from PATH at build time (no emsdk checkout involved).
-    //
-    // zemscripten is declared `.lazy = true` in build.zig.zon and is NOT
-    // shipped in .paths, so consumers of skript never have it. This whole
-    // section is gated on the lazy dep being available: a consumer (or any
-    // build without third_party/zemscripten) skips it entirely and never
-    // resolves or imports zemscripten — the Emscripten/emcc toolchain is
-    // required only in a full checkout when `zig build web` is requested.
-    // tree-sitter, tracy and libffi are REPL-native concerns and stay out
-    // of the web module tree (ffi is additionally auto-gated by
-    // platform.ffiSupported for the wasm target).
-    //
-    // Gate on the vendored path's presence rather than b.lazyImport/lazyDependency:
-    // a missing lazy *path* dep neither returns null nor reports !available —
-    // it just lacks a build.zig, so lazyImport hits a @compileError. Probing the
-    // path instead keeps consumers (which don't ship third_party/zemscripten,
-    // see .paths) from ever reaching the emscripten toolchain code below.
-    const web_supported = blk: {
-        std.Io.Dir.cwd().access(b.graph.io, "third_party/zemscripten/build.zig", .{}) catch break :blk false;
-        break :blk true;
-    };
-    if (web_supported) {
-        const ze = b.lazyDependency("zemscripten", .{}).?;
-
-        const web_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .emscripten });
-        const web_pf = b.addModule("platform", .{
-            .root_source_file = b.path("src/platform.zig"),
-            .target = web_target,
-            .imports = &.{},
-        });
-        const web_skript = b.createModule(.{
-            .root_source_file = b.path("src/root.zig"),
-            .target = web_target,
-            .optimize = optimize,
-            .link_libc = true, // emscripten: std.posix.system falls back to std.c
-            // (the generic wasm arm lacks getrandom/IOV_MAX); std.c has
-            // emscripten arms for both.
-            .imports = &.{
-                .{ .name = "platform", .module = web_pf },
-                .{ .name = "options", .module = options.createModule() },
-                .{ .name = "tracy", .module = tracy.module("tracy") },
-                .{ .name = "tracy_impl", .module = if (tracy_enabled)
-                    tracy.module("tracy_impl_enabled")
-                else
-                    tracy.module("tracy_impl_disabled") },
-            },
-        });
-        const zigzag_web = b.dependency("zigzag", .{ .target = web_target, .optimize = optimize });
-        const emscripten_zig_lib = web_tools.prepareEmscriptenZigLib(b);
-        const web_lib = b.addLibrary(.{
-            .name = "skript-web",
-            .zig_lib_dir = emscripten_zig_lib,
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/web.zig"),
-                .target = web_target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "skript", .module = web_skript },
-                    .{ .name = "zigzag", .module = zigzag_web.module("zigzag") },
-                    .{ .name = "zemscripten", .module = ze.module("root") },
-                },
-            }),
-        });
-
-        // The static lib must carry the target's compiler_rt: the runtime uses
-        // f16 (tensor halfs), whose soft-float helpers (__addhf3 & co.) only
-        // exist in zig's compiler_rt, not in emcc's libc.
-        web_lib.bundle_compiler_rt = true;
-
-        const emcc_flags = web_tools.emccDefaultFlags(b.allocator, .{ .optimize = optimize, .fsanitize = false });
-        var emcc_settings = web_tools.emccDefaultSettings(b.allocator, .{
-            .optimize = optimize,
-            .emsdk_allocator = .emmalloc,
-        });
-        try emcc_settings.put("ALLOW_MEMORY_GROWTH", "1");
-        try emcc_settings.put("MODULARIZE", "1");
-        try emcc_settings.put("EXPORT_NAME", "createSkript");
-        // Resolve the zigzag output import through Emscripten's JS library
-        // mechanism. The generated function forwards to the host callback
-        // supplied in the Module object by web/worker.js.
-        const host_js_source =
-            \\addToLibrary({
-            \\  jsWrite: function(ptr, len) {
-            \\    Module["skriptWrite"](ptr, len);
-            \\  },
-            \\});
-        ;
-        const host_js = b.addWriteFiles().add("zigzag-host.js", host_js_source);
-        // The prelude eval recurses deeply; emscripten's default 64 KiB stack
-        // overflows into a wasm trap.
-        try emcc_settings.put("STACK_SIZE", "1048576");
-        // SAFE_HEAP / STACK_OVERFLOW_CHECK stay at the emcc Debug defaults (1)
-        // like the reference zemscripten builds. The web entry allocates through
-        // emcc's malloc (c_allocator backing), which advances the sbrk break the
-        // SAFE_HEAP guard checks — so the Debug checks are consistent and active.
-
-        const emcc_output = web_tools.emccStep(b, &.{}, &.{web_lib}, .{
-            .optimize = optimize,
-            .flags = emcc_flags,
-            .settings = emcc_settings,
-            .js_library_path = host_js,
-            .wasm_file_name = "skript.wasm",
-            .out_file_name = "skript.js",
-            .install_dir = .{ .custom = "web" },
-        });
-        const source_index = b.path("web/index.html");
-        const source_worker = b.path("web/worker.js");
-        const revisioned_index = web_tools.webAssetIndex(
-            b,
-            emcc_output.javascript,
-            emcc_output.wasm.?,
-            source_worker,
-            source_index,
-        );
-        const install_index = b.addInstallFile(revisioned_index, "web/index.html");
-        const install_worker = b.addInstallFile(source_worker, "web/worker.js");
-        const web_step = b.step("web", "Build the Emscripten web app (requires emcc from the devenv)");
-        web_step.dependOn(emcc_output.install_step);
-        web_step.dependOn(&install_index.step);
-        web_step.dependOn(&install_worker.step);
-    }
 }
 
 /// Apply zig-cov instrumentation to a test binary:

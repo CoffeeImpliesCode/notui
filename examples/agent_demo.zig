@@ -390,7 +390,7 @@ pub const Model = struct {
                         return .none;
                     }
                     if (self.keymap.lookup(k)) |id| {
-                        const action: Action = @enumFromInt(id.value);
+                        const action: Action = @fromBackingInt(@intCast(id.value));
                         switch (action) {
                             .quit => return .quit,
                             .submit => {

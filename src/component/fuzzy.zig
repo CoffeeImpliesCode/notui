@@ -6,7 +6,7 @@
 //! allocator, and no byte-oriented shortcut. The walk steps one
 //! GRAPHEME at a time (the cluster byte length comes from the `width`
 //! seam, the single place zg is reachable), and case folding goes
-//! through that same seam (`Width.toUpper`, the Unicode 16 simple
+//! through that same seam (`Width.toUpper`, the Unicode 18 simple
 //! mapping), so `Bär` matches the needle `bär` and a codepoint is never
 //! half-compared.
 //!

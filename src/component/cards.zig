@@ -40,7 +40,7 @@ const markdown = @import("../markdown.zig");
 const Region = @import("../region.zig").Region;
 
 /// Number of `Card.State` variants; the width of `Card.Look.states`.
-const state_count = @typeInfo(Card.State).@"enum".fields.len;
+const state_count = @typeInfo(Card.State).@"enum".field_names.len;
 
 /// Tab stops for a TAB in untrusted text: a cell buffer cannot carry a
 /// tab byte (it would move the cursor), so a TAB becomes spaces up to
@@ -179,8 +179,8 @@ pub const Card = struct {
         used = try pen.put(self.look.marker, " ", inner_x, row, used, content_w);
         used = try pen.put(self.look.title, self.title, inner_x, row, used, content_w);
         used = try pen.put(self.look.marker, " ", inner_x, row, used, content_w);
-        const state_style = self.look.states[@intFromEnum(self.state)];
-        const glyph = state_glyphs[@intFromEnum(self.state)];
+        const state_style = self.look.states[@backingInt(self.state)];
+        const glyph = state_glyphs[@backingInt(self.state)];
         _ = try pen.put(state_style, glyph, inner_x, row, used, content_w);
         row += 1;
 
@@ -248,7 +248,7 @@ pub const Card = struct {
                 " ",
                 self.title,
                 " ",
-                state_glyphs[@intFromEnum(self.state)],
+                state_glyphs[@backingInt(self.state)],
             },
             x0,
             cap,

@@ -26,7 +26,6 @@
 //! Terminal modes, transport, and committed text snapshots belong to `Region` or the caller.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Cell = @import("cell.zig").Cell;
 const Color = @import("color.zig").Color;
 const AnsiColor = @import("color.zig").AnsiColor;
@@ -103,7 +102,7 @@ pub const Buffer = struct {
         pub const blank: Slot = .{ .glyph = ' ', .meta = .{ .len = 1 }, .style = 0 };
 
         fn bits(self: Slot) u128 {
-            return @bitCast(self);
+            return @as(*align(@alignOf(Slot)) const u128, @ptrCast(&self)).*;
         }
 
         pub fn isBlank(self: Slot) bool {
@@ -175,8 +174,7 @@ pub const Buffer = struct {
 
         /// Normalize vector lanes to low-to-high bits on either byte order.
         fn maskBits(flags: @Vector(8, bool)) u8 {
-            const raw_mask: u8 = @bitCast(flags);
-            return if (builtin.target.cpu.arch.endian() == .big) @bitReverse(raw_mask) else raw_mask;
+            return @bitCast(flags);
         }
 
         /// For eight slots, which paint (`paints()`) and which of those
@@ -1035,7 +1033,7 @@ fn packColour(colour: ?Color) u64 {
     const c = colour orelse return 0;
     return switch (c) {
         .default => kind_default << 24,
-        .ansi => |a| kind_ansi << 24 | @intFromEnum(a),
+        .ansi => |a| kind_ansi << 24 | @backingInt(a),
         .ansi256 => |n| kind_256 << 24 | n,
         .rgb => |v| kind_rgb << 24 | @as(u64, v.r) << 16 | @as(u64, v.g) << 8 | v.b,
     };
@@ -1055,7 +1053,7 @@ fn unpackColour(bits: u64) ?Color {
     return switch (bits >> 24) {
         0 => null,
         kind_default => .default,
-        kind_ansi => .{ .ansi = @enumFromInt(@as(u8, @truncate(payload))) },
+        kind_ansi => .{ .ansi = @fromBackingInt(@intCast(@as(u8, @truncate(payload)))) },
         kind_256 => .{ .ansi256 = @truncate(payload) },
         kind_rgb => .{ .rgb = .{
             .r = @truncate(payload >> 16),
@@ -1140,7 +1138,7 @@ fn emittedColour(bits: u64, background: bool) u64 {
     return switch (bits >> 24) {
         0, kind_default => 0,
         kind_ansi => {
-            const a: AnsiColor = @enumFromInt(@as(u8, @truncate(payload)));
+            const a: AnsiColor = @fromBackingInt(@intCast(@as(u8, @truncate(payload))));
             return 1 << 24 | @as(u64, if (background) a.bgCode() else a.fgCode());
         },
         kind_256 => 2 << 24 | payload,
@@ -2467,13 +2465,13 @@ const FrameModel = struct {
                     self.style.bg = colour;
                 }
             } else if (p >= 30 and p <= 37) {
-                self.style.fg = .{ .ansi = @enumFromInt(p - 30) };
+                self.style.fg = .{ .ansi = @fromBackingInt(@intCast(p - 30)) };
             } else if (p >= 40 and p <= 47) {
-                self.style.bg = .{ .ansi = @enumFromInt(p - 40) };
+                self.style.bg = .{ .ansi = @fromBackingInt(@intCast(p - 40)) };
             } else if (p >= 90 and p <= 97) {
-                self.style.fg = .{ .ansi = @enumFromInt(p - 90 + 8) };
+                self.style.fg = .{ .ansi = @fromBackingInt(@intCast(p - 90 + 8)) };
             } else if (p >= 100 and p <= 107) {
-                self.style.bg = .{ .ansi = @enumFromInt(p - 100 + 8) };
+                self.style.bg = .{ .ansi = @fromBackingInt(@intCast(p - 100 + 8)) };
             } else {
                 unreachable; // the renderers emit no other parameter
             }
@@ -2635,8 +2633,8 @@ test "prefixRows: a cut inside a one-cell run keeps whole chunks" {
     const gpa = std.testing.allocator;
     var buf = try Buffer.init(gpa, 40, 2);
     defer buf.deinit();
-    _ = try buf.draw(Style{}, "x" ** 40, 0, 0);
-    _ = try buf.draw(Style{}, "界" ++ "x" ** 20, 0, 1);
+    _ = try buf.draw(Style{}, &@as([40]u8, @splat('x')), 0, 0);
+    _ = try buf.draw(Style{}, "界" ++ @as([20]u8, @splat('x')), 0, 1);
     var tape: std.ArrayList(u16) = .empty;
     defer tape.deinit(gpa);
     var null_gaps: std.ArrayList(Buffer.RowFootprint.NullGap) = .empty;
@@ -2879,7 +2877,7 @@ test "rowFootprint: removing a suffix distinguishes null gaps from printed space
     const gpa = std.testing.allocator;
     var buf = try Buffer.init(gpa, 130, 2);
     defer buf.deinit();
-    _ = try buf.draw(.{}, "a" ** 100 ++ "界", 0, 0);
+    _ = try buf.draw(.{}, @as([100]u8, @splat('a')) ++ "界", 0, 0);
     _ = try buf.draw(.{}, "界", 100, 1);
     var tape: std.ArrayList(u16) = .empty;
     defer tape.deinit(gpa);

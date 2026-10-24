@@ -398,7 +398,7 @@ pub const Region = struct {
 };
 
 fn traceType(visitor: *skript.Store.MarkVisitor, object: skript.Object) anyerror!void {
-    if (object != .null and @intFromEnum(object) > skript.builtins.type_last_idx) {
+    if (object != .null and @backingInt(object) > skript.builtins.type_last_idx) {
         try visitor.visitValue(Value.typeValue(object));
     }
 }
@@ -596,7 +596,7 @@ fn addTestParameter(
 ) !Code.ValueId {
     const binding = try builder.addBinding(function, try runtime.store.getsym(name), .parameter, .{});
     const value = try builder.addValue(function);
-    builder.bindings.items[@intFromEnum(binding)].value = value;
+    builder.bindings.items[@backingInt(binding)].value = value;
     try builder.addParameter(function, binding);
     return value;
 }
@@ -605,7 +605,7 @@ fn materializeTestClosure(runtime: *Runtime, builder: *Code.Builder, function: C
     const code = try builder.finish(runtime.context().scratch);
     code.owner = runtime;
     const program = try runtime.lowerCode(runtime.context().scratch, code);
-    const lowered = program.fns[@intFromEnum(function)];
+    const lowered = program.fns[@backingInt(function)];
     const reference = try runtime.store.create(Closure);
     runtime.store.store(Closure, reference.deref(Closure), .{
         .parent_ns = runtime.root_ns,
@@ -1340,8 +1340,8 @@ fn cloneEscapedValue(ctx: *EvalContext, value: Value, depth: usize) Error!Value 
         b.type_intrinsic,
         b.type_expr,
         => if (value.obj == .null) error.TypeMismatch else value,
-        b.type_type => if (@intFromEnum(value.obj) <= b.type_last_idx) value else error.Unsupported,
-        else => if (@intFromEnum(value.typ) <= b.type_last_idx) value else error.Unsupported,
+        b.type_type => if (@backingInt(value.obj) <= b.type_last_idx) value else error.Unsupported,
+        else => if (@backingInt(value.typ) <= b.type_last_idx) value else error.Unsupported,
     };
 }
 
@@ -1373,7 +1373,7 @@ const Specializer = struct {
 
     fn valueSlot(self: *Specializer, slots: []const Slot, value: Code.ValueId) Error!Slot {
         _ = self;
-        const index = @intFromEnum(value);
+        const index = @backingInt(value);
         if (index >= slots.len) return error.InvalidCode;
         if (slots[index] == .unset) return error.InvalidCode;
         return slots[index];
@@ -1381,7 +1381,7 @@ const Specializer = struct {
 
     fn setValue(self: *Specializer, slots: []Slot, value: Code.ValueId, slot: Slot) Error!void {
         _ = self;
-        const index = @intFromEnum(value);
+        const index = @backingInt(value);
         if (index >= slots.len) return error.InvalidCode;
         slots[index] = slot;
     }
@@ -1426,7 +1426,7 @@ const Specializer = struct {
         parent: *const Closure,
         captures: []const Value,
     ) Error!Value {
-        const index = @intFromEnum(function);
+        const index = @backingInt(function);
         if (parent.code != closure_code or index >= parent.fns.len) return error.InvalidCode;
         const lowered = parent.fns[index];
         if (lowered.code != closure_code or lowered.function != function) return error.InvalidCode;
@@ -1475,10 +1475,10 @@ const Specializer = struct {
     fn tensorOperation(raw: Value) Error!rules.BuiltinJvp {
         if (raw.typ != b.type_i64) return error.TypeMismatch;
         const value = raw.obj.toInt(i64);
-        if (value < 0 or value > @as(i64, @intFromEnum(tensor_ad.Operation.scan))) {
+        if (value < 0 or value > @as(i64, @backingInt(tensor_ad.Operation.scan))) {
             return error.TypeMismatch;
         }
-        return switch (@as(tensor_ad.Operation, @enumFromInt(value))) {
+        return switch (@as(tensor_ad.Operation, @fromBackingInt(@intCast(value)))) {
             .stack => .stack,
             .tensor_get => .tensor_get,
             .reshape => .reshape,
@@ -1589,7 +1589,7 @@ const Specializer = struct {
         var results: [tensor_ad.max_nested_lanes]Value = undefined;
         try tensor_ad.executeNested(
             self.ctx,
-            @enumFromInt(arguments[0].obj.toInt(i64)),
+            @fromBackingInt(@intCast(arguments[0].obj.toInt(i64))),
             order,
             lane_count,
             arguments[4..],
@@ -1703,7 +1703,7 @@ const Specializer = struct {
                 for (inputs, 0..) |*input, index| {
                     if (input.* == .concrete and input.concrete.isNil()) {
                         const realized = try self.emitPrimitive(scalar, &.{
-                            .{ .concrete = .i64(@intFromEnum(rules.ScalarOp.realize_tangent)) },
+                            .{ .concrete = .i64(@backingInt(rules.ScalarOp.realize_tangent)) },
                             slots[2 + index],
                             input.*,
                         }, 1);
@@ -1831,8 +1831,8 @@ const Specializer = struct {
                 const operation = slotConcrete(slots[0]) orelse return error.Unsupported;
                 if (operation.typ != b.type_i64) return error.TypeMismatch;
                 const tag = operation.obj.toInt(i64);
-                const coercion = tag == @intFromEnum(rules.ScalarOp.coerce_tangent) or
-                    tag == @intFromEnum(rules.ScalarOp.realize_tangent);
+                const coercion = tag == @backingInt(rules.ScalarOp.coerce_tangent) or
+                    tag == @backingInt(rules.ScalarOp.realize_tangent);
                 const aggregate = switch (slots[1]) {
                     .concrete => |prototype| tree.numericKind(prototype.typ) == null and
                         prototype.typ != b.type_c16 and prototype.typ != b.type_c32 and
@@ -1973,7 +1973,7 @@ const Specializer = struct {
         } }, .{});
         const output = try self.ctx.scratch.alloc(Slot, result_count);
         for (output, 0..) |*slot, index| {
-            slot.* = .{ .residual = @enumFromInt(@intFromEnum(first) + @as(u32, @intCast(index))) };
+            slot.* = .{ .residual = @fromBackingInt(@intCast(@backingInt(first) + @as(u32, @intCast(index)))) };
         }
         return output;
     }
@@ -2035,14 +2035,14 @@ const Specializer = struct {
                 break :blk &[_]Slot{try self.valueSlot(slots, value)};
             },
             .global_read => |global| blk: {
-                const index = @intFromEnum(global);
+                const index = @backingInt(global);
                 if (index >= globals.len or index >= code.globals.len) return error.InvalidCode;
                 if (globals[index] != .unset) break :blk &[_]Slot{globals[index]};
                 const dependency = try self.runtime.readDependency(closure.parent_ns, code.globals[index].name);
                 break :blk &[_]Slot{.{ .concrete = dependency.value }};
             },
             .global_write => |write| blk: {
-                const index = @intFromEnum(write.cell);
+                const index = @backingInt(write.cell);
                 if (index >= globals.len) return error.InvalidCode;
                 globals[index] = try self.valueSlot(slots, write.value);
                 break :blk null;
@@ -2099,9 +2099,9 @@ const Specializer = struct {
             if (result == .invalid or values.len == 0) return error.InvalidCode;
             for (values, 0..) |value, index| {
                 const offset: u32 = @intCast(index);
-                const target: Code.ValueId = @enumFromInt(
-                    @intFromEnum(result) + offset,
-                );
+                const target: Code.ValueId = @fromBackingInt(@intCast(
+                    @backingInt(result) + offset,
+                ));
                 try self.setValue(slots, target, value);
             }
         } else if (result != .invalid) {
@@ -2215,7 +2215,7 @@ const Specializer = struct {
         const end = std.math.add(usize, start, current.node_count) catch return error.InvalidCode;
         if (end > code.block_nodes.len) return error.InvalidCode;
         for (code.block_nodes[start..end]) |node_id| {
-            const index = @intFromEnum(node_id);
+            const index = @backingInt(node_id);
             if (index >= code.nodes.len) return error.InvalidCode;
             try self.executeNode(code, closure, function, slots, globals, &code.nodes[index]);
         }
@@ -3227,10 +3227,9 @@ fn transposeNestedElementwise(
 
     const cot_lanes = try nestedListLanes(ctx, cotangent, lane_count);
     defer ctx.scratch.free(cot_lanes);
-    var input_offsets: [tensor_ad.max_nested_lanes * 2]usize = .{0} ** (tensor_ad.max_nested_lanes * 2);
-    var input_lengths: [tensor_ad.max_nested_lanes * 2]usize = .{0} ** (tensor_ad.max_nested_lanes * 2);
-    var input_inners: [tensor_ad.max_nested_lanes * 2]tensor_intrin.InnerType =
-        .{.empty} ** (tensor_ad.max_nested_lanes * 2);
+    var input_offsets: [tensor_ad.max_nested_lanes * 2]usize = @splat(0);
+    var input_lengths: [tensor_ad.max_nested_lanes * 2]usize = @splat(0);
+    var input_inners: [tensor_ad.max_nested_lanes * 2]tensor_intrin.InnerType = @splat(.empty);
     var total: usize = 0;
     for (record.inputs, 0..) |input, input_index| {
         if (record.input_prototypes[input_index].isNil()) continue;
@@ -3250,8 +3249,7 @@ fn transposeNestedElementwise(
     }
     const accum_data = try allocTensorBacking(u64, ctx, total);
     @memset(accum_data, 0);
-    var scalar_accum: [tensor_ad.max_nested_lanes * 2]u64 =
-        .{0} ** (tensor_ad.max_nested_lanes * 2);
+    var scalar_accum: [tensor_ad.max_nested_lanes * 2]u64 = @splat(0);
     const output_lanes = try nestedListLanes(ctx, record.output, lane_count);
     defer ctx.scratch.free(output_lanes);
     const output_prototype = try nestedScalarPrototype(output_lanes[0]);
@@ -3528,7 +3526,7 @@ pub fn tensorLinearTranspose(ctx: *EvalContext, _: Value, _: Value, args: []cons
 }
 
 fn sourceBlock(code: *const Code.Code, id: Code.BlockId) ?*const Code.Block {
-    const index = @intFromEnum(id);
+    const index = @backingInt(id);
     if (index >= code.blocks.len) return null;
     return &code.blocks[index];
 }
@@ -3540,7 +3538,7 @@ fn sourceFunctionEntry(code: *const Code.Code, id: Code.FunctionId) ?Code.BlockI
     return code.function_blocks[start];
 }
 fn bindingValue(code: *const Code.Code, function: Code.FunctionId, binding: Code.BindingId) Error!Code.ValueId {
-    const index = @intFromEnum(binding);
+    const index = @backingInt(binding);
     if (index >= code.bindings.len) return error.InvalidCode;
     const definition = code.bindings[index];
     if (definition.function == function) return definition.value;
@@ -3697,7 +3695,7 @@ fn materializeLinear(
     function: Code.FunctionId,
     guard: *const ClosureGuard,
 ) Error!Value {
-    const index = @intFromEnum(function);
+    const index = @backingInt(function);
     if (index >= program.fns.len) return error.InvalidCode;
     const lowered = program.fns[index];
     const arguments = try ctx.runtime.store.allocSlice(Sym, lowered.arglist.len);
@@ -3734,7 +3732,7 @@ fn addTangentParameter(
     const name = std.fmt.bufPrint(&name_buffer, "__linear_tangent_{d}", .{index}) catch return error.Unsupported;
     const binding = try builder.addBinding(function, try runtime.store.getsym(name), .parameter, .{});
     const value = try builder.addValue(function);
-    builder.bindings.items[@intFromEnum(binding)].value = value;
+    builder.bindings.items[@backingInt(binding)].value = value;
     try builder.addParameter(function, binding);
     return value;
 }
@@ -3814,10 +3812,10 @@ pub fn linearize(parent_ctx: *EvalContext, source: Value, primals: []const Value
     builder.id = identity.id;
     builder.revision = identity.revision;
     const module = try builder.addFunction(null, .{});
-    builder.functions.items[@intFromEnum(module)].module_entry = true;
-    builder.functions.items[@intFromEnum(module)].result_count = 1;
+    builder.functions.items[@backingInt(module)].module_entry = true;
+    builder.functions.items[@backingInt(module)].result_count = 1;
     const callable = try builder.addFunction(source_function.name, source_function.source);
-    const callable_info = &builder.functions.items[@intFromEnum(callable)];
+    const callable_info = &builder.functions.items[@backingInt(callable)];
     callable_info.result_count = 1;
     callable_info.ad_level = std.math.add(u16, source_function.ad_level, 1) catch return error.Unsupported;
     callable_info.allows_ad = source_function.allows_ad;
@@ -4175,7 +4173,7 @@ fn rememberValue(ctx: *EvalContext, region: *Region, namespace: Value, value: Va
         return rememberHook(ctx, region, namespace, value, depth + 1);
     }
     const mutable = value.typ == b.type_cons or value.typ == b.type_map or value.typ == b.type_tensor or
-        @intFromEnum(value.typ) > b.type_last_idx;
+        @backingInt(value.typ) > b.type_last_idx;
     if (!mutable) return;
     for (region.space_values.items) |seen| {
         try ctx.chargeWork(1, 1, .transform);

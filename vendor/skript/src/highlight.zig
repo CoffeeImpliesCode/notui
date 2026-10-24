@@ -380,7 +380,7 @@ fn captureForName(name: []const u8) Capture {
 // predicates.
 
 const ClassBitmap = struct {
-    set: [32]u8 = [_]u8{0} ** 32, // 256 bits
+    set: [32]u8 = @splat(0), // 256 bits
 
     fn has(self: *const ClassBitmap, c: u8) bool {
         return (self.set[c >> 3] >> @intCast(c & 7)) & 1 == 1;

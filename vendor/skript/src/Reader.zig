@@ -197,7 +197,7 @@ pub fn readUnit(store: *Store, source: []const u8, options: Options) Error!Parse
         for (reader.node_entries.items) |*node| node.span = null;
     }
     unit.* = .{
-        .id = @enumFromInt(source_id),
+        .id = @fromBackingInt(@intCast(source_id)),
         .retention = options.retention,
         .bytes = if (options.retention == .full) parse_source else null,
         .datum = if (options.retention == .none) Value.nil else datum,
@@ -274,7 +274,7 @@ fn appendNode(
 ) Error!SourceUnit.NodeId {
     try self.chargeNodes(1);
     if (self.node_entries.items.len >= @as(usize, std.math.maxInt(u32))) return error.Unsupported;
-    const node_id: SourceUnit.NodeId = @enumFromInt(@as(u32, @intCast(self.node_entries.items.len)));
+    const node_id: SourceUnit.NodeId = @fromBackingInt(@intCast(@as(u32, @intCast(self.node_entries.items.len))));
     try self.node_entries.append(self.store.sym_alloc, .{
         .parent = parent,
         .span = span,
@@ -290,7 +290,7 @@ fn updateNode(
     datum: Value,
 ) void {
     if (node_id == .none) return;
-    const index: usize = @intCast(@intFromEnum(node_id));
+    const index: usize = @intCast(@backingInt(node_id));
     self.node_entries.items[index].span = span;
     self.node_entries.items[index].datum = datum;
 }
@@ -1451,7 +1451,7 @@ test "equal atom occurrences retain distinct source node identities" {
         count += 1;
         const ref: SourceUnit.Ref = .{
             .unit = parsed.unit,
-            .node = @enumFromInt(@as(u32, @intCast(index))),
+            .node = @fromBackingInt(@intCast(@as(u32, @intCast(index)))),
         };
         try t.expectEqualStrings("x", try SourceUnit.text(ref, 8));
         if (first_atom == null) first_atom = ref.node;
@@ -1471,7 +1471,7 @@ test "source nodes use exclusive spans through quote map and tensor syntax" {
         if (node.span == null) continue;
         const ref: SourceUnit.Ref = .{
             .unit = parsed.unit,
-            .node = @enumFromInt(@as(u32, @intCast(index))),
+            .node = @fromBackingInt(@intCast(@as(u32, @intCast(index)))),
         };
         const text = SourceUnit.text(ref, 64) catch continue;
         if (std.mem.eql(u8, text, "'x")) saw_quote = true;

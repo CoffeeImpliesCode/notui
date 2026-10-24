@@ -173,7 +173,7 @@ const Model = struct {
     replies: std.ArrayList(Reply) = .empty,
 
     st: enum { ground, esc, csi, string } = .ground,
-    params: [8]u16 = [_]u16{0} ** 8,
+    params: [8]u16 = @splat(0),
     seen: usize = 0,
     cur: usize = 0,
     priv: bool = false,
@@ -529,7 +529,7 @@ const Model = struct {
             .esc => switch (b) {
                 '[' => {
                     self.st = .csi;
-                    self.params = [_]u16{0} ** 8;
+                    self.params = @splat(0);
                     self.seen = 0;
                     self.cur = 0;
                     self.priv = false;
@@ -1162,7 +1162,7 @@ test "native model: the 65-column prefix needs 23 rows and the 33-glyph one 33" 
     // differently, which is the difference a width change has to keep.
     var prefix = try Model.init(testing.allocator, 66, 100, 200);
     defer prefix.deinit();
-    try prefix.feed("a" ** 55 ++ glyph ** 5 ++ "\r\nT");
+    try prefix.feed(@as([55]u8, @splat('a')) ++ @as([5 * glyph.len]u8, @bitCast(@as([5][glyph.len]u8, @splat(glyph.*)))) ++ "\r\nT");
     try testing.expectEqual(@as(usize, 65), prefix.painted(0));
     try prefix.resize(3, 100);
     // 18 rows of three ASCII columns, then the last ASCII column sharing
@@ -1174,7 +1174,7 @@ test "native model: the 65-column prefix needs 23 rows and the 33-glyph one 33" 
 
     var wide = try Model.init(testing.allocator, 66, 100, 200);
     defer wide.deinit();
-    try wide.feed(glyph ** 33 ++ "\r\nT");
+    try wide.feed(@as([33 * glyph.len]u8, @bitCast(@as([33][glyph.len]u8, @splat(glyph.*)))) ++ "\r\nT");
     try testing.expectEqual(@as(usize, 66), wide.painted(0));
     try wide.resize(3, 100);
     // Every row holds exactly one glyph: at three columns two of them
@@ -1277,7 +1277,7 @@ test "native model: conforming capped reflow keeps the source tail and later har
     try t.resize(10, 1);
     scratch.clearRetainingCapacity();
     try t.writeGroup(0, &scratch);
-    try testing.expectEqualStrings(glyph ** 3, scratch.items);
+    try testing.expectEqualStrings(&@as([3 * glyph.len]u8, @bitCast(@as([3][glyph.len]u8, @splat(glyph.*)))), scratch.items);
 }
 
 test "native model: the controlled NULL offsets reflow as measured" {
@@ -1703,7 +1703,7 @@ test "native: a coalesced burst is accounted at every observed width" {
     // Only the three youngest glyph chunks fit beside h0/h1/h2/T.
     const alpha = try rig.groupStartOf(glyph);
     try testing.expectEqual(@as(usize, 3), rig.term.groupRows(alpha));
-    try expectGroup(&rig, alpha, glyph ** 3);
+    try expectGroup(&rig, alpha, &@as([3 * glyph.len]u8, @bitCast(@as([3][glyph.len]u8, @splat(glyph.*)))));
     try rig.observe(131, 1);
     try rig.pump();
 
@@ -1715,7 +1715,7 @@ test "native: a coalesced burst is accounted at every observed width" {
     try expectMarkerOnce(&rig, "h0");
     try expectMarkerOnce(&rig, "h1");
     try expectMarkerOnce(&rig, "h2");
-    try expectGroup(&rig, try rig.groupStartOf(glyph), glyph ** 3);
+    try expectGroup(&rig, try rig.groupStartOf(glyph), &@as([3 * glyph.len]u8, @bitCast(@as([3][glyph.len]u8, @splat(glyph.*)))));
 
     try rig.setHeight(1);
     try rig.draw(&.{"T"});

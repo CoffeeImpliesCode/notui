@@ -805,7 +805,7 @@ pub const RegistryOwner = struct {
 };
 
 fn validateRegistration(registration: Registration) Error!void {
-    const type_index = @intFromEnum(registration.primal_type);
+    const type_index = @backingInt(registration.primal_type);
     if (registration.primal_type == .null or type_index <= skript.builtins.type_last_idx) {
         return error.Unsupported;
     }
@@ -2991,12 +2991,12 @@ test "custom tree tensor basis construction honors finite work" {
             .leaves = try tree.Range.init(0, 64),
         },
     };
-    var children = [_]tree.NodeId{ @enumFromInt(1), @enumFromInt(2) };
+    var children = [_]tree.NodeId{ @fromBackingInt(@intCast(1)), @fromBackingInt(@intCast(2)) };
     var dimensions = [_]u32{64};
     var leaves: [64]tree.Leaf = undefined;
     for (&leaves, 0..) |*leaf, index| leaf.* = .{
         .occurrence = @intCast(index),
-        .node = @enumFromInt(2),
+        .node = @fromBackingInt(@intCast(2)),
         .element = @intCast(index),
         .runtime_type = skript.builtins.type_f64,
         .primal = .f64(0.0),
@@ -3005,7 +3005,7 @@ test "custom tree tensor basis construction honors finite work" {
         .allocator = std.testing.allocator,
         .registry = runtime.tree_registry.current(),
         .limits = tree.Limits.gradient,
-        .root = @enumFromInt(0),
+        .root = @fromBackingInt(@intCast(0)),
         .nodes = &nodes,
         .child_nodes = &children,
         .map_keys = &.{},

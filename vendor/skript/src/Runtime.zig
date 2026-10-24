@@ -613,7 +613,7 @@ pub fn lowerCode(self: *Runtime, scratch: Allocator, code: *const Code.Code) Err
                     .closure => |closure| closure,
                 };
                 const index = if (rt.intrinsics.indexForPrimitiveId(primitive)) |intrinsic|
-                    @intFromEnum(intrinsic)
+                    @backingInt(intrinsic)
                 else
                     std.math.maxInt(u16);
                 return .{ .value = value, .index = if (index == std.math.maxInt(u16)) null else index };
@@ -652,7 +652,7 @@ pub const inspectBoundCode = SourceInspection.inspectBoundCode;
 
 /// this uses the predefined_types array. For user-defined types, it derefs the heap Ref.
 pub inline fn typePtrFromObj(self: *Runtime, obj: Object) *const skript.data.Type {
-    const idx = @intFromEnum(obj);
+    const idx = @backingInt(obj);
     return if (idx <= b.type_last_idx)
         self.predefined_types.items[@as(usize, @intCast(idx))]
     else
@@ -706,11 +706,14 @@ pub fn evalReg(self: *Runtime, start_ns: Value, fib: *Fiber, budget: u32) Error!
     const previous_fiber = active_fiber;
     active_fiber = .{ .runtime = self, .fiber = fib };
     defer active_fiber = previous_fiber;
-    errdefer |failure| {
-        // A blocking result is resumable and must retain its lease. Every
-        // other error terminates this fiber and retires its active leases.
+    return self.evalRegChecked(ctx, start_ns, fib, budget) catch |failure| {
+        // A blocking result is resumable and must retain its lease.
         if (failure != error.WouldBlock) self.releaseFiberGuards(fib);
-    }
+        return failure;
+    };
+}
+
+fn evalRegChecked(self: *Runtime, ctx: *EvalContext, start_ns: Value, fib: *Fiber, budget: u32) Error!EvalStatus {
     try ctx.check();
     try checkVmDepth(ctx, fib, 0);
     var budget_left = budget;
@@ -806,7 +809,7 @@ fn validateInstructionPointer(fib: *const Fiber, inst: regvm.Inst) Error!void {
 }
 
 fn hasVerifiedProgram(fib: *const Fiber) bool {
-    const index = if (fib.current_closure) |closure| @intFromEnum(closure.function_id) else 0;
+    const index = if (fib.current_closure) |closure| @backingInt(closure.function_id) else 0;
     if (index >= fib.fns.len) return false;
     const entry = &fib.fns[index];
     return entry.verified and entry.ir.ptr == fib.ir.ptr and entry.ir.len == fib.ir.len and entry.nregs == fib.nregs;
@@ -1279,10 +1282,10 @@ fn canKeepRegvmBudgetLock(
             .jmp,     .br,      .brn,     .guard_callee, .guard_self, .get_self, .ns_pop,
             .end_try, .add_i64, .sub_i64, .mul_i64,      .eq_i64,     .lt_i64,   .gt_i64,
             .add_f64, .sub_f64, .mul_f64, .eq_f64,       .lt_f64,     .gt_f64,
-        }) |op| entries[@intFromEnum(op)] = true;
+        }) |op| entries[@backingInt(op)] = true;
         break :blk entries;
     };
-    if (always_safe[@intFromEnum(inst.opcode)]) return true;
+    if (always_safe[@backingInt(inst.opcode)]) return true;
     if (inst.opcode == .lookup or inst.opcode == .lookup_val) {
         if (ctx.reentry != null or fib.ns.typ != b.type_namespace) return false;
         const destination, const sidx = regvm.Formats.rdAndSidx(inst.payload);
@@ -1469,13 +1472,13 @@ fn evalRegDispatchMode(
             },
             .make_closure => {
                 const rd, const site_index = regvm.Formats.rdAndSidx(inst.payload);
-                const caller_index = if (fib.current_closure) |closure| @intFromEnum(closure.function_id) else 0;
+                const caller_index = if (fib.current_closure) |closure| @backingInt(closure.function_id) else 0;
                 if (caller_index >= fib.fns.len) return error.InvalidCode;
                 const caller = fib.fns[caller_index];
                 if (site_index >= caller.closure_sites.len) return error.InvalidCode;
                 const site = caller.closure_sites[site_index];
                 const captures = site.captures(caller.capture_regs) orelse return error.InvalidCode;
-                const target_index = @intFromEnum(site.function);
+                const target_index = @backingInt(site.function);
                 if (target_index >= fib.fns.len) return error.InvalidCode;
                 const ft = fib.fns[target_index];
                 if (captures.len != ft.capture_syms.len) return error.InvalidCode;
@@ -2032,9 +2035,13 @@ fn evalRegDispatchMode(
 /// Run a fiber to completion. Only the host uses this (REPL, eval tests):
 /// process fibers go through the scheduler, which handles suspensions.
 pub fn runToCompletion(self: *Runtime, start_ns: Value, fib: *Fiber) Error!Value {
-    errdefer |err| {
+    return self.runToCompletionInner(start_ns, fib) catch |err| {
         if (err != error.WouldBlock) self.releaseFiberGuards(fib);
-    }
+        return err;
+    };
+}
+
+fn runToCompletionInner(self: *Runtime, start_ns: Value, fib: *Fiber) Error!Value {
     while (true) switch (try self.evalReg(start_ns, fib, std.math.maxInt(u32))) {
         .done => return fib.getReg(0),
         .yielded => continue,
@@ -2500,7 +2507,7 @@ fn arithFamily(op: regvm.Opcode) ?ArithFamily {
 /// Integer-family tag test: the builtin tags are laid out with the family
 /// base in bits 2+ and the size in the low 2 bits.
 fn isIntTag(t: Object) bool {
-    const tag = @intFromEnum(t);
+    const tag = @backingInt(t);
     return (tag & skript.builtins.type_int_mask) == skript.builtins.type_int or
         (tag & skript.builtins.type_uint_mask) == skript.builtins.type_uint;
 }
@@ -3705,10 +3712,10 @@ fn applyActive(self: *Runtime, ns: Value, func: Value, args: []const Value) Erro
     }
     log.debug(
         "Applying value type={} to {} arguments",
-        .{ @intFromEnum(func.typ), args.len },
+        .{ @backingInt(func.typ), args.len },
     );
     var res: Value = .nil;
-    defer log.debug("Apply returned value type={}", .{@intFromEnum(res.typ)});
+    defer log.debug("Apply returned value type={}", .{@backingInt(res.typ)});
     switch (func.typ) {
         b.type_closure => {
             const cl_ptr = func.obj.toRef().deref(Closure);
@@ -4271,12 +4278,12 @@ test "one function can close over different values at different sites" {
     builder.id = identity.id;
     builder.revision = identity.revision;
     const main_function = try builder.addFunction(null, .{});
-    builder.functions.items[@intFromEnum(main_function)].module_entry = true;
+    builder.functions.items[@backingInt(main_function)].module_entry = true;
     const main_block = try builder.addBlock(main_function);
     const two = try builder.addNode(main_function, main_block, .{ .literal = Value.i64(2) }, .{});
     const five = try builder.addNode(main_function, main_block, .{ .literal = Value.i64(5) }, .{});
     const binding = try builder.addBinding(main_function, try rt.store.getsym("captured"), .let, .{});
-    builder.bindings.items[@intFromEnum(binding)].value = two;
+    builder.bindings.items[@backingInt(binding)].value = two;
     const child = try builder.addFunction(null, .{});
     const child_block = try builder.addBlock(child);
     const capture = try builder.addCapture(child, binding);
@@ -4323,16 +4330,16 @@ test "bound multi-result tail calls preserve every returned value" {
     builder.id = identity.id;
     builder.revision = identity.revision;
     const main_function = try builder.addFunction(null, .{});
-    builder.functions.items[@intFromEnum(main_function)].module_entry = true;
+    builder.functions.items[@backingInt(main_function)].module_entry = true;
     const main_block = try builder.addBlock(main_function);
     const pair_function = try builder.addFunction(null, .{});
-    builder.functions.items[@intFromEnum(pair_function)].result_count = 2;
+    builder.functions.items[@backingInt(pair_function)].result_count = 2;
     const pair_block = try builder.addBlock(pair_function);
     const two = try builder.addNode(pair_function, pair_block, .{ .literal = Value.i64(2) }, .{});
     const five = try builder.addNode(pair_function, pair_block, .{ .literal = Value.i64(5) }, .{});
     try builder.setTerminator(pair_block, .{ .return_values = try builder.addOperands(&.{ two, five }) });
     const wrapper = try builder.addFunction(null, .{});
-    builder.functions.items[@intFromEnum(wrapper)].result_count = 2;
+    builder.functions.items[@backingInt(wrapper)].result_count = 2;
     const wrapper_block = try builder.addBlock(wrapper);
     const pair = try builder.addNode(wrapper, wrapper_block, .{ .make_closure = .{ .function = pair_function } }, .{});
     try builder.setTerminator(wrapper_block, .{ .tail_call = .{ .callee = pair, .result_count = 2 } });
@@ -4341,7 +4348,7 @@ test "bound multi-result tail calls preserve every returned value" {
         .callee = callee,
         .result_count = 2,
     } }, .{});
-    const second: Code.ValueId = @enumFromInt(@intFromEnum(first) + 1);
+    const second: Code.ValueId = @fromBackingInt(@intCast(@backingInt(first) + 1));
     const sum = try builder.addNode(main_function, main_block, .{ .arithmetic = .{
         .op = .add,
         .left = first,
@@ -4365,7 +4372,7 @@ test "bound multi-result tail calls preserve every returned value" {
     };
     const result = try rt.runToCompletion(rt.root_ns, &fiber);
     try std.testing.expectEqual(Value.i64(7), try result.unwrapError());
-    const lowered = program.fns[@intFromEnum(pair_function)];
+    const lowered = program.fns[@backingInt(pair_function)];
     const reference = try rt.store.create(Closure);
     reference.deref(Closure).* = .{
         .parent_ns = rt.root_ns,
@@ -8155,7 +8162,7 @@ test "bound loops preserve invariant callees across backedges" {
     builder.id = identity.id;
     builder.revision = identity.revision;
     const main_function = try builder.addFunction(null, .{});
-    builder.functions.items[@intFromEnum(main_function)].module_entry = true;
+    builder.functions.items[@backingInt(main_function)].module_entry = true;
     const entry = try builder.addBlock(main_function);
     const loop = try builder.addBlock(main_function);
     const body = try builder.addBlock(main_function);

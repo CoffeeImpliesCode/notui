@@ -780,7 +780,7 @@ fn pushLine(region: *Region, text: []const u8) !void {
 /// formatter, with a hanging indent for multi-line (tensor) answers
 /// aligned under the " ⇒ " prefix by display width.
 fn formatAnswer(aa: std.mem.Allocator, rt: *skript.Runtime, res: skript.Value) []const u8 {
-    const tag_val: u64 = @intFromEnum(res.typ);
+    const tag_val: u64 = @backingInt(res.typ);
     const typ_ptr: *const skript.Type = if (tag_val <= skript.builtins.type_last_idx)
         rt.predefined_types.items[@as(usize, @intCast(tag_val))]
     else
@@ -1608,7 +1608,7 @@ test "repl band: a line wider than the band scrolls to keep the cursor visible" 
     defer region.deinit();
     try region.resize(30, 24, 2);
 
-    const line = "(list \"" ++ "abcdef" ** 10 ++ "END\")";
+    const line = "(list \"" ++ @as([60]u8, @bitCast(@as([10][6]u8, @splat("abcdef".*)))) ++ "END\")";
     try drawTestBand(arena.allocator(), &region, line, line.len);
     var row: [512]u8 = undefined;
     const shown = bandRow(&region.cur, 0, &row);
@@ -2035,7 +2035,7 @@ test "repl band: a six-row terminal windows the popup and keeps the status row" 
     try std.testing.expectEqualStrings("skript> (f x) b", bandRow(&region.cur, 0, &row));
     // Four popup rows fit between the input and the status row, and the
     // window scrolls so the selected candidate is the last one shown.
-    const anchor = " " ** "skript> (f x) ".len;
+    const anchor = @as(["skript> (f x) ".len]u8, @splat(' '));
     try std.testing.expectEqualStrings(anchor ++ "ggg", bandRow(&region.cur, 1, &row));
     try std.testing.expectEqualStrings(anchor ++ "hhh", bandRow(&region.cur, 2, &row));
     try std.testing.expectEqualStrings(anchor ++ "iii", bandRow(&region.cur, 3, &row));

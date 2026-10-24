@@ -138,7 +138,7 @@ fn addParameter(ctx: *EvalContext, builder: *Code.Builder, function: Code.Functi
     const name = std.fmt.bufPrint(&text, "linear_arg_{d}", .{index}) catch return error.Unsupported;
     const binding = try builder.addBinding(function, try ctx.runtime.store.getsym(name), .parameter, .{});
     const value = try builder.addValue(function);
-    builder.bindings.items[@intFromEnum(binding)].value = value;
+    builder.bindings.items[@backingInt(binding)].value = value;
     try builder.addParameter(function, binding);
     return value;
 }
@@ -153,7 +153,7 @@ fn finishCallable(
     const code = try builder.finish(ctx.scratch);
     code.owner = ctx.runtime;
     const program = try ctx.runtime.lowerCode(ctx.scratch, code);
-    const lowered = program.fns[@intFromEnum(function)];
+    const lowered = program.fns[@backingInt(function)];
     const reference = try ctx.runtime.store.create(Closure);
     ctx.runtime.store.store(Closure, reference.deref(Closure), .{
         .parent_ns = source.parent_ns,
@@ -191,10 +191,10 @@ fn wrapHandle(ctx: *EvalContext, handle: *const Handle) Error!Value {
     builder.id = identity.id;
     builder.revision = identity.revision;
     const function = try builder.addFunction(null, source.source_ref);
-    builder.functions.items[@intFromEnum(function)].has_rest = false;
-    builder.functions.items[@intFromEnum(function)].ad_level = metadata.ad_level;
-    builder.functions.items[@intFromEnum(function)].allows_ad = metadata.allows_ad;
-    builder.functions.items[@intFromEnum(function)].origin = .{ .code = code, .function = source.function_id };
+    builder.functions.items[@backingInt(function)].has_rest = false;
+    builder.functions.items[@backingInt(function)].ad_level = metadata.ad_level;
+    builder.functions.items[@backingInt(function)].allows_ad = metadata.allows_ad;
+    builder.functions.items[@backingInt(function)].origin = .{ .code = code, .function = source.function_id };
     const block = try builder.addBlock(function);
     const seed = try addParameter(ctx, &builder, function, 0);
     var arguments: [max_arguments]Code.ValueId = undefined;
@@ -215,7 +215,7 @@ fn wrapHandle(ctx: *EvalContext, handle: *const Handle) Error!Value {
     } }, .{});
     var outputs: [max_arguments]Code.ValueId = undefined;
     for (outputs[0..handle.outputs.len], 0..) |*output, index| {
-        output.* = @enumFromInt(@intFromEnum(first) + @as(u32, @intCast(index)));
+        output.* = @fromBackingInt(@intCast(@backingInt(first) + @as(u32, @intCast(index))));
     }
     const result = if (handle.outputs.len == 1)
         first
@@ -413,12 +413,12 @@ fn directional(ctx: *EvalContext, source: Value, seeds: []const Value) Error!Val
     builder.id = identity.id;
     builder.revision = identity.revision;
     const function = try builder.addFunction(null, closure.source_ref);
-    builder.functions.items[@intFromEnum(function)].has_rest = false;
+    builder.functions.items[@backingInt(function)].has_rest = false;
     const code = closure.code orelse return error.InvalidCode;
     const metadata = code.function(closure.function_id) orelse return error.InvalidCode;
-    builder.functions.items[@intFromEnum(function)].ad_level = metadata.ad_level;
-    builder.functions.items[@intFromEnum(function)].allows_ad = metadata.allows_ad;
-    builder.functions.items[@intFromEnum(function)].origin = .{
+    builder.functions.items[@backingInt(function)].ad_level = metadata.ad_level;
+    builder.functions.items[@backingInt(function)].allows_ad = metadata.allows_ad;
+    builder.functions.items[@backingInt(function)].origin = .{
         .code = code,
         .function = closure.function_id,
     };
@@ -434,7 +434,7 @@ fn directional(ctx: *EvalContext, source: Value, seeds: []const Value) Error!Val
         .args = try builder.addOperands(arguments[0 .. seeds.len * 2]),
         .result_count = 2,
     } }, .{});
-    const tangent: Code.ValueId = @enumFromInt(@intFromEnum(result) + 1);
+    const tangent: Code.ValueId = @fromBackingInt(@intCast(@backingInt(result) + 1));
     try builder.setTerminator(block, .{ .return_values = try builder.addOperands(&.{tangent}) });
     const guard = try ctx.runtime.static.create(ClosureGuard);
     const source_guard = closure.guard orelse return error.InvalidCode;

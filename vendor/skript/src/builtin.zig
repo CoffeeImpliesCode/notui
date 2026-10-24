@@ -13,7 +13,7 @@ pub const Width = enum(u2) {
 
 /// Encode a builtin type index as an Object. The Object value for type N is N.
 fn typeTag(idx: u64) Object {
-    return @enumFromInt(idx);
+    return @fromBackingInt(@intCast(idx));
 }
 
 pub const type_start: u64 = 0;

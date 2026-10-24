@@ -978,7 +978,7 @@ pub fn trans(ctx: *EvalContext, _: Value, _: Value, args: []const Value) Error!V
         try intrin.typeAssert(args[1], skript.builtins.type_tensor);
         const p = args[1].obj.toRef().deref(TensorHolder).*;
         if (p.rank != 1 or p.inner != .i64 or p.shape[0] != h.rank) return error.TypeMismatch;
-        var seen: [max_rank]bool = .{false} ** max_rank;
+        var seen: [max_rank]bool = @splat(false);
         for (p.data, 0..) |word, output_axis| {
             const old_axis: i64 = @bitCast(word);
             const rank_i64 = std.math.cast(i64, rank) orelse return error.Unsupported;
@@ -1526,10 +1526,10 @@ pub fn map2(ctx: *EvalContext, ns: Value, _: Value, args: []const Value) Error!V
 
 /// Precomputed trailing-axis strides for one broadcast map2 operation.
 pub const Map2Layout = struct {
-    shape: [max_rank]u32 = .{0} ** max_rank,
-    output_strides: [max_rank]usize = .{0} ** max_rank,
-    left_strides: [max_rank]usize = .{0} ** max_rank,
-    right_strides: [max_rank]usize = .{0} ** max_rank,
+    shape: [max_rank]u32 = @splat(0),
+    output_strides: [max_rank]usize = @splat(0),
+    left_strides: [max_rank]usize = @splat(0),
+    right_strides: [max_rank]usize = @splat(0),
     rank: usize,
     output_len: usize,
     exact_shape: bool,
@@ -1756,7 +1756,7 @@ test "tensor reshape reuses data column-wise" {
     // flat[c*2 + r] → rows [0 2] [1 3]. Box: content width 3 → ╭ + 5
     // blanks, ╯ at 6.
     try expectEqualStrings(
-        "╭─" ++ (" " ** 5) ++ "\n╷ 0 2" ++ (" " ** 2) ++ "\n  1 3" ++ (" " ** 2) ++ "\n" ++ (" " ** 6) ++ "╯",
+        "╭─     \n╷ 0 2  \n  1 3  \n      ╯",
         formatPretty(runtime, v),
     );
     // Element count mismatch.
@@ -1772,16 +1772,14 @@ test "tensor pretty printer: Uiua box layout" {
     // Rank-1: VERTICAL COLUMN, one element per line (capped at 16 + "…").
     // Content width 1 → ╭ + 3 blanks, ╯ at 4.
     try expectEqualStrings(
-        "╭─" ++ (" " ** 3) ++ "\n╷ 0" ++ (" " ** 2) ++
-            "\n  1" ++ (" " ** 2) ++ "\n  2" ++ (" " ** 2) ++ "\n" ++ (" " ** 4) ++ "╯",
+        "╭─   \n╷ 0  \n  1  \n  2  \n    ╯",
         formatPretty(runtime, try runtime.evalString("(iota 3)")),
     );
 
     // Rank-2: TRANSPOSED aligned matrix; numerics right-aligned per column
     // (rows = shape[1]: 100/2 in col 0, 3/4000 in col 1).
     try expectEqualStrings(
-        "╭─" ++ (" " ** 10) ++ "\n╷ " ++ "100" ++ (" " ** 4) ++ "3" ++ (" " ** 2) ++ "\n  " ++
-            (" " ** 2) ++ "2" ++ " " ++ "4000" ++ (" " ** 2) ++ "\n" ++ (" " ** 11) ++ "╯",
+        "╭─          \n╷ 100    3  \n    2 4000  \n           ╯",
         formatPretty(runtime, try runtime.evalString("(stack (stack 100 2) (stack 3 4000))")),
     );
 
@@ -1792,8 +1790,7 @@ test "tensor pretty printer: Uiua box layout" {
         "(stack (stack (stack 1 2) (stack 3 4)) (stack (stack 5 6) (stack 7 8)))",
     );
     try expectEqualStrings(
-        "╭─" ++ (" " ** 5) ++ "\n╷ 1 3" ++ (" " ** 2) ++ "\n  2 4" ++ (" " ** 2) ++ "\n  ---" ++
-            (" " ** 2) ++ "\n  5 7" ++ (" " ** 2) ++ "\n  6 8" ++ (" " ** 2) ++ "\n" ++ (" " ** 6) ++ "╯",
+        "╭─     \n╷ 1 3  \n  2 4  \n  ---  \n  5 7  \n  6 8  \n      ╯",
         formatPretty(runtime, v3),
     );
 
@@ -1805,10 +1802,7 @@ test "tensor pretty printer: Uiua box layout" {
     // BL=[[4 6] [5 7]], BR=[[12 14] [13 15]].
     const v4 = try runtime.evalString("(reshape (iota 16) (stack 2 2 2 2))");
     try expectEqualStrings(
-        "╭─" ++ (" " ** 13) ++ "\n╷ 0  2|8 10" ++ (" " ** 4) ++
-            "\n  1  3|9 11" ++ (" " ** 4) ++ "\n  ---------" ++ (" " ** 4) ++
-            "\n   4  6|12 14" ++ (" " ** 2) ++ "\n   5  7|13 15" ++
-            (" " ** 2) ++ "\n" ++ (" " ** 14) ++ "╯",
+        "╭─             \n╷ 0  2|8 10    \n  1  3|9 11    \n  ---------    \n   4  6|12 14  \n   5  7|13 15  \n              ╯",
         formatPretty(runtime, v4),
     );
 

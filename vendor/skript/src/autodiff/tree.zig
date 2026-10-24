@@ -55,11 +55,11 @@ pub const NodeId = enum(u32) {
 
     pub fn fromIndex(position: usize) Error!NodeId {
         if (position >= std.math.maxInt(u32)) return error.Unsupported;
-        return @enumFromInt(@as(u32, @intCast(position)));
+        return @fromBackingInt(@intCast(@as(u32, @intCast(position))));
     }
 
     pub fn index(self: NodeId) usize {
-        return @intCast(@intFromEnum(self));
+        return @intCast(@backingInt(self));
     }
 };
 
@@ -448,7 +448,7 @@ fn isCallable(value: Value) bool {
 }
 
 fn validateRegistration(registration: Registration) RegistryError!void {
-    const type_index = @intFromEnum(registration.runtime_type);
+    const type_index = @backingInt(registration.runtime_type);
     if (registration.runtime_type == .null or type_index <= skript.builtins.type_last_idx) {
         return error.InvalidRuntimeType;
     }
@@ -885,7 +885,7 @@ const Builder = struct {
 };
 
 fn mapKeyLessThan(_: void, left: Value, right: Value) bool {
-    if (left.typ != right.typ) return @intFromEnum(left.typ) < @intFromEnum(right.typ);
+    if (left.typ != right.typ) return @backingInt(left.typ) < @backingInt(right.typ);
     const b = skript.builtins;
     if (left.typ == b.type_symbol or left.typ == b.type_keyword) {
         return std.mem.order(u8, left.obj.toPtr(Sym).*, right.obj.toPtr(Sym).*) == .lt;
@@ -904,7 +904,7 @@ fn mapKeyLessThan(_: void, left: Value, right: Value) bool {
             right.byteVectorBytes() catch unreachable,
         ) == .lt;
     }
-    return @intFromEnum(left.obj) < @intFromEnum(right.obj);
+    return @backingInt(left.obj) < @backingInt(right.obj);
 }
 
 fn sameMapKey(left: Value, right: Value) bool {

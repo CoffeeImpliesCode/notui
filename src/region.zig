@@ -4219,9 +4219,9 @@ const Term = struct {
     /// frame may push into it. A scroll keeps the row it displaced, so
     /// committed history that leaves the screen is still nameable.
     const cap = rows * 2;
-    const blank: [cols]u8 = [_]u8{' '} ** cols;
+    const blank: [cols]u8 = @splat(' ');
 
-    grid: [cap][cols]u8 = [_][cols]u8{blank} ** cap,
+    grid: [cap][cols]u8 = @splat(blank),
 
     /// Rows the screen shows, `rows` until `resizeRows` says otherwise.
     visible: usize = rows,

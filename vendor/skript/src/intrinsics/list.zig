@@ -701,7 +701,7 @@ test "apply expands long lists into one owned argument array without an argument
     var runtime = try newRt();
     defer runtime.deinit();
     const ctx = runtime.context();
-    const elements = [_]Value{Value.i64(7)} ** 300;
+    const elements: [300]Value = @splat(Value.i64(7));
     const spread = try list(ctx, .nil, .nil, &elements);
     var inline_storage: [2]Value = undefined;
     var expanded = try expandApplyArguments(ctx, &.{ Value.intrinsic(&list), spread }, &inline_storage);

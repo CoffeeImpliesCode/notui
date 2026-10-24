@@ -42,10 +42,10 @@ pub const MapKey = struct {
 
         pub fn eql(_: Context, a: MapKey, b: MapKey) bool {
             if (a.typ != b.typ) return false;
-            if (a.typ == @as(u8, @intCast(@intFromEnum(skript.builtins.type_string)))) {
+            if (a.typ == @as(u8, @intCast(@backingInt(skript.builtins.type_string)))) {
                 return stringKeyEql(a.obj, b.obj);
             }
-            if (a.typ == @as(u8, @intCast(@intFromEnum(skript.builtins.type_bytevector)))) {
+            if (a.typ == @as(u8, @intCast(@backingInt(skript.builtins.type_bytevector)))) {
                 return byteVectorKeyEql(a.obj, b.obj);
             }
             return a.obj == b.obj;
@@ -79,7 +79,7 @@ pub fn traceMapHolder(
         const key = entry.key_ptr.*;
         try visitor.visit(key.owned_ref);
         try visitor.visit(key.owned_data_ref);
-        try visitor.visitValue(Value.init(@enumFromInt(key.typ), key.obj));
+        try visitor.visitValue(Value.init(@fromBackingInt(@intCast(key.typ)), key.obj));
         try visitor.visitValue(entry.value_ptr.*);
     }
 }
@@ -92,8 +92,8 @@ pub fn finalizeMapHolder(data: *anyopaque, extent: usize) void {
 }
 
 fn hasContentHash(typ: u8) bool {
-    return typ == @as(u8, @intCast(@intFromEnum(skript.builtins.type_string))) or
-        typ == @as(u8, @intCast(@intFromEnum(skript.builtins.type_bytevector)));
+    return typ == @as(u8, @intCast(@backingInt(skript.builtins.type_string))) or
+        typ == @as(u8, @intCast(@backingInt(skript.builtins.type_bytevector)));
 }
 
 fn stringKeyEql(a: Object, b: Object) bool {
@@ -263,7 +263,7 @@ pub const Method = struct {
         var buf: [256]u8 = undefined;
         var len: usize = 0;
         for (args, 0..) |a, i| {
-            const tag: u64 = @intFromEnum(a.typ);
+            const tag: u64 = @backingInt(a.typ);
             const name = if (tag <= skript.builtins.type_last_idx)
                 rt.predefined_types.items[@as(usize, @intCast(tag))].name.toPtr(Sym).*
             else
@@ -742,7 +742,7 @@ test "Method.get reports a long missing signature without writing past its diagn
     const runtime = try Runtime.init(std.testing.allocator, std.testing.io);
     defer runtime.deinit();
     var method: Method = .{ .resolved = .init(runtime.static) };
-    const args = [_]Value{.i64(7)} ** 300;
+    const args: [300]Value = @splat(.i64(7));
     try std.testing.expectError(error.ArityMismatch, method.get(runtime, &args));
 }
 

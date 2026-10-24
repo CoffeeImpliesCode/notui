@@ -746,7 +746,7 @@ fn executeStructuredExpr(
         const id = try Expr.NodeId.fromIndex(index);
         const node = try snapshot.node(id);
         summary.structure_ok = summary.structure_ok and node.id == id;
-        summary.node_id_sum += @as(u64, @intFromEnum(node.id));
+        summary.node_id_sum += @as(u64, @backingInt(node.id));
         summary.edge_count += @intCast((try snapshot.operands(node)).len);
         switch (node.kind) {
             .scalar => |scalar| {

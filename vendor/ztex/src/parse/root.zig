@@ -196,7 +196,7 @@ test "parse: bold style command" {
     defer ast.deinit();
     const st = ast.node(ast.child(ast.root, 0));
     try testing.expectEqual(.styled, st.tag);
-    try testing.expectEqual(@as(u32, @intFromEnum(atom.CharStyle.bold)), st.data);
+    try testing.expectEqual(@as(u32, @backingInt(atom.CharStyle.bold)), st.data);
 }
 
 test "parse: thin space command" {

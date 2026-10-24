@@ -815,12 +815,12 @@ pub const Intrinsics = struct {
     }
 
     pub fn primitiveId(self: *const Intrinsics, intrinsic: Intrinsic) Primitive.PrimitiveId {
-        return self.ids[@intFromEnum(intrinsic)];
+        return self.ids[@backingInt(intrinsic)];
     }
 
     pub fn indexForPrimitiveId(self: *const Intrinsics, id: Primitive.PrimitiveId) ?Intrinsic {
         for (self.ids, 0..) |candidate, index| {
-            if (candidate == id) return @enumFromInt(index);
+            if (candidate == id) return @fromBackingInt(@intCast(index));
         }
         return null;
     }

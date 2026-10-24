@@ -244,7 +244,7 @@ const Binder = struct {
             };
         }
         const global = try self.cellForName(function, symbol, form.origin);
-        const global_info = self.builder.globals.items[@intFromEnum(global)];
+        const global_info = self.builder.globals.items[@backingInt(global)];
         return .{
             .value = try self.emit(function, .{ .global_read = global }, form.origin),
             .types = if (global_info.binding == .invalid)
@@ -705,7 +705,7 @@ const Binder = struct {
             for (specs, 0..) |spec, index| {
                 const binding = try self.builder.addBinding(function.id, spec.name, .let, spec.source);
                 local_bindings[index] = binding;
-                self.builder.bindings.items[@intFromEnum(binding)].value = uninitialized.value;
+                self.builder.bindings.items[@backingInt(binding)].value = uninitialized.value;
                 cells[index] = try self.builder.addLocalCell(binding, spec.source);
                 try function.locals.append(self.scratch, .{
                     .name = spec.name,
@@ -729,7 +729,7 @@ const Binder = struct {
             for (specs, local_bindings, cells) |spec, binding, cell| {
                 const value = try self.compile(function, spec.initializer, false);
                 if (value.terminated) return value;
-                self.builder.bindings.items[@intFromEnum(binding)].value = value.value;
+                self.builder.bindings.items[@backingInt(binding)].value = value.value;
                 _ = try self.emit(function, .{ .global_write = .{
                     .cell = cell,
                     .value = value.value,
@@ -740,7 +740,7 @@ const Binder = struct {
                 const value = try self.compile(function, spec.initializer, false);
                 if (value.terminated) return value;
                 const binding = try self.builder.addBinding(function.id, spec.name, .let, spec.source);
-                self.builder.bindings.items[@intFromEnum(binding)].value = value.value;
+                self.builder.bindings.items[@backingInt(binding)].value = value.value;
                 try self.noteLexicalRead(binding);
                 const cell = try self.builder.addLocalCell(binding, spec.source);
                 _ = try self.emit(function, .{ .global_write = .{
@@ -798,22 +798,22 @@ const Binder = struct {
         if (value.terminated) return value;
 
         if (try self.factBinding(function, name)) |binding| {
-            const binding_index = @intFromEnum(binding);
+            const binding_index = @backingInt(binding);
             if (binding_index >= self.builder.bindings.items.len) return error.InvalidCode;
             const definition = &self.builder.bindings.items[binding_index];
             definition.mutable = true;
-            const owner_index = @intFromEnum(definition.function);
+            const owner_index = @backingInt(definition.function);
             if (owner_index >= self.builder.functions.items.len) return error.InvalidCode;
             self.builder.functions.items[owner_index].allows_ad = false;
             invalidateBinding(function, binding);
         }
-        const function_index = @intFromEnum(function.id);
+        const function_index = @backingInt(function.id);
         if (function_index >= self.builder.functions.items.len) return error.InvalidCode;
         self.builder.functions.items[function_index].allows_ad = false;
 
         // The cell this write lands on is the authoritative statement that the
         // name can change, whatever the fact table happens to resolve to.
-        const cell_binding = self.builder.globals.items[@intFromEnum(cell)].binding;
+        const cell_binding = self.builder.globals.items[@backingInt(cell)].binding;
         if (cell_binding != .invalid) self.demoteBinding(cell_binding);
 
         _ = try self.emit(function, .{ .global_write = .{
@@ -861,7 +861,7 @@ const Binder = struct {
         }
 
         if (has_mutating_step) {
-            const function_index = @intFromEnum(function.id);
+            const function_index = @backingInt(function.id);
             if (function_index >= self.builder.functions.items.len) return error.InvalidCode;
             self.builder.functions.items[function_index].allows_ad = false;
         }
@@ -885,8 +885,8 @@ const Binder = struct {
             const initial = try self.compile(function, spec.initializer, false);
             if (initial.terminated) return initial;
             const binding = try self.builder.addBinding(function.id, spec.name, .let, spec.source);
-            self.builder.bindings.items[@intFromEnum(binding)].mutable = true;
-            self.builder.bindings.items[@intFromEnum(binding)].value = initial.value;
+            self.builder.bindings.items[@backingInt(binding)].mutable = true;
+            self.builder.bindings.items[@backingInt(binding)].value = initial.value;
             const cell = try self.builder.addLocalCell(binding, spec.source);
             _ = try self.emit(function, .{ .global_write = .{
                 .cell = cell,
@@ -1032,7 +1032,7 @@ const Binder = struct {
                     .definition,
                     self.keepRef(origin.source),
                 );
-                self.builder.bindings.items[@intFromEnum(created)].value = value;
+                self.builder.bindings.items[@backingInt(created)].value = value;
                 try function.locals.append(self.scratch, .{
                     .name = name,
                     .binding = created,
@@ -1046,7 +1046,7 @@ const Binder = struct {
             cell = try self.builder.addLocalCell(binding_id, self.keepRef(origin.source));
         }
         const target = cell orelse try self.cellForName(function, name, origin);
-        const target_info = self.builder.globals.items[@intFromEnum(target)];
+        const target_info = self.builder.globals.items[@backingInt(target)];
         if (target_info.binding != .invalid) {
             invalidateBinding(function, target_info.binding);
             // A def landing on a let/definition cell rebinds the name, so any
@@ -1067,7 +1067,7 @@ const Binder = struct {
                 index -= 1;
                 const local = current.locals.items[index];
                 if (!sameSym(local.name, name)) continue;
-                const kind = self.builder.bindings.items[@intFromEnum(local.binding)].kind;
+                const kind = self.builder.bindings.items[@backingInt(local.binding)].kind;
                 if (kind == .let or kind == .definition) {
                     return self.builder.addLocalCell(local.binding, self.keepRef(origin.source));
                 }
@@ -1088,7 +1088,7 @@ const Binder = struct {
     /// `Code.Binding.mutable` is the lowerer's switch for exactly this: a
     /// mutable `.local_read` emits a lookup instead of a register copy.
     fn demoteBinding(self: *Binder, binding: Code.BindingId) void {
-        const index = @intFromEnum(binding);
+        const index = @backingInt(binding);
         if (index >= self.builder.bindings.items.len) return;
         const definition = &self.builder.bindings.items[index];
         switch (definition.kind) {
@@ -1096,7 +1096,7 @@ const Binder = struct {
             else => return,
         }
         definition.mutable = true;
-        const owner = @intFromEnum(definition.function);
+        const owner = @backingInt(definition.function);
         if (owner >= self.builder.functions.items.len) return;
         self.builder.functions.items[owner].allows_ad = false;
     }
@@ -1177,7 +1177,7 @@ const Binder = struct {
             .index = if (indexes) 3 else Code.invalid_index,
         };
         const parameter_list = try self.functionParameters(arglist, arg_origin);
-        self.builder.functions.items[@intFromEnum(function_id)].has_rest = parameter_list.has_rest;
+        self.builder.functions.items[@backingInt(function_id)].has_rest = parameter_list.has_rest;
         for (parameter_list.forms) |parameter| {
             if (parameter.value.typ != b.type_symbol) return error.MalformedAst;
             const symbol = parameter.value.obj.toPtr(Sym);
@@ -1190,7 +1190,7 @@ const Binder = struct {
                 self.keepRef(parameter.origin.source),
             );
             const value = try self.builder.addValue(function_id);
-            self.builder.bindings.items[@intFromEnum(binding)].value = value;
+            self.builder.bindings.items[@backingInt(binding)].value = value;
             try self.builder.addParameter(function_id, binding);
             try function.locals.append(self.scratch, .{ .name = symbol, .binding = binding, .types = ts_unknown });
         }
@@ -1208,7 +1208,7 @@ const Binder = struct {
             try self.builder.setTerminator(function.block, .{ .return_values = values });
         }
 
-        const info = &self.builder.functions.items[@intFromEnum(function_id)];
+        const info = &self.builder.functions.items[@backingInt(function_id)];
         info.result_count = 1;
         info.has_rest = parameter_list.has_rest;
         if (self.retained()) {
@@ -1288,7 +1288,7 @@ const Binder = struct {
                 .let,
                 self.keepRef(parts[1].origin.source),
             );
-            self.builder.bindings.items[@intFromEnum(binding)].value = exception;
+            self.builder.bindings.items[@backingInt(binding)].value = exception;
             const cell = try self.builder.addLocalCell(binding, self.keepRef(parts[1].origin.source));
             _ = try self.emit(function, .{ .global_write = .{ .cell = cell, .value = exception } }, parts[1].origin);
             try function.locals.append(self.scratch, .{
@@ -1362,7 +1362,7 @@ const Binder = struct {
         defer function.locals.shrinkRetainingCapacity(base);
         _ = try self.emit(function, .{ .ns_push = 1 }, form.origin);
         const binding = try self.builder.addBinding(function.id, name, .let, self.keepRef(spec[0].origin.source));
-        self.builder.bindings.items[@intFromEnum(binding)].value = exception;
+        self.builder.bindings.items[@backingInt(binding)].value = exception;
         const cell = try self.builder.addLocalCell(binding, self.keepRef(spec[0].origin.source));
         _ = try self.emit(function, .{ .global_write = .{ .cell = cell, .value = exception } }, spec[0].origin);
         try function.locals.append(self.scratch, .{
@@ -1437,7 +1437,7 @@ const Binder = struct {
             }
         }
         var self_target = Code.FunctionId.invalid;
-        const current_function = self.builder.functions.items[@intFromEnum(function.id)];
+        const current_function = self.builder.functions.items[@backingInt(function.id)];
         const self_arity_matches = if (current_function.has_rest)
             args.len >= current_function.parameter_count - 1
         else
@@ -1562,7 +1562,7 @@ const Binder = struct {
     ) Error!Expr {
         if (invalidate and !tail) self.invalidateAllFacts(function);
         const range = try self.builder.addOperands(args);
-        const result_count = self.builder.functions.items[@intFromEnum(function.id)].result_count;
+        const result_count = self.builder.functions.items[@backingInt(function.id)].result_count;
         if (tail) {
             var count = function.namespace_depth;
             while (count > 0) : (count -= 1) _ = try self.emit(function, .ns_pop, origin);
@@ -1602,7 +1602,7 @@ const Binder = struct {
         var current: ?*Function = function;
         while (current) |candidate| : (current = candidate.parent) {
             for (candidate.locals.items) |*local| {
-                const kind = self.builder.bindings.items[@intFromEnum(local.binding)].kind;
+                const kind = self.builder.bindings.items[@backingInt(local.binding)].kind;
                 if (kind == .let or kind == .definition) local.types = ts_unknown;
             }
         }
@@ -1671,7 +1671,7 @@ const Binder = struct {
                 index -= 1;
                 const local = candidate.locals.items[index];
                 if (!sameSym(local.name, symbol)) continue;
-                const kind = self.builder.bindings.items[@intFromEnum(local.binding)].kind;
+                const kind = self.builder.bindings.items[@backingInt(local.binding)].kind;
                 if (kind == .let or kind == .definition) return local.binding;
             }
             current = candidate.parent;
@@ -1784,7 +1784,7 @@ const Binder = struct {
             i -= 1;
             const local = function.locals.items[i];
             if (!sameSym(local.name, symbol)) continue;
-            const kind = self.builder.bindings.items[@intFromEnum(local.binding)].kind;
+            const kind = self.builder.bindings.items[@backingInt(local.binding)].kind;
             // A let/definition cell stays in the namespace frame, so it must be
             // read by name whenever anything can observe or rebind that cell.
             // This function's own binding is the one case where nothing can:
@@ -1802,7 +1802,7 @@ const Binder = struct {
         }
         const parent = function.parent orelse return null;
         const binding = (try self.resolveLocal(parent, symbol)) orelse return null;
-        const kind = self.builder.bindings.items[@intFromEnum(binding)].kind;
+        const kind = self.builder.bindings.items[@backingInt(binding)].kind;
         switch (kind) {
             .parameter, .capture, .handler => try self.ensureCapture(function, binding),
             .let, .definition => return null,
@@ -1811,7 +1811,7 @@ const Binder = struct {
     }
 
     fn ensureCapture(self: *Binder, function: *Function, binding: Code.BindingId) Error!void {
-        const info = self.builder.functions.items[@intFromEnum(function.id)];
+        const info = self.builder.functions.items[@backingInt(function.id)];
         const start: usize = info.capture_start;
         const end = start + info.capture_count;
         for (self.builder.captures.items[start..end]) |existing| if (existing == binding) return;
@@ -1819,7 +1819,7 @@ const Binder = struct {
     }
 
     fn captureOperands(self: *Binder, parent: *Function, function_id: Code.FunctionId) Error!Code.OperandRange {
-        const info = self.builder.functions.items[@intFromEnum(function_id)];
+        const info = self.builder.functions.items[@backingInt(function_id)];
         const start: usize = info.capture_start;
         const end = start + info.capture_count;
         var values = try self.scratch.alloc(Code.ValueId, info.capture_count);
@@ -1830,9 +1830,9 @@ const Binder = struct {
     }
 
     fn bindingValue(self: *Binder, function: *Function, binding: Code.BindingId) Error!Code.ValueId {
-        const definition = self.builder.bindings.items[@intFromEnum(binding)];
+        const definition = self.builder.bindings.items[@backingInt(binding)];
         if (definition.function == function.id) return definition.value;
-        const info = self.builder.functions.items[@intFromEnum(function.id)];
+        const info = self.builder.functions.items[@backingInt(function.id)];
         const start: usize = info.capture_start;
         const end = start + info.capture_count;
         for (self.builder.captures.items[start..end], 0..) |captured, i| {
@@ -2282,7 +2282,7 @@ fn bindWithContext(
     binder.builder.id = identity.id;
     binder.builder.revision = identity.revision;
     const top_id = try binder.builder.addFunction(null, .{});
-    binder.builder.functions.items[@intFromEnum(top_id)].module_entry = true;
+    binder.builder.functions.items[@backingInt(top_id)].module_entry = true;
     const entry = try binder.builder.addBlock(top_id);
     var top: Function = .{
         .parent = null,
@@ -2367,7 +2367,7 @@ fn typePredicateTypes(name: []const u8) ?TypeSet {
 }
 
 fn typeBit(object: Store.Object) TypeSet {
-    const index = @intFromEnum(object);
+    const index = @backingInt(object);
     return if (index <= b.type_last_idx) @as(TypeSet, 1) << @intCast(index) else @as(TypeSet, 1) << 63;
 }
 
@@ -2384,7 +2384,7 @@ fn numericConstructorTag(name: []const u8) ?Store.Object {
 fn arithmeticTypes(operation: Code.ArithOp, left: TypeSet, right: TypeSet) TypeSet {
     if (left != right or @popCount(left) != 1) return ts_unknown;
     const index = @ctz(left);
-    if (index != @intFromEnum(b.type_i64) and index != @intFromEnum(b.type_f64)) return ts_unknown;
+    if (index != @backingInt(b.type_i64) and index != @backingInt(b.type_f64)) return ts_unknown;
     return switch (operation) {
         .equal, .less, .greater => typeBit(b.type_bool),
         else => left,

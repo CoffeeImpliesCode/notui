@@ -2,24 +2,14 @@
     .name = .notui,
     .version = "0.1.0",
     .fingerprint = 0xb6bb4da781f0147a, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .zg = .{
-            .url = "https://codeberg.org/atman/zg/archive/v0.16.2.tar.gz",
-            .hash = "zg-0.16.2-oGqU3HqftgI6rwFS90ypwfjgToH8Pz829OKuFURlm773",
+            .url = "git+https://codeberg.org/atman/zg?ref=refs/pull/108/head#2c888c632754ef0f16e17595a6d9bd2f852ef7af",
+            .hash = "zg-0.18.0-oGqU3MDboAKAOyNrpklU8sgEVTGZR0JxxYCcQdjJMDYw",
         },
-        // skript: the Lisp runtime embedded by examples/skript_repl.zig.
-        // VENDORED (vendor/skript) — a copy of ../skript's consumer
-        // surface: build.zig, build.zig.zon, build_web.zig, src, test,
-        // demo, web, third_party/zigzag. That is exactly skript's own
-        // `.paths` set, so the copy is what a downstream consumer of
-        // skript would receive. Re-vendor with:
-        //   (cd ../skript && jj file list -r @) \
-        //     | grep -E '^(src|test|demo|web|third_party/zigzag)/|^(build\.zig|build\.zig\.zon|build_web\.zig)$' \
-        //     | rsync -a --files-from=- ../skript/ vendor/skript/
-        // A .path dep skips the hash. skript's own build pulls its deps
-        // (tracy git fetch — expected; libffi is lazy and skipped via
-        // .enable_libffi = false in build.zig).
+        // Native Skript consumer sources. The unshipped Emscripten dependency
+        // and its web build helpers are excluded from this vendored build.
         .skript = .{ .path = "vendor/skript" },
     },
     .paths = .{
@@ -29,11 +19,7 @@
         "bench",
         "examples",
         "README.md",
-        "ANALYZER-TRIAGE.json",
-        "PORTING.md",
         "FAST_COVERAGE.md",
-        "NEXT.md",
-        "ROADMAP.md",
         "vendor",
     },
 }

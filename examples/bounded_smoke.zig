@@ -49,7 +49,7 @@ const clipped_height: u16 = 1;
 
 /// The owned input row: 55 ASCII columns + 38 width-two glyphs = 131
 /// columns, so it wraps and clips in every geometry the driver fits.
-const input_row = "a" ** 55 ++ "界" ** 38;
+const input_row = &(@as([55]u8, @splat('a')) ++ @as([114]u8, @bitCast(@as([38][3]u8, @splat("界".*)))));
 
 /// The owned status row, one cell, redrawn on every keypress.
 const status_row = "T";

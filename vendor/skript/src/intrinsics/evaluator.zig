@@ -79,16 +79,16 @@ fn parseMode(value: Value) Error!Context.Mode {
 
 fn childEffects(parent: Context.EffectDecisionTable, model: ?Context.Version) Context.EffectDecisionTable {
     var result: Context.EffectDecisionTable = .{};
-    inline for (std.meta.fields(Context.EffectDecisionTable)) |entry| {
-        const before = @field(parent, entry.name);
-        const private_state = std.mem.eql(u8, entry.name, "state_read") or std.mem.eql(u8, entry.name, "state_write");
+    inline for (@typeInfo(Context.EffectDecisionTable).@"struct".field_names) |name| {
+        const before = @field(parent, name);
+        const private_state = std.mem.eql(u8, name, "state_read") or std.mem.eql(u8, name, "state_write");
         if (private_state and before == .allow) {
-            @field(result, entry.name) = .allow;
+            @field(result, name) = .allow;
         } else if (model) |version| {
             switch (before) {
-                .allow => @field(result, entry.name) = .{ .model = version },
+                .allow => @field(result, name) = .{ .model = version },
                 .model => |selected| {
-                    if (selected.eql(version)) @field(result, entry.name) = .{ .model = version };
+                    if (selected.eql(version)) @field(result, name) = .{ .model = version };
                 },
                 .deny => {},
             }
@@ -154,8 +154,8 @@ const Snapshot = struct {
     fn version(self: *Snapshot, value: ?Context.Version) Error!Value {
         const selected = value orelse return .nil;
         return self.map(&.{
-            try self.key("id"),       Value.init(b.type_u64, @enumFromInt(selected.id)),
-            try self.key("revision"), Value.init(b.type_u64, @enumFromInt(selected.revision)),
+            try self.key("id"),       Value.init(b.type_u64, @fromBackingInt(@intCast(selected.id))),
+            try self.key("revision"), Value.init(b.type_u64, @fromBackingInt(@intCast(selected.revision))),
         });
     }
 
@@ -189,11 +189,11 @@ const Snapshot = struct {
     }
 
     fn effectNames(self: *Snapshot, effects: skript.Primitive.EffectSet) Error!Value {
-        var names: [std.meta.fields(Context.Effect).len]Value = undefined;
+        var names: [@typeInfo(Context.Effect).@"enum".field_names.len]Value = undefined;
         var count: usize = 0;
-        inline for (std.meta.fields(Context.Effect)) |entry| {
-            if (@field(effects, entry.name)) {
-                names[count] = try self.key(entry.name);
+        inline for (@typeInfo(Context.Effect).@"enum".field_names) |name| {
+            if (@field(effects, name)) {
+                names[count] = try self.key(name);
                 count += 1;
             }
         }
@@ -208,7 +208,7 @@ const Snapshot = struct {
         switch (value.invocation) {
             .primitive => |invocation| {
                 const spec = self.context.registry.spec(invocation.id) orelse return error.Denied;
-                primitive = .i64(@intFromEnum(invocation.id));
+                primitive = .i64(@backingInt(invocation.id));
                 revision = .u64(invocation.revision);
                 name = try skript.intrinsics.string.storeString(self.context, spec.stable_name);
             },
@@ -292,7 +292,7 @@ const Snapshot = struct {
         return self.map(&.{
             try self.key("source-code-id"),   Value.u64(residual.source_code_id),
             try self.key("source-revision"),  Value.u64(residual.source_code_revision),
-            try self.key("function-id"),      Value.u64(@intFromEnum(residual.source_function)),
+            try self.key("function-id"),      Value.u64(@backingInt(residual.source_function)),
             try self.key("registry-version"), Value.u64(residual.registry_version),
             try self.key("arguments"),        try self.list(residual.expected_arguments),
             try self.key("captures"),         captures,

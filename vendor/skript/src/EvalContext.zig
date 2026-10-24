@@ -268,16 +268,16 @@ pub const EffectDecisionTable = struct {
 
     pub fn trusted() EffectDecisionTable {
         var table: EffectDecisionTable = .{};
-        inline for (@typeInfo(EffectDecisionTable).@"struct".fields) |field| {
-            @field(table, field.name) = .allow;
+        inline for (@typeInfo(EffectDecisionTable).@"struct".field_names) |name| {
+            @field(table, name) = .allow;
         }
         return table;
     }
 
     pub fn permitsChild(parent: EffectDecisionTable, candidate: EffectDecisionTable) bool {
-        inline for (@typeInfo(EffectDecisionTable).@"struct".fields) |field| {
-            const before = @field(parent, field.name);
-            const after = @field(candidate, field.name);
+        inline for (@typeInfo(EffectDecisionTable).@"struct".field_names) |name| {
+            const before = @field(parent, name);
+            const after = @field(candidate, name);
             switch (before) {
                 .allow => {},
                 .deny => if (after != .deny) return false,
@@ -437,8 +437,8 @@ pub fn child(
 
 pub fn isUnrestricted(self: *const EvalContext) bool {
     if (self.execution != .trusted or self.mode != .concrete or self.lease != null or !self.allow_suspend) return false;
-    inline for (@typeInfo(EffectDecisionTable).@"struct".fields) |field| {
-        if (@field(self.effects, field.name) != .allow) return false;
+    inline for (@typeInfo(EffectDecisionTable).@"struct".field_names) |name| {
+        if (@field(self.effects, name) != .allow) return false;
     }
     return true;
 }
@@ -446,9 +446,9 @@ pub fn isUnrestricted(self: *const EvalContext) bool {
 pub fn authorize(self: *const EvalContext, spec: *const Primitive.Spec) Error!Authorization {
     try self.check();
     var selected_model: ?Version = null;
-    inline for (@typeInfo(Effect).@"enum".fields) |field| {
-        if (@field(spec.effects, field.name)) {
-            switch (@field(self.effects, field.name)) {
+    inline for (@typeInfo(Effect).@"enum".field_names) |name| {
+        if (@field(spec.effects, name)) {
+            switch (@field(self.effects, name)) {
                 .deny => return error.Denied,
                 .model => |identity| {
                     if (identity.id == 0 or identity.revision == 0) return error.Denied;
@@ -458,7 +458,7 @@ pub fn authorize(self: *const EvalContext, spec: *const Primitive.Spec) Error!Au
                     selected_model = identity;
                 },
                 .allow => {
-                    const argument_read = comptime std.mem.eql(u8, field.name, "state_read");
+                    const argument_read = comptime std.mem.eql(u8, name, "state_read");
                     if (self.mode != .concrete and !(argument_read and spec.reads_argument_state)) return error.Denied;
                     if (self.execution == .pure_limited and
                         !(argument_read and spec.reads_argument_state)) return error.Denied;

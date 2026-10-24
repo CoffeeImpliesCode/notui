@@ -275,7 +275,7 @@ pub const Code = struct {
     owner: ?*const anyopaque = null,
 
     pub fn function(self: *const Code, id: FunctionId) ?*const Function {
-        const index = @intFromEnum(id);
+        const index = @backingInt(id);
         if (index >= self.functions.len) return null;
         return &self.functions[index];
     }
@@ -414,7 +414,7 @@ pub const Code = struct {
         defer origins.deinit(scratch);
 
         for (self.functions, 0..) |function_info, function_index| {
-            if (@intFromEnum(function_info.id) != function_index) return error.InvalidCode;
+            if (@backingInt(function_info.id) != function_index) return error.InvalidCode;
             if (function_info.result_count == 0) return error.InvalidCode;
             if (function_info.module_entry and (function_index != 0 or
                 function_info.result_count != 1 or function_info.parameter_count != 0 or
@@ -427,7 +427,7 @@ pub const Code = struct {
             if (block_end > self.function_blocks.len) return error.InvalidCode;
             entry_blocks[function_index] = self.function_blocks[block_start];
             for (self.function_blocks[block_start..block_end]) |block_id| {
-                const block_index = @intFromEnum(block_id);
+                const block_index = @backingInt(block_id);
                 if (block_index >= self.blocks.len) return error.InvalidCode;
                 if (block_owner[block_index] != .invalid) return error.InvalidCode;
                 block_owner[block_index] = function_info.id;
@@ -437,7 +437,7 @@ pub const Code = struct {
             const binding_end = try checkedEnd(function_info.binding_start, function_info.binding_count);
             if (binding_end > self.function_bindings.len) return error.InvalidCode;
             for (self.function_bindings[binding_start..binding_end]) |binding_id| {
-                const binding_index = @intFromEnum(binding_id);
+                const binding_index = @backingInt(binding_id);
                 if (binding_index >= self.bindings.len) return error.InvalidCode;
                 if (binding_owner[binding_index] != .invalid) return error.InvalidCode;
                 binding_owner[binding_index] = function_info.id;
@@ -478,10 +478,10 @@ pub const Code = struct {
         }
 
         for (self.blocks, 0..) |block, block_index| {
-            if (@intFromEnum(block.id) != block_index) return error.InvalidCode;
-            if (@intFromEnum(block.function) >= self.functions.len) return error.InvalidCode;
+            if (@backingInt(block.id) != block_index) return error.InvalidCode;
+            if (@backingInt(block.function) >= self.functions.len) return error.InvalidCode;
             if (block.handler != .invalid) {
-                const handler_index = @intFromEnum(block.handler);
+                const handler_index = @backingInt(block.handler);
                 if (handler_index >= self.handlers.len) return error.InvalidCode;
                 if (self.handlers[handler_index].protected != block.id) return error.InvalidCode;
             }
@@ -492,7 +492,7 @@ pub const Code = struct {
             const node_end = try checkedEnd(block.node_start, block.node_count);
             if (node_end > self.block_nodes.len) return error.InvalidCode;
             for (self.block_nodes[node_start..node_end], 0..) |node_id, position| {
-                const node_index = @intFromEnum(node_id);
+                const node_index = @backingInt(node_id);
                 if (node_index >= self.nodes.len) return error.InvalidCode;
                 if (node_owner[node_index] != .invalid) return error.InvalidCode;
                 node_owner[node_index] = block.id;
@@ -518,12 +518,12 @@ pub const Code = struct {
             if (owner == .invalid) return error.InvalidCode;
         }
         for (self.bindings, 0..) |binding, binding_index| {
-            if (@intFromEnum(binding.id) != binding_index) return error.InvalidCode;
-            const function_index = @intFromEnum(binding.function);
+            if (@backingInt(binding.id) != binding_index) return error.InvalidCode;
+            const function_index = @backingInt(binding.function);
             if (function_index >= self.functions.len) return error.InvalidCode;
             if (binding_owner[binding_index] != binding.function) return error.InvalidCode;
-            if (binding.value == .invalid or @intFromEnum(binding.value) >= self.values.len or
-                self.values[@intFromEnum(binding.value)] != binding.function)
+            if (binding.value == .invalid or @backingInt(binding.value) >= self.values.len or
+                self.values[@backingInt(binding.value)] != binding.function)
             {
                 return error.InvalidCode;
             }
@@ -533,7 +533,7 @@ pub const Code = struct {
             const parameter_end = try checkedEnd(function_info.parameter_start, function_info.parameter_count);
             const parameter_start: usize = function_info.parameter_start;
             for (self.parameters[parameter_start..parameter_end], 0..) |binding_id, index| {
-                const binding_index = @intFromEnum(binding_id);
+                const binding_index = @backingInt(binding_id);
                 if (binding_index >= self.bindings.len) return error.InvalidCode;
                 const binding = self.bindings[binding_index];
                 if (binding.function != function_info.id or binding.kind != .parameter) {
@@ -543,7 +543,7 @@ pub const Code = struct {
                     definitions,
                     binding.value,
                     function_info.id,
-                    entry_blocks[@intFromEnum(function_info.id)],
+                    entry_blocks[@backingInt(function_info.id)],
                     0,
                 );
                 for (self.parameters[parameter_start .. parameter_start + index]) |previous| {
@@ -555,17 +555,17 @@ pub const Code = struct {
             const capture_end = try checkedEnd(function_info.capture_start, function_info.capture_count);
             const capture_start: usize = function_info.capture_start;
             for (self.captures[capture_start..capture_end], 0..) |binding_id, index| {
-                const binding_index = @intFromEnum(binding_id);
+                const binding_index = @backingInt(binding_id);
                 if (binding_index >= self.bindings.len) return error.InvalidCode;
                 const binding = self.bindings[binding_index];
                 if (binding.function == function_info.id) return error.InvalidCode;
                 const capture_value = self.capture_values[capture_start + index];
-                if (@intFromEnum(capture_value) >= self.values.len) return error.InvalidCode;
+                if (@backingInt(capture_value) >= self.values.len) return error.InvalidCode;
                 try self.defineValue(
                     definitions,
                     capture_value,
                     function_info.id,
-                    entry_blocks[@intFromEnum(function_info.id)],
+                    entry_blocks[@backingInt(function_info.id)],
                     0,
                 );
                 for (self.captures[capture_start .. capture_start + index]) |previous| {
@@ -576,9 +576,9 @@ pub const Code = struct {
         }
 
         for (self.globals, 0..) |global, index| {
-            if (@intFromEnum(global.id) != index) return error.InvalidCode;
+            if (@backingInt(global.id) != index) return error.InvalidCode;
             if (global.binding != .invalid) {
-                const binding_index = @intFromEnum(global.binding);
+                const binding_index = @backingInt(global.binding);
                 if (binding_index >= self.bindings.len) return error.InvalidCode;
                 const binding = self.bindings[binding_index];
                 if (binding.name != global.name) return error.InvalidCode;
@@ -586,8 +586,8 @@ pub const Code = struct {
             }
         }
         for (self.handlers, 0..) |handler, index| {
-            if (@intFromEnum(handler.id) != index) return error.InvalidCode;
-            if (@intFromEnum(handler.function) >= self.functions.len) return error.InvalidCode;
+            if (@backingInt(handler.id) != index) return error.InvalidCode;
+            if (@backingInt(handler.function) >= self.functions.len) return error.InvalidCode;
             const protected = self.getBlock(handler.protected) orelse return error.InvalidCode;
             const landing = self.getBlock(handler.landing) orelse return error.InvalidCode;
             if (protected.function != handler.function or landing.function != handler.function) {
@@ -598,11 +598,11 @@ pub const Code = struct {
             if (landing_end > self.block_parameters.len) return error.InvalidCode;
             if (landing.param_count != 1) return error.InvalidCode;
             if (self.block_parameters[landing_param_start] != handler.exception) return error.InvalidCode;
-            if (@intFromEnum(handler.exception) >= self.values.len) return error.InvalidCode;
+            if (@backingInt(handler.exception) >= self.values.len) return error.InvalidCode;
         }
         for (self.bindings) |binding| {
             if (binding.kind != .handler) continue;
-            const value_index = @intFromEnum(binding.value);
+            const value_index = @backingInt(binding.value);
             if (value_index >= definitions.len) return error.InvalidCode;
             const definition = definitions[value_index];
             var matches_handler = false;
@@ -618,7 +618,7 @@ pub const Code = struct {
         }
 
         for (self.nodes, 0..) |node, node_index| {
-            if (@intFromEnum(node.id) != node_index) return error.InvalidCode;
+            if (@backingInt(node.id) != node_index) return error.InvalidCode;
             const block = self.getBlock(node.block) orelse return error.InvalidCode;
             if (node_owner[node_index] != node.block) return error.InvalidCode;
             if (node.function != block.function) return error.InvalidCode;
@@ -629,14 +629,14 @@ pub const Code = struct {
                 if (node.result == .invalid) return error.InvalidCode;
                 const result_end = std.math.add(
                     usize,
-                    @intFromEnum(node.result),
+                    @backingInt(node.result),
                     @as(usize, result_count),
                 ) catch return error.InvalidCode;
                 if (result_end > self.values.len) return error.InvalidCode;
                 var result = node.result;
                 var result_index: usize = 0;
                 while (result_index < @as(usize, result_count)) : (result_index += 1) {
-                    const value_index = @intFromEnum(result);
+                    const value_index = @backingInt(result);
                     if (value_index >= self.values.len) return error.InvalidCode;
                     if (self.values[value_index] != node.function) return error.InvalidCode;
                     try self.defineValue(
@@ -646,7 +646,7 @@ pub const Code = struct {
                         node.block,
                         node_positions[node_index],
                     );
-                    result = @enumFromInt(value_index + 1);
+                    result = @fromBackingInt(@intCast(value_index + 1));
                 }
             }
             try self.validateOperationShape(node.operation, node.function, node.block, context);
@@ -689,20 +689,20 @@ pub const Code = struct {
         for (self.blocks) |block| {
             switch (block.terminator) {
                 .jump => |edge| {
-                    predecessors[predecessor_cursor[@intFromEnum(edge.target)]] = block.id;
-                    predecessor_cursor[@intFromEnum(edge.target)] += 1;
+                    predecessors[predecessor_cursor[@backingInt(edge.target)]] = block.id;
+                    predecessor_cursor[@backingInt(edge.target)] += 1;
                 },
                 .branch => |branch| {
-                    predecessors[predecessor_cursor[@intFromEnum(branch.then_edge.target)]] = block.id;
-                    predecessor_cursor[@intFromEnum(branch.then_edge.target)] += 1;
-                    predecessors[predecessor_cursor[@intFromEnum(branch.else_edge.target)]] = block.id;
-                    predecessor_cursor[@intFromEnum(branch.else_edge.target)] += 1;
+                    predecessors[predecessor_cursor[@backingInt(branch.then_edge.target)]] = block.id;
+                    predecessor_cursor[@backingInt(branch.then_edge.target)] += 1;
+                    predecessors[predecessor_cursor[@backingInt(branch.else_edge.target)]] = block.id;
+                    predecessor_cursor[@backingInt(branch.else_edge.target)] += 1;
                 },
                 else => {},
             }
         }
         for (self.handlers) |handler| {
-            const landing_index = @intFromEnum(handler.landing);
+            const landing_index = @backingInt(handler.landing);
             predecessors[predecessor_cursor[landing_index]] = handler.protected;
             predecessor_cursor[landing_index] += 1;
         }
@@ -714,12 +714,12 @@ pub const Code = struct {
             const block_end = try checkedEnd(function_info.block_start, function_info.block_count);
             const blocks = self.function_blocks[block_start..block_end];
             const entry = blocks[0];
-            idom[@intFromEnum(entry)] = entry;
+            idom[@backingInt(entry)] = entry;
             for (blocks[1..]) |block_id| {
-                if (predecessor_offsets[@intFromEnum(block_id)] ==
-                    predecessor_offsets[@intFromEnum(block_id) + 1])
+                if (predecessor_offsets[@backingInt(block_id)] ==
+                    predecessor_offsets[@backingInt(block_id) + 1])
                 {
-                    idom[@intFromEnum(block_id)] = block_id;
+                    idom[@backingInt(block_id)] = block_id;
                 }
             }
             var pass: usize = 0;
@@ -728,12 +728,12 @@ pub const Code = struct {
                 try contextChargeWork(context, blocks.len);
                 changed = false;
                 for (blocks[1..]) |block_id| {
-                    const pred_first = predecessor_offsets[@intFromEnum(block_id)];
-                    const pred_last = predecessor_offsets[@intFromEnum(block_id) + 1];
+                    const pred_first = predecessor_offsets[@backingInt(block_id)];
+                    const pred_last = predecessor_offsets[@backingInt(block_id) + 1];
                     var candidate: BlockId = .invalid;
                     for (predecessors[pred_first..pred_last]) |predecessor| {
                         try contextChargeWork(context, 1);
-                        if (idom[@intFromEnum(predecessor)] != .invalid) {
+                        if (idom[@backingInt(predecessor)] != .invalid) {
                             candidate = predecessor;
                             break;
                         }
@@ -741,7 +741,7 @@ pub const Code = struct {
                     if (candidate == .invalid) continue;
                     for (predecessors[pred_first..pred_last]) |predecessor| {
                         try contextChargeWork(context, 1);
-                        if (idom[@intFromEnum(predecessor)] == .invalid) continue;
+                        if (idom[@backingInt(predecessor)] == .invalid) continue;
                         candidate = try intersectDominators(
                             idom,
                             candidate,
@@ -751,14 +751,14 @@ pub const Code = struct {
                         );
                         if (candidate == .invalid) break;
                     }
-                    if (idom[@intFromEnum(block_id)] != candidate) {
-                        idom[@intFromEnum(block_id)] = candidate;
+                    if (idom[@backingInt(block_id)] != candidate) {
+                        idom[@backingInt(block_id)] = candidate;
                         changed = true;
                     }
                 }
             }
             for (blocks) |block_id| {
-                if (idom[@intFromEnum(block_id)] == .invalid) return error.InvalidCode;
+                if (idom[@backingInt(block_id)] == .invalid) return error.InvalidCode;
             }
         }
 
@@ -766,11 +766,11 @@ pub const Code = struct {
             const block_start: usize = function_info.block_start;
             const block_end = try checkedEnd(function_info.block_start, function_info.block_count);
             for (self.function_blocks[block_start..block_end]) |block_id| {
-                const block = &self.blocks[@intFromEnum(block_id)];
+                const block = &self.blocks[@backingInt(block_id)];
                 const node_start: usize = block.node_start;
                 const node_end = try checkedEnd(block.node_start, block.node_count);
                 for (self.block_nodes[node_start..node_end], 0..) |node_id, position| {
-                    const node = self.nodes[@intFromEnum(node_id)];
+                    const node = self.nodes[@backingInt(node_id)];
                     try self.validateOperationUses(
                         node.operation,
                         node.function,
@@ -839,7 +839,7 @@ pub const Code = struct {
         }
         fn enqueue(self: *ScopeChecker, block: BlockId, state: State) Error!void {
             try contextChargeWork(self.context, 1);
-            const index = @intFromEnum(block);
+            const index = @backingInt(block);
             if (index >= self.incoming.len) return error.InvalidCode;
             if (self.incoming[index]) |existing| {
                 if (existing.handler != state.handler or existing.namespace_depth != state.namespace_depth) {
@@ -855,13 +855,13 @@ pub const Code = struct {
 
         fn visit(self: *ScopeChecker, block_id: BlockId) Error!void {
             try contextChargeWork(self.context, 1);
-            const block = self.code.blocks[@intFromEnum(block_id)];
-            var state = self.incoming[@intFromEnum(block_id)] orelse unreachable;
+            const block = self.code.blocks[@backingInt(block_id)];
+            var state = self.incoming[@backingInt(block_id)] orelse unreachable;
             for (self.code.block_nodes[block.node_start..][0..block.node_count]) |node_id| {
                 try contextChargeWork(self.context, 1);
-                switch (self.code.nodes[@intFromEnum(node_id)].operation) {
+                switch (self.code.nodes[@backingInt(node_id)].operation) {
                     .try_begin => |handler_id| {
-                        const index = @intFromEnum(handler_id);
+                        const index = @backingInt(handler_id);
                         if (self.parents[index]) |parent| {
                             if (parent != state.handler) return error.InvalidCode;
                         } else self.parents[index] = state.handler;
@@ -870,7 +870,7 @@ pub const Code = struct {
                     },
                     .try_end => {
                         if (state.handler == .invalid) return error.InvalidCode;
-                        state.handler = self.parents[@intFromEnum(state.handler)] orelse return error.InvalidCode;
+                        state.handler = self.parents[@backingInt(state.handler)] orelse return error.InvalidCode;
                     },
                     .ns_push => {
                         state.namespace_depth = std.math.add(u32, state.namespace_depth, 1) catch
@@ -905,7 +905,7 @@ pub const Code = struct {
         position: usize,
     ) Error!void {
         _ = self;
-        const index = @intFromEnum(value);
+        const index = @backingInt(value);
         if (index >= definitions.len or value == .invalid) return error.InvalidCode;
         if (definitions[index].function != .invalid) return error.InvalidCode;
         definitions[index] = .{ .function = function_id, .block = block, .position = position };
@@ -921,13 +921,13 @@ pub const Code = struct {
         switch (operation) {
             .literal, .quote, .try_end, .ns_push, .ns_pop => {},
             .try_begin => |handler_id| {
-                const index = @intFromEnum(handler_id);
+                const index = @backingInt(handler_id);
                 if (index >= self.handlers.len) return error.InvalidCode;
                 const handler = self.handlers[index];
                 if (handler.function != function_id or handler.protected != block) return error.InvalidCode;
             },
             .local_read => |binding_id| {
-                const index = @intFromEnum(binding_id);
+                const index = @backingInt(binding_id);
                 if (index >= self.bindings.len) return error.InvalidCode;
                 const binding = self.bindings[index];
                 if (binding.function != function_id and
@@ -937,11 +937,11 @@ pub const Code = struct {
                 }
             },
             .global_read => |global_id| {
-                if (@intFromEnum(global_id) >= self.globals.len) return error.InvalidCode;
+                if (@backingInt(global_id) >= self.globals.len) return error.InvalidCode;
             },
             .global_write => |write| {
-                if (@intFromEnum(write.cell) >= self.globals.len) return error.InvalidCode;
-                if (write.value == .invalid or @intFromEnum(write.value) >= self.values.len) {
+                if (@backingInt(write.cell) >= self.globals.len) return error.InvalidCode;
+                if (write.value == .invalid or @backingInt(write.value) >= self.values.len) {
                     return error.InvalidCode;
                 }
             },
@@ -950,18 +950,18 @@ pub const Code = struct {
                 try self.validateRangeShape(call.args);
             },
             .arithmetic => |arith| {
-                if (@intFromEnum(arith.left) >= self.values.len or @intFromEnum(arith.right) >= self.values.len) {
+                if (@backingInt(arith.left) >= self.values.len or @backingInt(arith.right) >= self.values.len) {
                     return error.InvalidCode;
                 }
                 if (arith.callee == .invalid) {
                     if (!arith.expected_callee.isNil()) return error.InvalidCode;
-                } else if (@intFromEnum(arith.callee) >= self.values.len or arith.expected_callee.isNil()) {
+                } else if (@backingInt(arith.callee) >= self.values.len or arith.expected_callee.isNil()) {
                     return error.InvalidCode;
                 }
             },
             .dynamic_call => |call| {
                 if (call.result_count == 0) return error.InvalidCode;
-                if (call.callee == .invalid or @intFromEnum(call.callee) >= self.values.len) {
+                if (call.callee == .invalid or @backingInt(call.callee) >= self.values.len) {
                     return error.InvalidCode;
                 }
                 try self.validateRangeShape(call.args);
@@ -1009,7 +1009,7 @@ pub const Code = struct {
             .none => return error.InvalidCode,
             .jump => |edge| try self.validateEdgeShape(edge, function_id),
             .branch => |branch| {
-                if (branch.condition == .invalid or @intFromEnum(branch.condition) >= self.values.len) {
+                if (branch.condition == .invalid or @backingInt(branch.condition) >= self.values.len) {
                     return error.InvalidCode;
                 }
                 try self.validateEdgeShape(branch.then_edge, function_id);
@@ -1021,14 +1021,14 @@ pub const Code = struct {
                 try self.validateRangeShape(values);
             },
             .raise => |value| {
-                if (value == .invalid or @intFromEnum(value) >= self.values.len) return error.InvalidCode;
+                if (value == .invalid or @backingInt(value) >= self.values.len) return error.InvalidCode;
             },
             .tail_call => |call| {
                 const function_info = self.function(function_id) orelse return error.InvalidCode;
                 if (call.result_count == 0 or call.result_count != function_info.result_count) {
                     return error.InvalidCode;
                 }
-                if (call.callee == .invalid or @intFromEnum(call.callee) >= self.values.len) {
+                if (call.callee == .invalid or @backingInt(call.callee) >= self.values.len) {
                     return error.InvalidCode;
                 }
                 try self.validateRangeShape(call.args);
@@ -1229,7 +1229,7 @@ pub const Code = struct {
         binding_id: BindingId,
         context: ?*const EvalContext,
     ) Error!?ValueId {
-        const binding_index = @intFromEnum(binding_id);
+        const binding_index = @backingInt(binding_id);
         if (binding_index >= self.bindings.len) return null;
         const binding = self.bindings[binding_index];
         if (binding.function == function_id) return binding.value;
@@ -1273,7 +1273,7 @@ pub const Code = struct {
     ) Error!void {
         _ = self;
         try contextChargeWork(context, 1);
-        const index = @intFromEnum(value);
+        const index = @backingInt(value);
         if (value == .invalid or index >= definitions.len) return error.InvalidCode;
         const definition = definitions[index];
         if (definition.function != function_id) return error.InvalidCode;
@@ -1308,13 +1308,13 @@ pub const Code = struct {
     ) Error!void {
         _ = self;
         try contextChargeWork(context, 1);
-        const index = @intFromEnum(target);
+        const index = @backingInt(target);
         if (index >= counts.len) return error.InvalidCode;
         counts[index] = std.math.add(usize, counts[index], 1) catch return error.InvalidCode;
     }
 
     fn getBlock(self: *const Code, id: BlockId) ?*const Block {
-        const index = @intFromEnum(id);
+        const index = @backingInt(id);
         if (index >= self.blocks.len) return null;
         return &self.blocks[index];
     }
@@ -1345,14 +1345,14 @@ fn intersectDominators(
     while (a != b and a_len > 0 and b_len > 0) {
         try contextChargeWork(context, 1);
         if (a_len > b_len) {
-            a = idom[@intFromEnum(a)];
+            a = idom[@backingInt(a)];
             a_len -= 1;
         } else if (b_len > a_len) {
-            b = idom[@intFromEnum(b)];
+            b = idom[@backingInt(b)];
             b_len -= 1;
         } else {
-            a = idom[@intFromEnum(a)];
-            b = idom[@intFromEnum(b)];
+            a = idom[@backingInt(a)];
+            b = idom[@backingInt(b)];
             a_len -= 1;
             b_len -= 1;
         }
@@ -1370,7 +1370,7 @@ fn dominatorDepth(
     var depth: usize = 0;
     while (depth <= limit) : (depth += 1) {
         try contextChargeWork(context, 1);
-        const parent = idom[@intFromEnum(current)];
+        const parent = idom[@backingInt(current)];
         if (parent == .invalid or parent == current) return depth + 1;
         current = parent;
     }
@@ -1388,7 +1388,7 @@ fn dominates(
     while (steps <= idom.len) : (steps += 1) {
         try contextChargeWork(context, 1);
         if (current == definition) return true;
-        const parent = idom[@intFromEnum(current)];
+        const parent = idom[@backingInt(current)];
         if (parent == .invalid or parent == current) return false;
         current = parent;
     }
@@ -1429,19 +1429,19 @@ pub const Builder = struct {
     }
 
     fn functionIndex(self: *const Builder, function: FunctionId) Error!usize {
-        const index = @intFromEnum(function);
+        const index = @backingInt(function);
         if (index >= self.functions.items.len) return error.InvalidCode;
         return index;
     }
 
     fn blockIndex(self: *const Builder, block: BlockId) Error!usize {
-        const index = @intFromEnum(block);
+        const index = @backingInt(block);
         if (index >= self.blocks.items.len) return error.InvalidCode;
         return index;
     }
 
     fn bindingIndex(self: *const Builder, binding: BindingId) Error!usize {
-        const index = @intFromEnum(binding);
+        const index = @backingInt(binding);
         if (index >= self.bindings.items.len) return error.InvalidCode;
         return index;
     }
@@ -1530,7 +1530,7 @@ pub const Builder = struct {
         try ensureIndexCapacity(self.function_bindings.items.len);
         try ensureIndexCapacity(self.parameters.items.len);
         try ensureIndexCapacity(self.captures.items.len);
-        const id: FunctionId = @enumFromInt(@as(u32, @intCast(self.functions.items.len)));
+        const id: FunctionId = @fromBackingInt(@intCast(@as(u32, @intCast(self.functions.items.len))));
         try self.functions.append(self.allocator, .{
             .id = id,
             .name = name,
@@ -1549,7 +1549,7 @@ pub const Builder = struct {
         try ensureIndexCapacity(self.blocks.items.len);
         try ensureIndexCapacity(self.block_nodes.items.len);
         const node_start: u32 = @intCast(self.block_nodes.items.len);
-        const id: BlockId = @enumFromInt(@as(u32, @intCast(self.blocks.items.len)));
+        const id: BlockId = @fromBackingInt(@intCast(@as(u32, @intCast(self.blocks.items.len))));
         try self.blocks.append(self.allocator, .{
             .id = id,
             .function = function,
@@ -1567,7 +1567,7 @@ pub const Builder = struct {
         try self.chargeWork(1);
         _ = try self.functionIndex(function);
         try ensureIndexCapacity(self.values.items.len);
-        const id: ValueId = @enumFromInt(@as(u32, @intCast(self.values.items.len)));
+        const id: ValueId = @fromBackingInt(@intCast(@as(u32, @intCast(self.values.items.len))));
         try self.values.append(self.allocator, function);
         return id;
     }
@@ -1582,7 +1582,7 @@ pub const Builder = struct {
         try self.chargeWork(1);
         const function_index = try self.functionIndex(function);
         try ensureIndexCapacity(self.bindings.items.len);
-        const id: BindingId = @enumFromInt(@as(u32, @intCast(self.bindings.items.len)));
+        const id: BindingId = @fromBackingInt(@intCast(@as(u32, @intCast(self.bindings.items.len))));
         try self.bindings.append(self.allocator, .{
             .id = id,
             .function = function,
@@ -1643,7 +1643,7 @@ pub const Builder = struct {
             if (cell.binding == .invalid and cell.name == name) return cell.id;
         }
         try ensureIndexCapacity(self.globals.items.len);
-        const id: GlobalCellId = @enumFromInt(@as(u32, @intCast(self.globals.items.len)));
+        const id: GlobalCellId = @fromBackingInt(@intCast(@as(u32, @intCast(self.globals.items.len))));
         try self.globals.append(self.allocator, .{ .id = id, .name = name, .source = source });
         return id;
     }
@@ -1658,7 +1658,7 @@ pub const Builder = struct {
             if (cell.binding == binding) return cell.id;
         }
         try ensureIndexCapacity(self.globals.items.len);
-        const id: GlobalCellId = @enumFromInt(@as(u32, @intCast(self.globals.items.len)));
+        const id: GlobalCellId = @fromBackingInt(@intCast(@as(u32, @intCast(self.globals.items.len))));
         try self.globals.append(self.allocator, .{
             .id = id,
             .name = definition.name,
@@ -1685,13 +1685,13 @@ pub const Builder = struct {
             return error.InvalidCode;
         }
         if (self.blocks.items[protected_index].handler != .invalid) return error.InvalidCode;
-        if (@intFromEnum(exception) >= self.values.items.len or
-            self.values.items[@intFromEnum(exception)] != function)
+        if (@backingInt(exception) >= self.values.items.len or
+            self.values.items[@backingInt(exception)] != function)
         {
             return error.InvalidCode;
         }
         try ensureIndexCapacity(self.handlers.items.len);
-        const id: HandlerId = @enumFromInt(@as(u32, @intCast(self.handlers.items.len)));
+        const id: HandlerId = @fromBackingInt(@intCast(@as(u32, @intCast(self.handlers.items.len))));
         try self.handlers.append(self.allocator, .{
             .id = id,
             .function = function,
@@ -1759,7 +1759,7 @@ pub const Builder = struct {
             }
         }
         try ensureIndexCapacity(self.nodes.items.len);
-        const id: BoundNodeId = @enumFromInt(@as(u32, @intCast(self.nodes.items.len)));
+        const id: BoundNodeId = @fromBackingInt(@intCast(@as(u32, @intCast(self.nodes.items.len))));
         try self.nodes.append(self.allocator, .{
             .id = id,
             .function = function,
@@ -1783,12 +1783,12 @@ pub const Builder = struct {
 
     pub fn lastNodeId(self: *const Builder) ?BoundNodeId {
         if (self.nodes.items.len == 0) return null;
-        return @enumFromInt(@as(u32, @intCast(self.nodes.items.len - 1)));
+        return @fromBackingInt(@intCast(@as(u32, @intCast(self.nodes.items.len - 1))));
     }
 
     pub fn setNodeSourceIndex(self: *Builder, node: BoundNodeId, source_index: u32) Error!void {
         try self.chargeWork(1);
-        const index = @intFromEnum(node);
+        const index = @backingInt(node);
         if (index >= self.nodes.items.len) return error.InvalidCode;
         self.nodes.items[index].source_index = source_index;
     }
@@ -1909,14 +1909,14 @@ test "builder preserves nested membership and genuine multi-result calls" {
     const outer_entry = try builder.addBlock(outer);
 
     const child = try builder.addFunction(null, .{});
-    builder.functions.items[@intFromEnum(child)].result_count = 2;
+    builder.functions.items[@backingInt(child)].result_count = 2;
     const child_entry = try builder.addBlock(child);
     const child_first = try builder.addNode(child, child_entry, .{ .literal = .nil }, .{});
     const child_second = try builder.addNode(child, child_entry, .{ .literal = .true }, .{});
     const child_returns = try builder.addOperands(&.{ child_first, child_second });
     try builder.setTerminator(child_entry, .{ .return_values = child_returns });
 
-    builder.functions.items[@intFromEnum(outer)].result_count = 2;
+    builder.functions.items[@backingInt(outer)].result_count = 2;
     const outer_exit = try builder.addBlock(outer);
     const exit_first = try builder.addBlockParam(outer_exit, outer);
     const exit_second = try builder.addBlockParam(outer_exit, outer);
@@ -1926,7 +1926,7 @@ test "builder preserves nested membership and genuine multi-result calls" {
             .result_count = 2,
         },
     }, .{});
-    const call_second: ValueId = @enumFromInt(@intFromEnum(call_first) + 1);
+    const call_second: ValueId = @fromBackingInt(@intCast(@backingInt(call_first) + 1));
     const call_results = try builder.addOperands(&.{ call_first, call_second });
     try builder.setTerminator(outer_entry, .{
         .jump = .{ .target = outer_exit, .args = call_results },
@@ -1945,13 +1945,13 @@ test "builder preserves nested membership and genuine multi-result calls" {
     const child_block_end = child_block_start + @as(usize, child_info.block_count);
     const child_blocks = code.function_blocks[child_block_start..child_block_end];
     try std.testing.expectEqualSlices(BlockId, &.{child_entry}, child_blocks);
-    const outer_node_start: usize = code.blocks[@intFromEnum(outer_entry)].node_start;
+    const outer_node_start: usize = code.blocks[@backingInt(outer_entry)].node_start;
     try std.testing.expectEqual(@as(u8, 2), code.nodes[
-        @intFromEnum(
+        @backingInt(
             code.block_nodes[outer_node_start],
         )
     ].resultCount());
-    try std.testing.expectEqual(outer, code.values[@intFromEnum(call_second)]);
+    try std.testing.expectEqual(outer, code.values[@backingInt(call_second)]);
 }
 
 test "validation rejects a branch-join use without a dominating definition" {
@@ -2026,7 +2026,7 @@ test "validation rejects tail-call result arity mismatches" {
 
     var builder = Builder.init(arena.allocator(), null);
     const function = try builder.addFunction(null, .{});
-    builder.functions.items[@intFromEnum(function)].result_count = 2;
+    builder.functions.items[@backingInt(function)].result_count = 2;
     const entry = try builder.addBlock(function);
     const callee = try builder.addNode(function, entry, .{ .literal = .nil }, .{});
     try builder.setTerminator(entry, .{ .tail_call = .{
@@ -2052,7 +2052,7 @@ test "validation rejects a binding read before its value definition" {
         .left = prefix,
         .right = prefix,
     } }, .{});
-    builder.bindings.items[@intFromEnum(binding)].value = later;
+    builder.bindings.items[@backingInt(binding)].value = later;
     const result = try builder.addOperands(&.{read_before_definition});
     try builder.setTerminator(entry, .{ .return_values = result });
     try std.testing.expectError(error.InvalidCode, builder.finish(std.testing.allocator));

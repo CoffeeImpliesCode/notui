@@ -278,7 +278,7 @@ test "image: transmit rejects geometry that does not match the payload" {
     t2.init();
     try std.testing.expectError(
         error.ImageSizeMismatch,
-        kitty.transmit(&t2.w, .{ .format = .rgb, .width = 2, .height = 2 }, &[_]u8{1} ** 16),
+        kitty.transmit(&t2.w, .{ .format = .rgb, .width = 2, .height = 2 }, &@as([16]u8, @splat(1))),
     );
     try std.testing.expectEqualStrings("", t2.w.buffered());
 

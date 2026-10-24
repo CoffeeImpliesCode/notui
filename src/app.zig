@@ -1317,10 +1317,10 @@ const TestModel = struct {
     count: i32 = 0,
     draws: usize = 0,
 
-    fn init(_: std.mem.Allocator) !struct { model: TestModel, cmd: Cmd(TestModel.Msg) } {
+    pub fn init(_: std.mem.Allocator) !struct { model: TestModel, cmd: Cmd(TestModel.Msg) } {
         return .{ .model = .{}, .cmd = .none };
     }
-    fn update(self: *TestModel, msg: Msg, _: *Context) !Cmd(Msg) {
+    pub fn update(self: *TestModel, msg: Msg, _: *Context) !Cmd(Msg) {
         switch (msg) {
             .tick => self.count += 1,
             .inc => self.count += 1,
@@ -1328,7 +1328,7 @@ const TestModel = struct {
         }
         return .none;
     }
-    fn view(_: *const TestModel, _: *Context) View(TestModel) {
+    pub fn view(_: *const TestModel, _: *Context) View(TestModel) {
         return .{ .draw = &draw };
     }
     fn draw(self: *TestModel, _: *Context, buf: *Buffer) !void {
@@ -1344,10 +1344,10 @@ const RecModel = struct {
     log: [16]u8 = undefined,
     log_len: usize = 0,
 
-    fn init(_: std.mem.Allocator) !struct { model: RecModel, cmd: Cmd(RecModel.Msg) } {
+    pub fn init(_: std.mem.Allocator) !struct { model: RecModel, cmd: Cmd(RecModel.Msg) } {
         return .{ .model = .{}, .cmd = .none };
     }
-    fn update(self: *RecModel, msg: Msg, _: *Context) !Cmd(Msg) {
+    pub fn update(self: *RecModel, msg: Msg, _: *Context) !Cmd(Msg) {
         self.log[self.log_len] = switch (msg) {
             .tick => 't',
             .a => 'a',
@@ -1360,7 +1360,7 @@ const RecModel = struct {
             else => .none,
         };
     }
-    fn view(_: *const RecModel, _: *Context) View(RecModel) {
+    pub fn view(_: *const RecModel, _: *Context) View(RecModel) {
         return .{ .draw = &draw };
     }
     fn draw(_: *RecModel, _: *Context, _: *Buffer) !void {}
@@ -1370,16 +1370,16 @@ const RecModel = struct {
 const CtrlModel = struct {
     pub const Msg = union(enum) { tick, quit };
 
-    fn init(_: std.mem.Allocator) !struct { model: CtrlModel, cmd: Cmd(CtrlModel.Msg) } {
+    pub fn init(_: std.mem.Allocator) !struct { model: CtrlModel, cmd: Cmd(CtrlModel.Msg) } {
         return .{ .model = .{}, .cmd = .none };
     }
-    fn update(_: *CtrlModel, msg: Msg, _: *Context) !Cmd(Msg) {
+    pub fn update(_: *CtrlModel, msg: Msg, _: *Context) !Cmd(Msg) {
         return switch (msg) {
             .quit => .quit,
             .tick => .none,
         };
     }
-    fn view(_: *const CtrlModel, _: *Context) View(CtrlModel) {
+    pub fn view(_: *const CtrlModel, _: *Context) View(CtrlModel) {
         return .{ .draw = &draw };
     }
     fn draw(_: *CtrlModel, _: *Context, buf: *Buffer) !void {
@@ -1489,7 +1489,7 @@ const FakeTty = struct {
     /// never blocks and the deferral path would never run.
     fn stopReading(self: *FakeTty) !usize {
         const f: std.Io.File = .{ .handle = self.out_w, .flags = .{ .nonblocking = true } };
-        const chunk = [_]u8{'.'} ** 4096;
+        const chunk: [4096]u8 = @splat('.');
         var filled: usize = 0;
         while (true) {
             const n = f.writeStreaming(testing.io, "", &.{&chunk}, 1) catch |err| switch (err) {
@@ -1567,13 +1567,13 @@ fn setupInteractive(
 /// A valid model (passes the contract check).
 const GoodModel = struct {
     pub const Msg = union(enum) { tick };
-    fn init(_: std.mem.Allocator) !struct { model: GoodModel, cmd: Cmd(GoodModel.Msg) } {
+    pub fn init(_: std.mem.Allocator) !struct { model: GoodModel, cmd: Cmd(GoodModel.Msg) } {
         return .{ .model = .{}, .cmd = .none };
     }
-    fn update(_: *GoodModel, _: Msg, _: *Context) !Cmd(Msg) {
+    pub fn update(_: *GoodModel, _: Msg, _: *Context) !Cmd(Msg) {
         return .none;
     }
-    fn view(_: *const GoodModel, _: *Context) View(GoodModel) {
+    pub fn view(_: *const GoodModel, _: *Context) View(GoodModel) {
         return .{ .draw = &draw };
     }
     fn draw(_: *GoodModel, _: *Context, _: *Buffer) !void {}
@@ -1581,7 +1581,7 @@ const GoodModel = struct {
 
 /// A model missing Msg/update/view (fails the contract check).
 const BadModel = struct {
-    fn init(_: std.mem.Allocator) !BadModel {
+    pub fn init(_: std.mem.Allocator) !BadModel {
         return .{};
     }
 };
@@ -1646,13 +1646,13 @@ test "app: degraded path renders one plain frame, no raw mode" {
 const PlainModel = struct {
     pub const Msg = union(enum) { tick };
 
-    fn init(_: std.mem.Allocator) !struct { model: PlainModel, cmd: Cmd(Msg) } {
+    pub fn init(_: std.mem.Allocator) !struct { model: PlainModel, cmd: Cmd(Msg) } {
         return .{ .model = .{}, .cmd = .none };
     }
-    fn update(_: *PlainModel, _: Msg, _: *Context) !Cmd(Msg) {
+    pub fn update(_: *PlainModel, _: Msg, _: *Context) !Cmd(Msg) {
         return .none;
     }
-    fn view(_: *const PlainModel, _: *Context) View(PlainModel) {
+    pub fn view(_: *const PlainModel, _: *Context) View(PlainModel) {
         return .{ .draw = &draw, .title = "window" };
     }
     fn draw(_: *PlainModel, _: *Context, buf: *Buffer) !void {
@@ -1693,13 +1693,13 @@ test "app: run in degraded mode stops after one plain frame" {
 const RefusedInitModel = struct {
     pub const Msg = union(enum) { pulse };
 
-    fn init(_: std.mem.Allocator) !struct { model: RefusedInitModel, cmd: Cmd(Msg) } {
+    pub fn init(_: std.mem.Allocator) !struct { model: RefusedInitModel, cmd: Cmd(Msg) } {
         return error.InitRefused;
     }
-    fn update(_: *RefusedInitModel, _: Msg, _: *Context) !Cmd(Msg) {
+    pub fn update(_: *RefusedInitModel, _: Msg, _: *Context) !Cmd(Msg) {
         return .none;
     }
-    fn view(_: *const RefusedInitModel, _: *Context) View(RefusedInitModel) {
+    pub fn view(_: *const RefusedInitModel, _: *Context) View(RefusedInitModel) {
         return .{ .draw = &draw };
     }
     fn draw(_: *RefusedInitModel, _: *Context, buf: *Buffer) !void {
@@ -1793,7 +1793,7 @@ const OwnedModel = struct {
     buf: []u8 = &.{},
     disposals: usize = 0,
 
-    fn init(gpa: std.mem.Allocator) !struct { model: OwnedModel, cmd: Cmd(Msg) } {
+    pub fn init(gpa: std.mem.Allocator) !struct { model: OwnedModel, cmd: Cmd(Msg) } {
         return .{
             .model = .{ .buf = try gpa.alloc(u8, 64) },
             .cmd = .{ .println = "note" },
@@ -1808,10 +1808,10 @@ const OwnedModel = struct {
         self.buf = &.{};
     }
 
-    fn update(_: *OwnedModel, _: Msg, _: *Context) !Cmd(Msg) {
+    pub fn update(_: *OwnedModel, _: Msg, _: *Context) !Cmd(Msg) {
         return .none;
     }
-    fn view(_: *const OwnedModel, _: *Context) View(OwnedModel) {
+    pub fn view(_: *const OwnedModel, _: *Context) View(OwnedModel) {
         return .{ .draw = &draw };
     }
     fn draw(_: *OwnedModel, _: *Context, buf: *Buffer) !void {
@@ -1976,15 +1976,15 @@ const ArenaDrawModel = struct {
     pub const Msg = union(enum) { tick };
     frame: usize = 0,
 
-    fn init(_: std.mem.Allocator) !struct { model: ArenaDrawModel, cmd: Cmd(ArenaDrawModel.Msg) } {
+    pub fn init(_: std.mem.Allocator) !struct { model: ArenaDrawModel, cmd: Cmd(ArenaDrawModel.Msg) } {
         return .{ .model = .{}, .cmd = .none };
     }
-    fn update(self: *ArenaDrawModel, _: Msg, ctx: *Context) !Cmd(Msg) {
+    pub fn update(self: *ArenaDrawModel, _: Msg, ctx: *Context) !Cmd(Msg) {
         self.frame += 1;
         ctx.render_requested = true;
         return .none;
     }
-    fn view(_: *const ArenaDrawModel, _: *Context) View(ArenaDrawModel) {
+    pub fn view(_: *const ArenaDrawModel, _: *Context) View(ArenaDrawModel) {
         return .{ .draw = &draw };
     }
     fn draw(self: *ArenaDrawModel, ctx: *Context, buf: *Buffer) !void {
@@ -2000,15 +2000,15 @@ const ShrinkModel = struct {
     pub const Msg = union(enum) { tick };
     frame: usize = 0,
 
-    fn init(_: std.mem.Allocator) !struct { model: ShrinkModel, cmd: Cmd(ShrinkModel.Msg) } {
+    pub fn init(_: std.mem.Allocator) !struct { model: ShrinkModel, cmd: Cmd(ShrinkModel.Msg) } {
         return .{ .model = .{}, .cmd = .none };
     }
-    fn update(self: *ShrinkModel, _: Msg, ctx: *Context) !Cmd(Msg) {
+    pub fn update(self: *ShrinkModel, _: Msg, ctx: *Context) !Cmd(Msg) {
         self.frame += 1;
         ctx.render_requested = true;
         return .none;
     }
-    fn view(_: *const ShrinkModel, _: *Context) View(ShrinkModel) {
+    pub fn view(_: *const ShrinkModel, _: *Context) View(ShrinkModel) {
         return .{ .draw = &draw };
     }
     fn draw(self: *ShrinkModel, _: *Context, buf: *Buffer) !void {
@@ -2166,10 +2166,10 @@ const TimerModel = struct {
     seen: [8]u8 = undefined,
     seen_len: usize = 0,
 
-    fn init(_: std.mem.Allocator) !struct { model: TimerModel, cmd: Cmd(TimerModel.Msg) } {
+    pub fn init(_: std.mem.Allocator) !struct { model: TimerModel, cmd: Cmd(TimerModel.Msg) } {
         return .{ .model = .{}, .cmd = .none };
     }
-    fn update(self: *TimerModel, msg: Msg, _: *Context) !Cmd(Msg) {
+    pub fn update(self: *TimerModel, msg: Msg, _: *Context) !Cmd(Msg) {
         self.seen[self.seen_len] = switch (msg) {
             .pulse => 'p',
             .beat => 'b',
@@ -2178,7 +2178,7 @@ const TimerModel = struct {
         self.seen_len += 1;
         return .none;
     }
-    fn view(_: *const TimerModel, _: *Context) View(TimerModel) {
+    pub fn view(_: *const TimerModel, _: *Context) View(TimerModel) {
         return .{ .draw = &draw };
     }
     fn draw(_: *TimerModel, _: *Context, buf: *Buffer) !void {
@@ -2282,16 +2282,16 @@ const InitCmdModel = struct {
     ticks: usize = 0,
     draws: usize = 0,
 
-    fn init(_: std.mem.Allocator) !struct { model: InitCmdModel, cmd: Cmd(InitCmdModel.Msg) } {
+    pub fn init(_: std.mem.Allocator) !struct { model: InitCmdModel, cmd: Cmd(InitCmdModel.Msg) } {
         return .{ .model = .{}, .cmd = .{ .every = .{ .interval_ms = 30, .msg = .tick } } };
     }
-    fn update(self: *InitCmdModel, msg: Msg, _: *Context) !Cmd(Msg) {
+    pub fn update(self: *InitCmdModel, msg: Msg, _: *Context) !Cmd(Msg) {
         switch (msg) {
             .tick => self.ticks += 1,
         }
         return .none;
     }
-    fn view(_: *const InitCmdModel, _: *Context) View(InitCmdModel) {
+    pub fn view(_: *const InitCmdModel, _: *Context) View(InitCmdModel) {
         return .{ .draw = &draw };
     }
     fn draw(self: *InitCmdModel, _: *Context, buf: *Buffer) !void {
@@ -2431,13 +2431,13 @@ const ChurnModel = struct {
     frame: usize = 0,
     draws: usize = 0,
 
-    fn init(_: std.mem.Allocator) !struct { model: ChurnModel, cmd: Cmd(ChurnModel.Msg) } {
+    pub fn init(_: std.mem.Allocator) !struct { model: ChurnModel, cmd: Cmd(ChurnModel.Msg) } {
         return .{ .model = .{}, .cmd = .none };
     }
-    fn update(_: *ChurnModel, _: Msg, _: *Context) !Cmd(Msg) {
+    pub fn update(_: *ChurnModel, _: Msg, _: *Context) !Cmd(Msg) {
         return .none;
     }
-    fn view(_: *const ChurnModel, _: *Context) View(ChurnModel) {
+    pub fn view(_: *const ChurnModel, _: *Context) View(ChurnModel) {
         return .{ .draw = &draw };
     }
     fn draw(self: *ChurnModel, ctx: *Context, buf: *Buffer) !void {
@@ -2669,16 +2669,16 @@ const ChurnQuitModel = struct {
     pub const Msg = union(enum) { tick, quit };
     frame: usize = 0,
 
-    fn init(_: std.mem.Allocator) !struct { model: ChurnQuitModel, cmd: Cmd(ChurnQuitModel.Msg) } {
+    pub fn init(_: std.mem.Allocator) !struct { model: ChurnQuitModel, cmd: Cmd(ChurnQuitModel.Msg) } {
         return .{ .model = .{}, .cmd = .none };
     }
-    fn update(_: *ChurnQuitModel, msg: Msg, _: *Context) !Cmd(Msg) {
+    pub fn update(_: *ChurnQuitModel, msg: Msg, _: *Context) !Cmd(Msg) {
         return switch (msg) {
             .quit => .quit,
             .tick => .none,
         };
     }
-    fn view(_: *const ChurnQuitModel, _: *Context) View(ChurnQuitModel) {
+    pub fn view(_: *const ChurnQuitModel, _: *Context) View(ChurnQuitModel) {
         return .{ .draw = &draw };
     }
     fn draw(self: *ChurnQuitModel, ctx: *Context, buf: *Buffer) !void {
@@ -2846,13 +2846,13 @@ const HeaderModel = struct {
     title: ?[]const u8 = null,
     draws: usize = 0,
 
-    fn init(_: std.mem.Allocator) !struct { model: HeaderModel, cmd: Cmd(HeaderModel.Msg) } {
+    pub fn init(_: std.mem.Allocator) !struct { model: HeaderModel, cmd: Cmd(HeaderModel.Msg) } {
         return .{ .model = .{}, .cmd = .none };
     }
-    fn update(_: *HeaderModel, _: Msg, _: *Context) !Cmd(Msg) {
+    pub fn update(_: *HeaderModel, _: Msg, _: *Context) !Cmd(Msg) {
         return .none;
     }
-    fn view(self: *const HeaderModel, _: *Context) View(HeaderModel) {
+    pub fn view(self: *const HeaderModel, _: *Context) View(HeaderModel) {
         return .{ .draw = &draw, .mouse = self.mouse, .title = self.title };
     }
     fn draw(self: *HeaderModel, _: *Context, buf: *Buffer) !void {
@@ -2907,13 +2907,13 @@ const PaintFailModel = struct {
     fail: bool = false,
     draws: usize = 0,
 
-    fn init(_: std.mem.Allocator) !struct { model: PaintFailModel, cmd: Cmd(PaintFailModel.Msg) } {
+    pub fn init(_: std.mem.Allocator) !struct { model: PaintFailModel, cmd: Cmd(PaintFailModel.Msg) } {
         return .{ .model = .{}, .cmd = .none };
     }
-    fn update(_: *PaintFailModel, _: Msg, _: *Context) !Cmd(Msg) {
+    pub fn update(_: *PaintFailModel, _: Msg, _: *Context) !Cmd(Msg) {
         return .none;
     }
-    fn view(_: *const PaintFailModel, _: *Context) View(PaintFailModel) {
+    pub fn view(_: *const PaintFailModel, _: *Context) View(PaintFailModel) {
         return .{ .draw = &draw };
     }
     fn draw(self: *PaintFailModel, _: *Context, buf: *Buffer) DrawError!void {

@@ -261,7 +261,7 @@ const Transform = struct {
         if (depth >= 64) return error.Unsupported;
         try self.ctx.chargeWork(1, 1, .transform);
         if (try self.staticCallable(value)) |known| {
-            return known.typ == b.type_closure and (depth != 0 or self.join_inputs[@intFromEnum(value)]);
+            return known.typ == b.type_closure and (depth != 0 or self.join_inputs[@backingInt(value)]);
         }
         if (try knownFunctionInCode(self.ctx, self.source, self.source_closure, value) != null) return true;
         const inputs = (try callable_mod.incoming(self.ctx, self.source, value)) orelse return false;
@@ -278,7 +278,7 @@ const Transform = struct {
         block: Code.BlockId,
         node: Code.Node,
     ) Error!?Code.ValueId {
-        if (!self.join_inputs[@intFromEnum(node.result)]) return null;
+        if (!self.join_inputs[@backingInt(node.result)]) return null;
         const known = (try self.staticCallable(node.result)) orelse return null;
         if (known.typ != b.type_closure) return null;
         if (self.generation_depth >= max_generation_depth) return error.Unsupported;
@@ -412,13 +412,13 @@ const Transform = struct {
     }
 
     fn mapped(self: *const Transform, value: Code.ValueId) Error!Pair {
-        const index = @intFromEnum(value);
+        const index = @backingInt(value);
         if (index >= self.values.len or self.values[index].primal == .invalid) return error.InvalidCode;
         return self.values[index];
     }
 
     fn setMapped(self: *Transform, source_value: Code.ValueId, pair: Pair) Error!void {
-        const index = @intFromEnum(source_value);
+        const index = @backingInt(source_value);
         if (index >= self.values.len or pair.primal == .invalid or pair.tangent == .invalid) {
             return error.InvalidCode;
         }
@@ -426,7 +426,7 @@ const Transform = struct {
     }
 
     fn sourceBinding(self: *const Transform, binding: Code.BindingId) Error!Code.Binding {
-        const index = @intFromEnum(binding);
+        const index = @backingInt(binding);
         if (index >= self.source.bindings.len) return error.InvalidCode;
         return self.source.bindings[index];
     }
@@ -445,7 +445,7 @@ const Transform = struct {
     fn lookupBindingPair(self: *const Transform, function: Code.FunctionId, binding: Code.BindingId) Error!Pair {
         const definition = try self.sourceBinding(binding);
         if (definition.function == function) {
-            const index = @intFromEnum(binding);
+            const index = @backingInt(binding);
             if (index >= self.binding_values.len) return error.InvalidCode;
             if (self.binding_values[index].primal != .invalid) return self.binding_values[index];
             if (definition.value != .invalid) return self.mapped(definition.value);
@@ -459,34 +459,34 @@ const Transform = struct {
     }
 
     fn setBindingPair(self: *Transform, binding: Code.BindingId, pair: Pair) Error!void {
-        const index = @intFromEnum(binding);
+        const index = @backingInt(binding);
         if (index >= self.binding_values.len) return error.InvalidCode;
         self.binding_values[index] = pair;
         const generated = self.bindings[index];
         const tangent = self.tangent_bindings[index];
         if (generated == .invalid or tangent == .invalid) return error.InvalidCode;
-        self.builder.bindings.items[@intFromEnum(generated)].value = pair.primal;
-        self.builder.bindings.items[@intFromEnum(tangent)].value = pair.tangent;
+        self.builder.bindings.items[@backingInt(generated)].value = pair.primal;
+        self.builder.bindings.items[@backingInt(tangent)].value = pair.tangent;
     }
 
     fn mappedBinding(self: *const Transform, binding: Code.BindingId) Error!Code.BindingId {
-        const index = @intFromEnum(binding);
+        const index = @backingInt(binding);
         if (index >= self.bindings.len or self.bindings[index] == .invalid) return error.InvalidCode;
         return self.bindings[index];
     }
 
     fn mappedTangentBinding(self: *const Transform, binding: Code.BindingId) Error!Code.BindingId {
-        const index = @intFromEnum(binding);
+        const index = @backingInt(binding);
         if (index >= self.tangent_bindings.len or self.tangent_bindings[index] == .invalid) return error.InvalidCode;
         return self.tangent_bindings[index];
     }
 
     fn lookupCallable(self: *const Transform, value: Code.ValueId) ?CallableInfo {
-        return self.callable_infos.get(@intFromEnum(value));
+        return self.callable_infos.get(@backingInt(value));
     }
 
     fn recordCallable(self: *Transform, value: Code.ValueId, function: Code.FunctionId) Error!void {
-        try self.callable_infos.put(self.scratch, @intFromEnum(value), .{ .function = function });
+        try self.callable_infos.put(self.scratch, @backingInt(value), .{ .function = function });
     }
 
     fn materialize(
@@ -507,7 +507,7 @@ const Transform = struct {
         args: []const Code.ValueId,
         source: SourceUnit.Ref,
     ) Error!Code.ValueId {
-        const tag = try self.addLiteral(function, block, .i64(@intFromEnum(operation)), source);
+        const tag = try self.addLiteral(function, block, .i64(@backingInt(operation)), source);
         var operands = std.ArrayList(Code.ValueId).empty;
         defer operands.deinit(self.scratch);
         try operands.append(self.scratch, tag);
@@ -780,12 +780,12 @@ const Transform = struct {
             const literal = node.operation.literal;
             if (literal.typ != b.type_i64) return null;
             const raw = literal.obj.toInt(i64);
-            if (raw < @intFromEnum(tensor.Operation.stack) or
-                raw > @intFromEnum(tensor.Operation.scan))
+            if (raw < @backingInt(tensor.Operation.stack) or
+                raw > @backingInt(tensor.Operation.scan))
             {
                 return null;
             }
-            return @enumFromInt(raw);
+            return @fromBackingInt(@intCast(raw));
         }
         return null;
     }
@@ -1055,7 +1055,7 @@ const Transform = struct {
         }
         var args: std.ArrayList(Code.ValueId) = .empty;
         defer args.deinit(self.scratch);
-        try args.append(self.scratch, try self.addLiteral(function, block, .i64(@intFromEnum(operation)), source));
+        try args.append(self.scratch, try self.addLiteral(function, block, .i64(@backingInt(operation)), source));
         try args.append(self.scratch, kernel);
         for (payload) |argument| try args.append(self.scratch, (try self.mapped(argument)).primal);
         for (payload) |argument| try args.append(self.scratch, (try self.mapped(argument)).tangent);
@@ -1170,7 +1170,7 @@ const Transform = struct {
                     .args = try self.builder.addOperands(args.items),
                     .result_count = 2,
                 } }, source);
-                return .{ .primal = result, .tangent = @enumFromInt(@intFromEnum(result) + 1), .active = true };
+                return .{ .primal = result, .tangent = @fromBackingInt(@intCast(@backingInt(result) + 1)), .active = true };
             },
             .linearize => {
                 const result = try self.addGeneratedNode(function, block, .{ .dynamic_call = .{
@@ -1237,7 +1237,7 @@ const Transform = struct {
 
     fn scalarTag(self: *const Transform, args: []const Code.ValueId) ?rules.ScalarOp {
         if (args.len == 0) return null;
-        const id = @intFromEnum(args[0]);
+        const id = @backingInt(args[0]);
         if (id >= self.source.values.len) return null;
         for (self.source.nodes) |node| {
             if (node.result != args[0]) continue;
@@ -1245,8 +1245,8 @@ const Transform = struct {
             const literal = node.operation.literal;
             if (literal.typ != b.type_i64) return null;
             const raw = literal.obj.toInt(i64);
-            if (raw < 0 or raw > @intFromEnum(rules.ScalarOp.realize_tangent)) return null;
-            return @enumFromInt(raw);
+            if (raw < 0 or raw > @backingInt(rules.ScalarOp.realize_tangent)) return null;
+            return @fromBackingInt(@intCast(raw));
         }
         return null;
     }
@@ -1265,7 +1265,7 @@ const Transform = struct {
         defer dispatch_args.deinit(self.scratch);
         try dispatch_args.append(
             self.scratch,
-            try self.addLiteral(function, block, .i64(@intFromEnum(operation)), source),
+            try self.addLiteral(function, block, .i64(@backingInt(operation)), source),
         );
         try dispatch_args.append(self.scratch, try self.addNil(function, block, source));
         for (arguments, 0..) |argument, index| {
@@ -1576,14 +1576,14 @@ const Transform = struct {
                 switch (node.operation) {
                     .literal, .quote => |value| return value,
                     .local_read => |binding| {
-                        next = self.source.bindings[@intFromEnum(binding)].value;
+                        next = self.source.bindings[@backingInt(binding)].value;
                     },
                     .global_read => |global| {
-                        const cell = self.source.globals[@intFromEnum(global)];
+                        const cell = self.source.globals[@backingInt(global)];
                         if (cell.binding == .invalid) {
                             return try self.runtime.nsGet(self.source_closure.parent_ns, cell.name);
                         }
-                        next = self.source.bindings[@intFromEnum(cell.binding)].value;
+                        next = self.source.bindings[@backingInt(cell.binding)].value;
                     },
                     else => return null,
                 }
@@ -1636,11 +1636,11 @@ const Transform = struct {
         const helper_code = helper.code orelse return error.Unsupported;
         if (helper_code != self.source) return error.InvalidCode;
         const helper_info = try sourceFunction(helper_code, helper.function_id);
-        const helper_index = @intFromEnum(helper.function_id);
+        const helper_index = @backingInt(helper.function_id);
         if (helper_index >= self.functions.len) return error.InvalidCode;
         const target = self.functions[helper_index].jvp;
         if (target == .invalid) return error.Unsupported;
-        const target_info = self.builder.functions.items[@intFromEnum(target)];
+        const target_info = self.builder.functions.items[@backingInt(target)];
 
         var captures = std.ArrayList(Code.ValueId).empty;
         defer captures.deinit(self.scratch);
@@ -1702,7 +1702,7 @@ const Transform = struct {
         } }, node);
         return .{
             .primal = result,
-            .tangent = @enumFromInt(@intFromEnum(result) + 1),
+            .tangent = @fromBackingInt(@intCast(@backingInt(result) + 1)),
             .active = true,
         };
     }
@@ -1746,10 +1746,10 @@ const Transform = struct {
         } }, node);
         var index: u8 = 0;
         while (index < call.result_count) : (index += 1) {
-            const primal: Code.ValueId = @enumFromInt(@intFromEnum(result) + @as(u32, index) * 2);
+            const primal: Code.ValueId = @fromBackingInt(@intCast(@backingInt(result) + @as(u32, index) * 2));
             try self.recordCallResult(node, index, .{
                 .primal = primal,
-                .tangent = @enumFromInt(@intFromEnum(primal) + 1),
+                .tangent = @fromBackingInt(@intCast(@backingInt(primal) + 1)),
                 .active = true,
             }, tail_results);
         }
@@ -1770,7 +1770,7 @@ const Transform = struct {
             if (index >= results.len) return error.InvalidCode;
             results[index] = pair;
         } else {
-            try self.setMapped(@enumFromInt(@intFromEnum(node.result) + index), pair);
+            try self.setMapped(@fromBackingInt(@intCast(@backingInt(node.result) + index)), pair);
         }
     }
 
@@ -1783,19 +1783,19 @@ const Transform = struct {
     ) Error!void {
         var index: u8 = 0;
         while (index < count) : (index += 1) {
-            const primal: Code.ValueId = @enumFromInt(@intFromEnum(result) + @as(u32, index) * 2);
+            const primal: Code.ValueId = @fromBackingInt(@intCast(@backingInt(result) + @as(u32, index) * 2));
             try self.recordCallResult(node, index, .{
                 .primal = primal,
-                .tangent = @enumFromInt(@intFromEnum(primal) + 1),
+                .tangent = @fromBackingInt(@intCast(@backingInt(primal) + 1)),
                 .active = true,
             }, tail_results);
         }
     }
 
     fn immutableCellCallable(self: *Transform, global: Code.GlobalCellId) Error!?Code.FunctionId {
-        const cell = self.source.globals[@intFromEnum(global)];
+        const cell = self.source.globals[@backingInt(global)];
         if (cell.binding == .invalid) return null;
-        const binding = self.source.bindings[@intFromEnum(cell.binding)];
+        const binding = self.source.bindings[@backingInt(cell.binding)];
         var writes: usize = 0;
         for (self.source.nodes) |node| {
             try self.ctx.chargeWork(1, 1, .transform);
@@ -1831,13 +1831,13 @@ const Transform = struct {
                     continue;
                 },
                 .local_read => |binding| {
-                    if (self.source.bindings[@intFromEnum(binding)].value == value) return false;
+                    if (self.source.bindings[@backingInt(binding)].value == value) return false;
                     continue;
                 },
                 .global_read => |global| {
-                    const binding = self.source.globals[@intFromEnum(global)].binding;
+                    const binding = self.source.globals[@backingInt(global)].binding;
                     if (binding != .invalid and
-                        self.source.bindings[@intFromEnum(binding)].value == value) return false;
+                        self.source.bindings[@backingInt(binding)].value == value) return false;
                     continue;
                 },
                 else => continue,
@@ -1896,7 +1896,7 @@ const Transform = struct {
             } }, node);
             var index: u8 = 0;
             while (index < call.result_count) : (index += 1) {
-                const primal: Code.ValueId = @enumFromInt(@intFromEnum(result) + index);
+                const primal: Code.ValueId = @fromBackingInt(@intCast(@backingInt(result) + index));
                 const tangent = try self.emitPairNil(function, block, primal, node.source);
                 try self.recordCallResult(node, index, tangent, tail_results);
             }
@@ -1904,7 +1904,7 @@ const Transform = struct {
         }
         const resolved = try self.staticCallable(call.callee);
         if (call.self_target != .invalid) {
-            const target_index = @intFromEnum(call.self_target);
+            const target_index = @backingInt(call.self_target);
             if (target_index >= self.functions.len) return error.InvalidCode;
             if (resolved) |target_value| {
                 if (self.isCurrentSourceFunction(target_value, call.self_target)) {
@@ -1913,7 +1913,7 @@ const Transform = struct {
                     const result = try self.addNode(function, block, .{ .direct_call = .{
                         .function = target,
                         .args = try self.addJvpArguments(arguments),
-                        .result_count = self.builder.functions.items[@intFromEnum(target)].result_count,
+                        .result_count = self.builder.functions.items[@backingInt(target)].result_count,
                     } }, node);
                     return self.recordPairedResults(node, call.result_count, result, tail_results);
                 }
@@ -2005,7 +2005,7 @@ const Transform = struct {
                 try self.setMapped(node.result, .{ .primal = primal, .tangent = tangent, .active = pair.active });
             },
             .global_read => |global| {
-                const index = @intFromEnum(global);
+                const index = @backingInt(global);
                 if (index >= self.globals.len) return error.InvalidCode;
                 const primal = try self.addNode(function, block, .{ .global_read = self.globals[index] }, node);
                 if (self.tangent_globals[index] == .invalid) {
@@ -2025,11 +2025,11 @@ const Transform = struct {
             },
             .global_write => |write| {
                 if (write.assign_existing) return error.Unsupported;
-                const index = @intFromEnum(write.cell);
+                const index = @backingInt(write.cell);
                 if (index >= self.globals.len) return error.InvalidCode;
                 const cell = self.source.globals[index];
                 if (cell.binding == .invalid or self.tangent_globals[index] == .invalid) return error.Unsupported;
-                if (self.source.bindings[@intFromEnum(cell.binding)].function != source_function) {
+                if (self.source.bindings[@backingInt(cell.binding)].function != source_function) {
                     return error.Unsupported;
                 }
                 const pair = try self.mapped(write.value);
@@ -2149,7 +2149,7 @@ const Transform = struct {
                             } }, node);
                             return self.setMapped(node.result, .{
                                 .primal = result,
-                                .tangent = @enumFromInt(@intFromEnum(result) + 1),
+                                .tangent = @fromBackingInt(@intCast(@backingInt(result) + 1)),
                                 .active = true,
                             });
                         }
@@ -2193,24 +2193,24 @@ const Transform = struct {
                 }
                 const transformed_count = std.math.mul(u16, target.result_count, 2) catch return error.Unsupported;
                 const result = try self.addNode(function, block, .{ .direct_call = .{
-                    .function = self.functions[@intFromEnum(call.function)].jvp,
+                    .function = self.functions[@backingInt(call.function)].jvp,
                     .args = try self.builder.addOperands(args.items),
                     .result_count = @intCast(transformed_count),
                 } }, node);
                 var result_index: u8 = 0;
                 while (result_index < call.result_count) : (result_index += 1) {
                     const source_value: Code.ValueId =
-                        @enumFromInt(@intFromEnum(node.result) + result_index);
+                        @fromBackingInt(@intCast(@backingInt(node.result) + result_index));
                     const pair: Pair = .{
-                        .primal = @as(Code.ValueId, @enumFromInt(@intFromEnum(result) + result_index * 2)),
-                        .tangent = @as(Code.ValueId, @enumFromInt(@intFromEnum(result) + result_index * 2 + 1)),
+                        .primal = @as(Code.ValueId, @fromBackingInt(@intCast(@backingInt(result) + result_index * 2))),
+                        .tangent = @as(Code.ValueId, @fromBackingInt(@intCast(@backingInt(result) + result_index * 2 + 1))),
                         .active = true,
                     };
                     try self.setMapped(source_value, pair);
                 }
             },
             .make_closure => |closure| {
-                const target_index = @intFromEnum(closure.function);
+                const target_index = @backingInt(closure.function);
                 if (target_index >= self.functions.len) return error.InvalidCode;
                 const target = self.functions[target_index];
                 const source_captures = try self.sourceOperands(closure.captures);
@@ -2234,7 +2234,7 @@ const Transform = struct {
                 try self.setMapped(node.result, .{ .primal = primal, .tangent = tangent, .active = true });
             },
             .try_begin => |handler| {
-                const index = @intFromEnum(handler);
+                const index = @backingInt(handler);
                 if (index >= self.handlers.len) return error.InvalidCode;
                 _ = try self.addNode(function, block, .{ .try_begin = self.handlers[index] }, node);
             },
@@ -2255,7 +2255,7 @@ const Transform = struct {
 
     fn transformFunction(self: *Transform, source_function: Code.FunctionId) Error!void {
         const source_info = try sourceFunction(self.source, source_function);
-        const generated = self.functions[@intFromEnum(source_function)].jvp;
+        const generated = self.functions[@backingInt(source_function)].jvp;
         const block_start: usize = source_info.block_start;
         const block_end = std.math.add(usize, block_start, source_info.block_count) catch return error.InvalidCode;
         if (block_end > self.source.function_blocks.len) return error.InvalidCode;
@@ -2269,13 +2269,13 @@ const Transform = struct {
         }
 
         for (self.source.function_blocks[block_start..block_end]) |source_block_id| {
-            const source_block = self.source.blocks[@intFromEnum(source_block_id)];
-            const block = self.blocks[@intFromEnum(source_block_id)];
+            const source_block = self.source.blocks[@backingInt(source_block_id)];
+            const block = self.blocks[@backingInt(source_block_id)];
             const node_start: usize = source_block.node_start;
             const node_end = std.math.add(usize, node_start, source_block.node_count) catch return error.InvalidCode;
             if (node_end > self.source.block_nodes.len) return error.InvalidCode;
             for (self.source.block_nodes[node_start..node_end]) |node_id| {
-                const node_index = @intFromEnum(node_id);
+                const node_index = @backingInt(node_id);
                 if (node_index >= self.source.nodes.len) return error.InvalidCode;
                 try self.transformNode(source_function, generated, block, self.source.nodes[node_index]);
             }
@@ -2315,7 +2315,7 @@ const Transform = struct {
             return_values.appendAssumeCapacity(pair.primal);
             return_values.appendAssumeCapacity(pair.tangent);
         }
-        if (return_values.items.len != self.builder.functions.items[@intFromEnum(function)].result_count) {
+        if (return_values.items.len != self.builder.functions.items[@backingInt(function)].result_count) {
             return error.InvalidCode;
         }
         try self.builder.setTerminator(block, .{
@@ -2340,7 +2340,7 @@ const Transform = struct {
         var have_target = false;
 
         if (call.self_target != .invalid) {
-            const target_index = @intFromEnum(call.self_target);
+            const target_index = @backingInt(call.self_target);
             if (target_index >= self.functions.len) return error.InvalidCode;
             if (resolved) |target_value| {
                 if (self.isCurrentSourceFunction(target_value, call.self_target)) {
@@ -2409,7 +2409,7 @@ const Transform = struct {
         }
         if (!have_target) return self.transformTailCallAsReturn(function, block, call);
         const result_count = std.math.mul(u8, call.result_count, 2) catch return error.Unsupported;
-        if (result_count != self.builder.functions.items[@intFromEnum(function)].result_count) {
+        if (result_count != self.builder.functions.items[@backingInt(function)].result_count) {
             return error.InvalidCode;
         }
         try self.builder.setTerminator(block, .{ .tail_call = .{
@@ -2429,7 +2429,7 @@ const Transform = struct {
         switch (term) {
             .none => return error.InvalidCode,
             .jump => |edge| try self.builder.setTerminator(block, .{ .jump = .{
-                .target = self.blocks[@intFromEnum(edge.target)],
+                .target = self.blocks[@backingInt(edge.target)],
                 .args = try self.addEdgeArgs(edge),
             } }),
             .branch => |branch| {
@@ -2437,11 +2437,11 @@ const Transform = struct {
                 try self.builder.setTerminator(block, .{ .branch = .{
                     .condition = condition.primal,
                     .then_edge = .{
-                        .target = self.blocks[@intFromEnum(branch.then_edge.target)],
+                        .target = self.blocks[@backingInt(branch.then_edge.target)],
                         .args = try self.addEdgeArgs(branch.then_edge),
                     },
                     .else_edge = .{
-                        .target = self.blocks[@intFromEnum(branch.else_edge.target)],
+                        .target = self.blocks[@backingInt(branch.else_edge.target)],
                         .args = try self.addEdgeArgs(branch.else_edge),
                     },
                 } });
@@ -2492,7 +2492,7 @@ fn cloneFunctions(transform: *Transform) Error!void {
         if (!transform.differentiated[source_index]) continue;
         const jvp = try transform.builder.addFunction(source_function.name, source_function.source);
         transform.functions[source_index].jvp = jvp;
-        const output = &transform.builder.functions.items[@intFromEnum(jvp)];
+        const output = &transform.builder.functions.items[@backingInt(jvp)];
         output.has_rest = false;
         output.result_count = std.math.mul(u8, source_function.result_count, 2) catch return error.Unsupported;
         output.ad_level = std.math.add(u16, source_function.ad_level, 1) catch return error.Unsupported;
@@ -2501,7 +2501,7 @@ fn cloneFunctions(transform: *Transform) Error!void {
         output.arglist = source_function.arglist;
         output.body = source_function.body;
         for (source_blocks[source_function.block_start..][0..source_function.block_count]) |source_block| {
-            transform.blocks[@intFromEnum(source_block)] = try transform.builder.addBlock(jvp);
+            transform.blocks[@backingInt(source_block)] = try transform.builder.addBlock(jvp);
         }
     }
 }
@@ -2513,8 +2513,8 @@ fn cloneGlobals(transform: *Transform) Error!void {
         else
             try transform.builder.addLocalCell(try transform.mappedBinding(global.binding), global.source);
         if (global.binding != .invalid) {
-            const binding = transform.source.bindings[@intFromEnum(global.binding)];
-            if (transform.differentiated[@intFromEnum(binding.function)]) {
+            const binding = transform.source.bindings[@backingInt(global.binding)];
+            if (transform.differentiated[@backingInt(binding.function)]) {
                 transform.tangent_globals[index] = try transform.builder.addLocalCell(
                     try transform.mappedTangentBinding(global.binding),
                     global.source,
@@ -2526,20 +2526,20 @@ fn cloneGlobals(transform: *Transform) Error!void {
 
 fn cloneBindings(transform: *Transform) Error!void {
     const source_bindings = transform.source.function_bindings;
-    for (transform.source.bindings) |binding| transform.bindings[@intFromEnum(binding.id)] = binding.id;
+    for (transform.source.bindings) |binding| transform.bindings[@backingInt(binding.id)] = binding.id;
     for (transform.source.functions, 0..) |source_function, function_index| {
         if (!transform.differentiated[function_index]) continue;
         const generated = transform.functions[function_index].jvp;
         for (source_bindings[source_function.binding_start..][0..source_function.binding_count]) |binding_id| {
-            const binding = transform.source.bindings[@intFromEnum(binding_id)];
-            transform.bindings[@intFromEnum(binding_id)] = try transform.builder.addBinding(
+            const binding = transform.source.bindings[@backingInt(binding_id)];
+            transform.bindings[@backingInt(binding_id)] = try transform.builder.addBinding(
                 generated,
                 binding.name,
                 binding.kind,
                 binding.source,
             );
-            const tangent_name = try makeTangentSymbol(transform.runtime, function_index, @intFromEnum(binding_id));
-            transform.tangent_bindings[@intFromEnum(binding_id)] = try transform.builder.addBinding(
+            const tangent_name = try makeTangentSymbol(transform.runtime, function_index, @backingInt(binding_id));
+            transform.tangent_bindings[@backingInt(binding_id)] = try transform.builder.addBinding(
                 generated,
                 tangent_name,
                 .let,
@@ -2549,17 +2549,17 @@ fn cloneBindings(transform: *Transform) Error!void {
         const parameter_values = transform.source.parameters[source_function.parameter_start..];
         const parameters = parameter_values[0..source_function.parameter_count];
         for (parameters) |binding_id| {
-            const mapped = transform.bindings[@intFromEnum(binding_id)];
+            const mapped = transform.bindings[@backingInt(binding_id)];
             const value = try transform.builder.addValue(generated);
-            transform.builder.bindings.items[@intFromEnum(mapped)].value = value;
+            transform.builder.bindings.items[@backingInt(mapped)].value = value;
             try transform.builder.addParameter(generated, mapped);
         }
         for (parameters) |binding_id| {
-            const index = @intFromEnum(binding_id);
+            const index = @backingInt(binding_id);
             const tangent = transform.tangent_bindings[index];
             const seed = try transform.builder.addValue(generated);
             try transform.builder.addParameter(generated, tangent);
-            const primal = transform.builder.bindings.items[@intFromEnum(transform.bindings[index])].value;
+            const primal = transform.builder.bindings.items[@backingInt(transform.bindings[index])].value;
             const pair: Pair = .{ .primal = primal, .tangent = seed, .active = true };
             try transform.setBindingPair(binding_id, pair);
             try transform.setMapped(transform.source.bindings[index].value, pair);
@@ -2574,14 +2574,14 @@ fn cloneBindings(transform: *Transform) Error!void {
 }
 
 fn makeEnvironmentTangent(transform: *Transform, binding_id: Code.BindingId) Error!void {
-    const index = @intFromEnum(binding_id);
+    const index = @backingInt(binding_id);
     if (transform.tangent_bindings[index] != .invalid) return;
     const binding = transform.source.bindings[index];
     const owner = try sourceFunction(transform.source, binding.function);
     const block = transform.source.function_blocks[owner.block_start];
-    const name = try makeTangentSymbol(transform.runtime, @intFromEnum(owner.id), index);
+    const name = try makeTangentSymbol(transform.runtime, @backingInt(owner.id), index);
     const tangent = try transform.builder.addBinding(owner.id, name, .let, binding.source);
-    transform.builder.bindings.items[@intFromEnum(tangent)].value = try transform.addNil(
+    transform.builder.bindings.items[@backingInt(tangent)].value = try transform.addNil(
         owner.id,
         block,
         binding.source,
@@ -2616,29 +2616,29 @@ fn cloneCaptures(transform: *Transform) Error!void {
 
 fn cloneBlockParameters(transform: *Transform) Error!void {
     for (transform.source.blocks, 0..) |source_block, source_index| {
-        if (!transform.differentiated[@intFromEnum(source_block.function)]) continue;
+        if (!transform.differentiated[@backingInt(source_block.function)]) continue;
         const generated = transform.blocks[source_index];
-        const generated_function = transform.functions[@intFromEnum(source_block.function)].jvp;
+        const generated_function = transform.functions[@backingInt(source_block.function)].jvp;
         const start: usize = source_block.param_start;
         const end = std.math.add(usize, start, source_block.param_count) catch return error.InvalidCode;
         if (end > transform.source.block_parameters.len) return error.InvalidCode;
         for (transform.source.block_parameters[start..end]) |source_value| {
             const primal = try transform.builder.addBlockParam(generated, generated_function);
             const tangent = try transform.builder.addBlockParam(generated, generated_function);
-            transform.values[@intFromEnum(source_value)] = .{ .primal = primal, .tangent = tangent, .active = true };
+            transform.values[@backingInt(source_value)] = .{ .primal = primal, .tangent = tangent, .active = true };
         }
     }
 }
 
 fn cloneHandlers(transform: *Transform) Error!void {
     for (transform.source.handlers, 0..) |handler, index| {
-        if (!transform.differentiated[@intFromEnum(handler.function)]) continue;
-        const function = transform.functions[@intFromEnum(handler.function)].jvp;
+        if (!transform.differentiated[@backingInt(handler.function)]) continue;
+        const function = transform.functions[@backingInt(handler.function)].jvp;
         const exception = try transform.mapped(handler.exception);
         transform.handlers[index] = try transform.builder.addHandler(
             function,
-            transform.blocks[@intFromEnum(handler.protected)],
-            transform.blocks[@intFromEnum(handler.landing)],
+            transform.blocks[@backingInt(handler.protected)],
+            transform.blocks[@backingInt(handler.landing)],
             exception.primal,
         );
     }
@@ -2647,7 +2647,7 @@ fn cloneHandlers(transform: *Transform) Error!void {
 fn transformAll(transform: *Transform) Error!void {
     for (transform.source.functions, 0..) |_, index| {
         if (!transform.differentiated[index]) continue;
-        try transform.transformFunction(@enumFromInt(@as(u32, @intCast(index))));
+        try transform.transformFunction(@fromBackingInt(@intCast(@as(u32, @intCast(index)))));
     }
 }
 fn addWrapper(
@@ -2658,17 +2658,17 @@ fn addWrapper(
 ) Error!Code.FunctionId {
     const source_function = try sourceFunction(transform.source, source_function_id);
     const wrapper = try transform.builder.addFunction(source_function.name, source_function.source);
-    transform.builder.functions.items[@intFromEnum(wrapper)].result_count = if (mode == .jvp) 2 else 1;
-    transform.builder.functions.items[@intFromEnum(wrapper)].ad_level =
+    transform.builder.functions.items[@backingInt(wrapper)].result_count = if (mode == .jvp) 2 else 1;
+    transform.builder.functions.items[@backingInt(wrapper)].ad_level =
         std.math.add(u16, source_function.ad_level, 1) catch return error.Unsupported;
-    transform.builder.functions.items[@intFromEnum(wrapper)].origin = .{
+    transform.builder.functions.items[@backingInt(wrapper)].origin = .{
         .code = transform.source,
         .function = source_function.id,
     };
-    transform.builder.functions.items[@intFromEnum(wrapper)].source_value = source_function.source_value;
-    transform.builder.functions.items[@intFromEnum(wrapper)].arglist = source_function.arglist;
-    transform.builder.functions.items[@intFromEnum(wrapper)].has_rest = false;
-    transform.builder.functions.items[@intFromEnum(wrapper)].body = source_function.body;
+    transform.builder.functions.items[@backingInt(wrapper)].source_value = source_function.source_value;
+    transform.builder.functions.items[@backingInt(wrapper)].arglist = source_function.arglist;
+    transform.builder.functions.items[@backingInt(wrapper)].has_rest = false;
+    transform.builder.functions.items[@backingInt(wrapper)].body = source_function.body;
     const block = try transform.builder.addBlock(wrapper);
     const capture_start: usize = source_function.capture_start;
     const capture_end = std.math.add(
@@ -2697,24 +2697,24 @@ fn addWrapper(
     var parameters = std.ArrayList(Code.ValueId).empty;
     defer parameters.deinit(transform.scratch);
     for (transform.source.parameters[parameter_start..parameter_end]) |source_binding| {
-        const binding = transform.source.bindings[@intFromEnum(source_binding)];
+        const binding = transform.source.bindings[@backingInt(source_binding)];
         const generated = try transform.builder.addBinding(wrapper, binding.name, .parameter, binding.source);
         const value = try transform.builder.addValue(wrapper);
-        transform.builder.bindings.items[@intFromEnum(generated)].value = value;
+        transform.builder.bindings.items[@backingInt(generated)].value = value;
         try transform.builder.addParameter(wrapper, generated);
         try parameters.append(transform.scratch, value);
     }
     var public_seed: Code.ValueId = .invalid;
     if (mode == .jvp) {
-        const seed_name = try makeSeedSymbol(transform.runtime, @intFromEnum(source_function_id), selected_parameter);
+        const seed_name = try makeSeedSymbol(transform.runtime, @backingInt(source_function_id), selected_parameter);
         const seed_binding = try transform.builder.addBinding(wrapper, seed_name, .parameter, source_function.source);
         public_seed = try transform.builder.addValue(wrapper);
-        transform.builder.bindings.items[@intFromEnum(seed_binding)].value = public_seed;
+        transform.builder.bindings.items[@backingInt(seed_binding)].value = public_seed;
         try transform.builder.addParameter(wrapper, seed_binding);
     }
 
     const closure = try transform.addGeneratedNode(wrapper, block, .{ .make_closure = .{
-        .function = transform.functions[@intFromEnum(source_function_id)].jvp,
+        .function = transform.functions[@backingInt(source_function_id)].jvp,
         .captures = try transform.builder.addOperands(closure_captures.items),
     } }, source_function.source);
     var call_args = std.ArrayList(Code.ValueId).empty;
@@ -2736,7 +2736,7 @@ fn addWrapper(
         .result_count = 2,
     } }, source_function.source);
     const tangent = try transform.scalarCall(wrapper, block, .realize_tangent, &.{
-        result, @enumFromInt(@intFromEnum(result) + 1),
+        result, @fromBackingInt(@intCast(@backingInt(result) + 1)),
     }, source_function.source);
     if (mode == .derivative) {
         try transform.builder.setTerminator(block, .{
@@ -2804,7 +2804,7 @@ fn materializeClosure(
     guard: *const skript.data.ClosureGuard,
     placeholder: Value,
 ) Error!Value {
-    const index = @intFromEnum(function);
+    const index = @backingInt(function);
     if (index >= program.fns.len) return error.InvalidCode;
     const lowered = program.fns[index];
     if (placeholder.typ != b.type_closure or placeholder.obj == .null) return error.InvalidCode;
@@ -2917,24 +2917,24 @@ fn generateAtDepth(
     try cloneHandlers(&transform);
     try transformAll(&transform);
     for (transform.source.bindings) |binding| {
-        if (!transform.differentiated[@intFromEnum(binding.function)] or binding.value == .invalid) continue;
+        if (!transform.differentiated[@backingInt(binding.function)] or binding.value == .invalid) continue;
         try transform.setBindingPair(binding.id, try transform.mapped(binding.value));
     }
     const source_function = try sourceFunction(source_code, source_closure.function_id);
 
     const public_function = if (mode == .full_jvp)
-        transform.functions[@intFromEnum(source_closure.function_id)].jvp
+        transform.functions[@backingInt(source_closure.function_id)].jvp
     else
         try addWrapper(&transform, source_closure.function_id, mode, parameter);
     for (transform.functions) |pair| {
         if (pair.jvp == .invalid) continue;
-        const nested_generated = &transform.builder.functions.items[@intFromEnum(pair.jvp)];
+        const nested_generated = &transform.builder.functions.items[@backingInt(pair.jvp)];
         nested_generated.allows_ad = transform.higher_order;
         nested_generated.ad_level = std.math.add(u16, source_function.ad_level, 1) catch return error.Unsupported;
     }
-    transform.builder.functions.items[@intFromEnum(public_function)].ad_level =
+    transform.builder.functions.items[@backingInt(public_function)].ad_level =
         std.math.add(u16, source_function.ad_level, 1) catch return error.Unsupported;
-    transform.builder.functions.items[@intFromEnum(public_function)].allows_ad = transform.higher_order;
+    transform.builder.functions.items[@backingInt(public_function)].allows_ad = transform.higher_order;
     const code = try transform.builder.finish(ctx.scratch);
     code.owner = ctx.runtime;
     const program = try ctx.runtime.lowerCode(ctx.scratch, code);
@@ -3436,7 +3436,7 @@ fn capturedValueInCode(source: *const Code.Code, closure: *const Closure, value:
         source.capture_values[start..][0..count],
         closure.captures,
     ) |binding, capture, actual| {
-        const index = @intFromEnum(binding);
+        const index = @backingInt(binding);
         if (index >= source.bindings.len) return null;
         if (capture == value or source.bindings[index].value == value) return actual;
     }
@@ -3472,16 +3472,16 @@ fn knownFunctionInCode(
                     return closure.function_id;
                 },
                 .local_read => |binding| {
-                    const index = @intFromEnum(binding);
+                    const index = @backingInt(binding);
                     if (index >= source.bindings.len) return null;
                     next = source.bindings[index].value;
                 },
                 .global_read => |global| {
-                    const index = @intFromEnum(global);
+                    const index = @backingInt(global);
                     if (index >= source.globals.len) return null;
                     const cell = source.globals[index];
                     if (cell.binding != .invalid) {
-                        const binding_index = @intFromEnum(cell.binding);
+                        const binding_index = @backingInt(cell.binding);
                         if (binding_index >= source.bindings.len) return null;
                         next = source.bindings[binding_index].value;
                     } else {
@@ -3513,18 +3513,18 @@ fn reachableFunctions(
     @memset(selected, false);
     const queue = try allocator.alloc(Code.FunctionId, source.functions.len);
     defer allocator.free(queue);
-    if (@intFromEnum(entry) >= selected.len) return error.InvalidCode;
-    selected[@intFromEnum(entry)] = true;
+    if (@backingInt(entry) >= selected.len) return error.InvalidCode;
+    selected[@backingInt(entry)] = true;
     queue[0] = entry;
     var length: usize = 1;
     var cursor: usize = 0;
     while (cursor < length) : (cursor += 1) {
         const function = try sourceFunction(source, queue[cursor]);
         for (source.function_blocks[function.block_start..][0..function.block_count]) |block_id| {
-            const block = source.blocks[@intFromEnum(block_id)];
+            const block = source.blocks[@backingInt(block_id)];
             for (source.block_nodes[block.node_start..][0..block.node_count]) |node_id| {
                 try context.chargeWork(1, 1, .code);
-                const node = source.nodes[@intFromEnum(node_id)];
+                const node = source.nodes[@backingInt(node_id)];
                 const direct_target: Code.FunctionId = switch (node.operation) {
                     .make_closure => |closure| closure.function,
                     .direct_call => |call| call.function,
@@ -3561,7 +3561,7 @@ fn reachableFunctions(
 
 fn enqueueFunction(selected: []bool, queue: []Code.FunctionId, length: *usize, function: Code.FunctionId) Error!void {
     if (function == .invalid) return;
-    const index = @intFromEnum(function);
+    const index = @backingInt(function);
     if (index >= selected.len) return error.InvalidCode;
     if (selected[index]) return;
     std.debug.assert(length.* < queue.len);

@@ -148,7 +148,7 @@ pub fn bindCallable(ctx: *EvalContext, callable: Value, arity: usize) Error!Valu
     builder.revision = identity.revision;
     const module = try builder.addFunction(null, .{});
     const entry = try builder.addBlock(module);
-    builder.functions.items[@intFromEnum(module)].module_entry = true;
+    builder.functions.items[@backingInt(module)].module_entry = true;
     const function = try builder.addFunction(null, .{});
     const body = try builder.addBlock(function);
     var arguments: [255]Code.ValueId = undefined;
@@ -157,7 +157,7 @@ pub fn bindCallable(ctx: *EvalContext, callable: Value, arity: usize) Error!Valu
         const text = std.fmt.bufPrint(&name, "arg_{d}", .{index}) catch return error.Unsupported;
         const binding = try builder.addBinding(function, try runtime.store.getsym(text), .parameter, .{});
         argument.* = try builder.addValue(function);
-        builder.bindings.items[@intFromEnum(binding)].value = argument.*;
+        builder.bindings.items[@backingInt(binding)].value = argument.*;
         try builder.addParameter(function, binding);
     }
     const callee = try builder.addNode(function, body, .{ .literal = callable }, .{});
@@ -171,7 +171,7 @@ pub fn bindCallable(ctx: *EvalContext, callable: Value, arity: usize) Error!Valu
     const code = try builder.finish(ctx.scratch);
     code.owner = runtime;
     const program = try runtime.lowerCode(ctx.scratch, code);
-    const lowered = program.fns[@intFromEnum(function)];
+    const lowered = program.fns[@backingInt(function)];
     const reference = try runtime.store.create(Closure);
     runtime.store.store(Closure, reference.deref(Closure), .{
         .parent_ns = runtime.root_ns,

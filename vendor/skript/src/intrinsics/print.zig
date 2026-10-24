@@ -43,7 +43,7 @@ pub fn write(ctx: *EvalContext, ns: Value, _: Value, args: []const Value) Error!
     defer scope.deinit();
     const rt = ctx.runtime;
     for (args) |arg| {
-        const tag_val: u64 = @intFromEnum(arg.typ);
+        const tag_val: u64 = @backingInt(arg.typ);
         const typ = if (tag_val <= skript.builtins.type_last_idx)
             rt.predefined_types.items[@as(usize, @intCast(tag_val))].*
         else
@@ -126,7 +126,7 @@ pub const FormatComplex = struct {
 fn widgetLookup(rt: *Runtime, map: anytype, name: []const u8) ?Value {
     const sym = rt.store.getsym(name) catch return null;
     const key: skript.data.MapKey = .{
-        .typ = @intCast(@intFromEnum(skript.builtins.type_keyword)),
+        .typ = @intCast(@backingInt(skript.builtins.type_keyword)),
         .obj = Value.keyword(sym).obj,
     };
     return map.get(key);
@@ -140,7 +140,7 @@ fn widgetOptionWord(v: Value) ?[]const u8 {
 /// Canonical encoding has no slots for extra map entries, so reject them to
 /// preserve ordinary map data.
 fn widgetMapKeysValid(kind: widget_mod.WidgetKind, map: anytype) bool {
-    const keyword_tag: u8 = @intCast(@intFromEnum(skript.builtins.type_keyword));
+    const keyword_tag: u8 = @intCast(@backingInt(skript.builtins.type_keyword));
     var iterator = map.iterator();
     while (iterator.next()) |entry| {
         const key = entry.key_ptr.*;
@@ -425,7 +425,7 @@ pub const FormatValue = struct {
             const col_stride: usize = holder.shape[2];
             const shown_planes: usize = @min(planes, 4);
             const plane_words = row_stride * col_stride * cols; // s1*s2
-            var cw = [_]usize{0} ** 12;
+            var cw: [12]usize = @splat(0);
             for (0..shown_planes) |p| {
                 const p_cw = self.matrixColWidths(
                     holder,
@@ -482,7 +482,7 @@ pub const FormatValue = struct {
 
             if (shown_a > 0 and shown_b > 0) {
                 var cells: [3][3]Cell = undefined;
-                var grid_cw: [3][12]usize = [_][12]usize{[_]usize{0} ** 12} ** 3;
+                var grid_cw: [3][12]usize = @splat(@splat(0));
                 for (0..shown_a) |i| {
                     for (0..shown_b) |j| {
                         const base = i * @as(usize, holder.shape[1]) * cell_words + j * cell_words;
@@ -576,7 +576,7 @@ pub const FormatValue = struct {
         rows: usize,
         cols: usize,
     ) [12]usize {
-        var widths = [_]usize{0} ** 12;
+        var widths: [12]usize = @splat(0);
         var ebuf: [256]u8 = undefined;
         const shown_rows: usize = @min(rows, 8);
         const shown_cols: usize = @min(cols, 12);
@@ -709,7 +709,7 @@ pub const FormatValue = struct {
             const shown_cols: usize = @min(cols, col_cap);
 
             // Per-column max width over the visible window.
-            var col_width: [col_cap]usize = [_]usize{0} ** col_cap;
+            var col_width: [col_cap]usize = @splat(0);
             var ebuf: [256]u8 = undefined;
             for (0..shown_cols) |j| {
                 for (0..shown_rows) |i| {
@@ -819,7 +819,7 @@ pub const FormatValue = struct {
             skript.builtins.type_u32 => try w.print("{d}", .{val.obj.toInt(u32)}),
             skript.builtins.type_u64 => try w.print("{d}", .{val.obj.toInt(u64)}),
             skript.builtins.type_type => {
-                const tag: u64 = @intFromEnum(val.obj);
+                const tag: u64 = @backingInt(val.obj);
                 const typ_ptr: *const skript.Type = if (tag <= skript.builtins.type_last_idx)
                     rt.predefined_types.items[@as(usize, @intCast(tag))]
                 else
@@ -872,13 +872,13 @@ pub const FormatValue = struct {
                 const ptr = val.obj.toPtr(*skript.AstNodeRef);
                 try w.print("{s}", .{ptr.span()});
             },
-            skript.builtins.type_namespace => try w.print("<ns@0x{x:016}>", .{@intFromEnum(val.obj)}),
+            skript.builtins.type_namespace => try w.print("<ns@0x{x:016}>", .{@backingInt(val.obj)}),
             skript.builtins.type_intrinsic => try w.print("<builtin@0x{x:08}>", .{@intFromPtr(val.obj.toPtr(FuncPtr))}),
             skript.builtins.type_pid => try w.print("<pid {d}>", .{val.obj.toPtr(*skript.scheduler.Process).pid}),
             skript.builtins.type_error => try w.print("<error {s}>", .{@errorName(val.errorCode())}),
-            skript.builtins.type_ffifunc => try w.print("<ffifunc@0x{x:016}>", .{@intFromEnum(val.obj)}),
-            skript.builtins.type_opaque => try w.print("<Opaque@0x{x:016}>", .{@intFromEnum(val.obj)}),
-            skript.builtins.type_method => try w.print("<method@0x{x:016}>", .{@intFromEnum(val.obj)}),
+            skript.builtins.type_ffifunc => try w.print("<ffifunc@0x{x:016}>", .{@backingInt(val.obj)}),
+            skript.builtins.type_opaque => try w.print("<Opaque@0x{x:016}>", .{@backingInt(val.obj)}),
+            skript.builtins.type_method => try w.print("<method@0x{x:016}>", .{@backingInt(val.obj)}),
             skript.builtins.type_map => {
                 const holder = val.obj.toRef().deref(skript.data.MapHolder).*;
                 if (try formatWidgetMap(self, w, holder.map)) return;
@@ -905,7 +905,7 @@ pub const FormatValue = struct {
                 }
             },
             else => {
-                const tag: u64 = @intFromEnum(val.typ);
+                const tag: u64 = @backingInt(val.typ);
                 const typ = if (tag <= skript.builtins.type_last_idx)
                     rt.predefined_types.items[@as(usize, @intCast(tag))].*
                 else

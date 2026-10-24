@@ -1,4 +1,4 @@
-//! Inline-first terminal UI toolkit for native Zig 0.16 consumers.
+//! Inline-first terminal UI toolkit for native Zig 0.17 consumers.
 //!
 //! Register the package's `notui` module, then import this root. Its namespaces expose
 //! drawing primitives, components, the app loop, and explicit testing/inspection helpers.

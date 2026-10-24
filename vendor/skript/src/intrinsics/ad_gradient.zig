@@ -594,17 +594,17 @@ fn compileWrapper(
         if (function_info.has_rest) return error.Unsupported;
     }
     const function = try builder.addFunction(function_name, primal.source_ref);
-    builder.functions.items[@intFromEnum(function)].has_rest = false;
-    builder.functions.items[@intFromEnum(function)].source_value = primal.source;
+    builder.functions.items[@backingInt(function)].has_rest = false;
+    builder.functions.items[@backingInt(function)].source_value = primal.source;
     if (source_function) |function_info| {
-        builder.functions.items[@intFromEnum(function)].origin = .{
+        builder.functions.items[@backingInt(function)].origin = .{
             .code = primal.code orelse return error.InvalidCode,
             .function = primal.function_id,
         };
-        builder.functions.items[@intFromEnum(function)].ad_level =
+        builder.functions.items[@backingInt(function)].ad_level =
             std.math.add(u16, function_info.ad_level, 1) catch return error.Unsupported;
-        builder.functions.items[@intFromEnum(function)].arglist = function_info.arglist;
-        builder.functions.items[@intFromEnum(function)].body = function_info.body;
+        builder.functions.items[@backingInt(function)].arglist = function_info.arglist;
+        builder.functions.items[@backingInt(function)].body = function_info.body;
     }
     const block = try builder.addBlock(function);
     const parameter_values = try ctx.scratch.alloc(Code.ValueId, primal.arglist.len);
@@ -612,7 +612,7 @@ fn compileWrapper(
     for (primal.arglist, parameter_values) |symbol, *parameter_value| {
         const binding = try builder.addBinding(function, symbol, .parameter, .{});
         parameter_value.* = try builder.addValue(function);
-        builder.bindings.items[@intFromEnum(binding)].value = parameter_value.*;
+        builder.bindings.items[@backingInt(binding)].value = parameter_value.*;
         try builder.addParameter(function, binding);
     }
 
@@ -648,7 +648,7 @@ fn compileWrapper(
     const code = try builder.finish(ctx.scratch);
     code.owner = rt;
     const program = try rt.lowerCode(ctx.scratch, code);
-    const function_index = @intFromEnum(function);
+    const function_index = @backingInt(function);
     if (function_index >= program.fns.len) return error.InvalidCode;
     const lowered = program.fns[function_index];
     const guard = try snapshotDependencies(ctx, primal_value);
@@ -741,7 +741,7 @@ fn makeCodeOnlySecondProjection(rt: *Runtime) !Value {
         .{},
     );
     const parameter = try builder.addValue(function);
-    builder.bindings.items[@intFromEnum(binding)].value = parameter;
+    builder.bindings.items[@backingInt(binding)].value = parameter;
     try builder.addParameter(function, binding);
 
     const rst_primitive = ctx.registry.idForNative(
@@ -766,7 +766,7 @@ fn makeCodeOnlySecondProjection(rt: *Runtime) !Value {
     const code = try builder.finish(ctx.scratch);
     code.owner = rt;
     const program = try rt.lowerCode(ctx.scratch, code);
-    const function_index = @intFromEnum(function);
+    const function_index = @backingInt(function);
     if (function_index >= program.fns.len) return error.InvalidCode;
     const lowered = program.fns[function_index];
     const reference = try rt.store.create(Closure);

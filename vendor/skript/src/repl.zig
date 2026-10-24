@@ -145,7 +145,7 @@ const Query = struct {
                 };
             },
         };
-        const tag_val: u64 = @intFromEnum(res.typ);
+        const tag_val: u64 = @backingInt(res.typ);
         const typ_ptr: *const skript.Type = if (tag_val <= skript.builtins.type_last_idx)
             rt.predefined_types.items[@as(usize, @intCast(tag_val))]
         else

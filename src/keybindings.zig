@@ -65,7 +65,7 @@ pub const ActionId = struct {
     /// Wrap an app-defined enum value (`@intFromEnum`, so a tagged enum
     /// with payload-less variants works unchanged).
     pub fn fromEnum(value: anytype) ActionId {
-        return .{ .value = @intCast(@intFromEnum(value)) };
+        return .{ .value = @intCast(@backingInt(value)) };
     }
 
     /// Whether two ids are the same action.

@@ -2,8 +2,7 @@
     .name = .skript,
     .version = "0.0.0",
     .fingerprint = 0x2cf1ccfb80bef1f4, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.16.0",
-    // .minimum_zig_version = "0.17.0-dev.1099+7db2ef610",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         // .fehler = .{
         //     .url = "git+https://github.com/ciathefed/fehler?ref=main#26cda8dcd515f4ac54415bd1926508c3042eccfa",
@@ -14,21 +13,6 @@
             // buffering of split CSI sequences (see third_party/zigzag
             // README note). Upstream: meszmate/zigzag @ 226dd3f (0.1.2).
             .path = "third_party/zigzag",
-        },
-        .zemscripten = .{
-            // Vendored (third_party/zemscripten) with a local patch: emcc
-            // and emrun are resolved from PATH (the devenv's `emscripten`
-            // package) instead of an emsdk checkout. Upstream:
-            // zig-gamedev/zemscripten @ main.
-            //
-            // LAZY + web-only: this (and the emcc binary it wraps) is the
-            // Emscripten dependency. It is only resolved/imported inside the
-            // gated web section of build.zig, so native builds and consumers
-            // of skript never need it. It is deliberately NOT listed in
-            // .paths — web is an in-repo dev concern, not a library-consumer
-            // concern, so consumers don't even receive the vendored copy.
-            .path = "third_party/zemscripten",
-            .lazy = true,
         },
         // .zio = .{
         //     .url = "git+https://github.com/lalinsky/zio#deae470b1633cac303e1da190688423adca5509f",
@@ -51,8 +35,8 @@
         //     .hash = "zlinter-0.0.1-OjQ08doQDADkvkcRq2ONICvDheGl2onZzS5upWDxFNnA",
         // },
         .tracy = .{
-            .url = "git+https://codeberg.org/CoffeeImpliesCode/tracy_zig#b2ea5bf4b8fe80f7cd9226d0c4af88dc04e1e07b",
-            .hash = "tracy-1.0.0+0.13.1-R7l8BUBWAQAD_78ohq3IXQ6Wv9CDm2KLAGdjbMmd4p8r",
+            .url = "git+https://codeberg.org/CoffeeImpliesCode/tracy_zig#64a719c4cbbf263def148fa077c7c254c38aae4e",
+            .hash = "tracy-1.0.0+0.13.1-R7l8BeJUAQC55ED4MGX2oHOisHdnLIULkbBU7lwW2kCm",
         },
         .libffi = .{
             // Lazy: libffi's own build.zig panics for targets without
@@ -60,23 +44,19 @@
             // aarch64-windows). build.zig only resolves it via
             // b.lazyDependency inside the ffiSupported gate, so unsupported
             // targets never fetch or build it.
-            .url = "git+https://codeberg.org/CoffeeImpliesCode/libffi?ref=master#41fa734d2afc80708b6f00232951a4c0050cf542",
-            .hash = "libffi-3.7.1-7_tEtKeqGADSiZvd0Yjjw5FgR6zdIoe-CNCayS8-f-kH",
+            .url = "git+https://codeberg.org/CoffeeImpliesCode/libffi#e101f7894db1cd6b2734103ecd6db9badd5a9ed3",
+            .hash = "libffi-3.8.0-7_tEtEA6GQAepwTYbjbh7-7kl0lSqZzselVgKHGhbQEz",
             .lazy = true,
         },
     },
     .paths = .{
         "build.zig",
         "build.zig.zon",
-        "build_web.zig",
         "src",
         "web",
         "test",
         "demo",
-        // The native REPL imports zigzag (src/repl.zig) for terminal width
-        // measurement and model compositing — a real native dependency, so
-        // consumers must receive the vendored copy. zemscripten is NOT
-        // shipped (lazy, web-only; see its comment above).
+        // The native REPL imports zigzag for terminal width and compositing.
         "third_party/zigzag",
     },
 }

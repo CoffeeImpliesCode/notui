@@ -29,7 +29,7 @@ fn addTestParameter(
         .{},
     );
     const value = try builder.addValue(function);
-    builder.bindings.items[@intFromEnum(binding)].value = value;
+    builder.bindings.items[@backingInt(binding)].value = value;
     try builder.addParameter(function, binding);
     return value;
 }
@@ -42,7 +42,7 @@ fn materializeTestClosure(
     const code = try builder.finish(runtime.context().scratch);
     code.owner = runtime;
     const program = try runtime.lowerCode(runtime.context().scratch, code);
-    const index = @intFromEnum(function);
+    const index = @backingInt(function);
     if (index >= program.fns.len) return error.InvalidCode;
     const lowered = program.fns[index];
     const reference = try runtime.store.create(Closure);
@@ -639,7 +639,7 @@ const Session = struct {
             const element: Value = switch (tensor.inner) {
                 .i64 => .i64(@bitCast(word)),
                 .f64 => .f64(@bitCast(word)),
-                .string => .string(@enumFromInt(word)),
+                .string => .string(@fromBackingInt(@intCast(word))),
                 .symbol => .symbol(@ptrFromInt(std.math.cast(usize, word) orelse return error.TypeMismatch)),
                 .keyword => .keyword(@ptrFromInt(std.math.cast(usize, word) orelse return error.TypeMismatch)),
                 .empty => return error.InvalidShape,
@@ -1007,7 +1007,7 @@ fn scalarExpr(
     if (arguments.len != arity) return error.ArityMismatch;
     try requireScalarSlots(session, arguments);
     const operands = try session.allocator.alloc(Expr.NodeId, arguments.len + 1);
-    operands[0] = try session.internScalar(.{ .signed = @intFromEnum(operation) }, .signed_integer);
+    operands[0] = try session.internScalar(.{ .signed = @backingInt(operation) }, .signed_integer);
     for (arguments, 0..) |argument, index| operands[index + 1] = try slotExpr(session, argument);
     const node = try session.region.intern(session.ctx, .{ .primitive_call = .{
         .identity = try scalarIdentity(session),
@@ -1048,7 +1048,7 @@ fn opaqueSlot(
     var identity_revision: u64 = frame.callable.code.revision;
     if (primitive) |primitive_id| {
         if (session.ctx.registry.spec(primitive_id)) |spec| {
-            first = @intFromEnum(primitive_id);
+            first = @backingInt(primitive_id);
             second = session.ctx.registry.version;
             third ^= spec.implementation_revision;
             identity_revision = spec.implementation_revision;
@@ -1058,9 +1058,9 @@ fn opaqueSlot(
         }
     }
     if (callee) |target| switch (target) {
-        .expression => |expression| third ^= @intFromEnum(expression.node),
+        .expression => |expression| third ^= @backingInt(expression.node),
         .concrete => |value| {
-            third ^= @intFromEnum(value.typ);
+            third ^= @backingInt(value.typ);
             if (value.typ == b.type_method and value.obj != .null) {
                 const method = value.obj.toRef().deref(skript.data.Method);
                 first = method.id;
@@ -1071,7 +1071,7 @@ fn opaqueSlot(
                 // their address in an expression identity.
                 if (primitiveIdForValue(session.ctx, value)) |primitive_id| {
                     if (session.ctx.registry.spec(primitive_id)) |spec| {
-                        first = @intFromEnum(primitive_id);
+                        first = @backingInt(primitive_id);
                         second = session.ctx.registry.version;
                         third ^= spec.implementation_revision;
                         identity_revision = spec.implementation_revision;
@@ -1085,7 +1085,7 @@ fn opaqueSlot(
         .closure => |bound| {
             first = bound.code.id;
             second = bound.code.revision;
-            third ^= @intFromEnum(bound.function);
+            third ^= @backingInt(bound.function);
             identity_revision = bound.code.revision;
         },
         .results => |results| third ^= @intCast(results.len),
@@ -1183,7 +1183,7 @@ fn primitiveSlot(
                 else => return opaqueSlot(
                     session,
                     frame,
-                    @intFromEnum(node_id),
+                    @backingInt(node_id),
                     null,
                     arguments,
                     .unknown,
@@ -1191,19 +1191,19 @@ fn primitiveSlot(
                     primitive,
                 ),
             };
-            if (tag < @intFromEnum(rules.ScalarOp.add) or tag > @intFromEnum(rules.ScalarOp.realize_tangent)) {
+            if (tag < @backingInt(rules.ScalarOp.add) or tag > @backingInt(rules.ScalarOp.realize_tangent)) {
                 return error.TypeMismatch;
             }
-            return scalarExpr(session, @enumFromInt(tag), arguments[1..]);
+            return scalarExpr(session, @fromBackingInt(@intCast(tag)), arguments[1..]);
         }
     }
     const spec = session.ctx.registry.spec(primitive) orelse
-        return opaqueSlot(session, frame, @intFromEnum(node_id), null, arguments, .unknown, "primitive", primitive);
+        return opaqueSlot(session, frame, @backingInt(node_id), null, arguments, .unknown, "primitive", primitive);
     const descriptor = rules.descriptorForInvocation(spec.invoke) orelse
         return opaqueSlot(
             session,
             frame,
-            @intFromEnum(node_id),
+            @backingInt(node_id),
             null,
             arguments,
             .unknown,
@@ -1216,7 +1216,7 @@ fn primitiveSlot(
     if (isNative(spec, &skript.intrinsics.list.list)) return listExpr(session, arguments);
     if (isNative(spec, &skript.intrinsics.map.create)) return mapExpr(session, arguments);
     if (isNative(spec, &skript.intrinsics.tensor.create)) return tensorExpr(session, arguments);
-    return opaqueSlot(session, frame, @intFromEnum(node_id), null, arguments, .unknown, spec.stable_name, primitive);
+    return opaqueSlot(session, frame, @backingInt(node_id), null, arguments, .unknown, spec.stable_name, primitive);
 }
 
 fn primitiveIdForValue(
@@ -1264,7 +1264,7 @@ fn invokeActual(
                         else => return opaqueSlot(
                             session,
                             frame,
-                            @intFromEnum(node_id),
+                            @backingInt(node_id),
                             callee,
                             arguments,
                             .unknown,
@@ -1287,7 +1287,7 @@ fn invokeActual(
     return opaqueSlot(
         session,
         frame,
-        @intFromEnum(node_id),
+        @backingInt(node_id),
         callee,
         arguments,
         .unknown,
@@ -1300,13 +1300,13 @@ fn sameConcreteValue(left: Value, right: Value) bool {
     return left.typ == right.typ and left.obj == right.obj;
 }
 fn blockAt(code: *const Code.Code, id: Code.BlockId) Error!*const Code.Block {
-    const index = @intFromEnum(id);
+    const index = @backingInt(id);
     if (index >= code.blocks.len) return error.InvalidCode;
     return &code.blocks[index];
 }
 
 fn nodeAt(code: *const Code.Code, id: Code.BoundNodeId) Error!*const Code.Node {
-    const index = @intFromEnum(id);
+    const index = @backingInt(id);
     if (index >= code.nodes.len) return error.InvalidCode;
     return &code.nodes[index];
 }
@@ -1329,7 +1329,7 @@ fn bindingValue(
     function: Code.FunctionId,
     binding: Code.BindingId,
 ) Error!Code.ValueId {
-    const index = @intFromEnum(binding);
+    const index = @backingInt(binding);
     if (index >= code.bindings.len) return error.InvalidCode;
     const definition = code.bindings[index];
     if (definition.function == function) return definition.value;
@@ -1344,13 +1344,13 @@ fn bindingValue(
 }
 
 fn valueSlot(frame: *const Frame, value: Code.ValueId) Error!Slot {
-    const index = @intFromEnum(value);
+    const index = @backingInt(value);
     if (index >= frame.slots.len) return error.InvalidCode;
     return frame.slots[index];
 }
 
 fn putValue(frame: *Frame, value: Code.ValueId, slot: Slot) Error!void {
-    const index = @intFromEnum(value);
+    const index = @backingInt(value);
     if (index >= frame.slots.len) return error.InvalidCode;
     frame.slots[index] = slot;
 }
@@ -1624,7 +1624,7 @@ fn runBlock(session: *Session, frame: *Frame, block_id: Code.BlockId) Error!RunR
                         .arguments = arguments,
                     } },
                     else => {
-                        const site: Code.BoundNodeId = @enumFromInt(@intFromEnum(current_block));
+                        const site: Code.BoundNodeId = @fromBackingInt(@intCast(@backingInt(current_block)));
                         return .{ .value = try invokeActual(session, frame, site, callee, arguments) };
                     },
                 }
@@ -1643,7 +1643,7 @@ fn executeNode(session: *Session, frame: *Frame, node: *const Code.Node) Error!v
         .quote => |value| try session.slotFromValue(value),
         .local_read => |binding| try valueSlot(frame, try bindingValue(frame.callable.code, frame.function, binding)),
         .global_read => |global| blk: {
-            const index = @intFromEnum(global);
+            const index = @backingInt(global);
             if (index >= frame.callable.code.globals.len) return error.InvalidCode;
             const dependency = try session.ctx.runtime.readDependency(
                 frame.namespace,
@@ -1691,7 +1691,7 @@ fn executeNode(session: *Session, frame: *Frame, node: *const Code.Node) Error!v
                 .equal => try opaqueSlot(
                     session,
                     frame,
-                    @intFromEnum(node.id),
+                    @backingInt(node.id),
                     .{ .concrete = arith.expected_callee },
                     &.{ left, right },
                     .boolean,
@@ -1701,7 +1701,7 @@ fn executeNode(session: *Session, frame: *Frame, node: *const Code.Node) Error!v
                 .less => try opaqueSlot(
                     session,
                     frame,
-                    @intFromEnum(node.id),
+                    @backingInt(node.id),
                     .{ .concrete = arith.expected_callee },
                     &.{ left, right },
                     .boolean,
@@ -1711,7 +1711,7 @@ fn executeNode(session: *Session, frame: *Frame, node: *const Code.Node) Error!v
                 .greater => try opaqueSlot(
                     session,
                     frame,
-                    @intFromEnum(node.id),
+                    @backingInt(node.id),
                     .{ .concrete = arith.expected_callee },
                     &.{ left, right },
                     .boolean,
@@ -1767,7 +1767,7 @@ fn executeNode(session: *Session, frame: *Frame, node: *const Code.Node) Error!v
         if (value == .results) {
             if (value.results.len != node.resultCount()) return error.InvalidCode;
             for (value.results, 0..) |item, index| {
-                try putValue(frame, @enumFromInt(@intFromEnum(result) + index), item);
+                try putValue(frame, @fromBackingInt(@intCast(@backingInt(result) + index)), item);
             }
         } else {
             if (node.resultCount() != 1) return error.InvalidCode;
@@ -1994,10 +1994,10 @@ const DatumWriter = struct {
                         if (std.meta.activeTag(tag_node.kind) == .scalar) {
                             switch (tag_node.kind.scalar.value) {
                                 .signed => |raw| {
-                                    if (raw >= @intFromEnum(rules.ScalarOp.add) and
-                                        raw <= @intFromEnum(rules.ScalarOp.realize_tangent))
+                                    if (raw >= @backingInt(rules.ScalarOp.add) and
+                                        raw <= @backingInt(rules.ScalarOp.realize_tangent))
                                     {
-                                        const operation: rules.ScalarOp = @enumFromInt(raw);
+                                        const operation: rules.ScalarOp = @fromBackingInt(@intCast(raw));
                                         name = scalarOperationName(operation);
                                         start = 1;
                                     }
@@ -2432,7 +2432,7 @@ fn materializeCompiled(
     function: Code.FunctionId,
     guard: *const skript.data.ClosureGuard,
 ) Error!Value {
-    const index = @intFromEnum(function);
+    const index = @backingInt(function);
     if (index >= program.fns.len) return error.InvalidCode;
     const lowered = program.fns[index];
     const reference = try runtime.store.create(Closure);
@@ -2498,7 +2498,7 @@ pub fn compile(
         const name = try reader.name(variable.name);
         const binding = try builder.addBinding(function, try ctx.runtime.store.getsym(name), .parameter, .{});
         const value = try builder.addValue(function);
-        builder.bindings.items[@intFromEnum(binding)].value = value;
+        builder.bindings.items[@backingInt(binding)].value = value;
         try builder.addParameter(function, binding);
         variable_info[index] = .{ .identity = variable.identity, .value = value };
     }
@@ -2550,7 +2550,7 @@ test "symbolic evaluation keeps same-spelled variables distinct" {
     var region = try Expr.Region.init(
         std.testing.allocator,
         context,
-        .{ .identity = @enumFromInt(701) },
+        .{ .identity = @fromBackingInt(@intCast(701)) },
     );
     defer region.deinit();
     const first_id = try region.freshVariable(context, "x", .real, .none);
@@ -2593,7 +2593,7 @@ test "symbolic structured results retain quoted map labels" {
     var region = try Expr.Region.init(
         std.testing.allocator,
         context,
-        .{ .identity = @enumFromInt(702) },
+        .{ .identity = @fromBackingInt(@intCast(702)) },
     );
     defer region.deinit();
     const callable = try makeIdentityClosure(runtime);
@@ -2628,7 +2628,7 @@ test "symbolic evaluation preserves unresolved calls as opaque without invoking 
     var region = try Expr.Region.init(
         std.testing.allocator,
         context,
-        .{ .identity = @enumFromInt(703) },
+        .{ .identity = @fromBackingInt(@intCast(703)) },
     );
     defer region.deinit();
     const variable_id = try region.freshVariable(context, "x", .real, .none);
@@ -2657,7 +2657,7 @@ test "symbolic branches produce bounded inert alternatives" {
     defer runtime.deinit();
     const context = runtime.context();
     var region = try Expr.Region.init(std.testing.allocator, context, .{
-        .identity = @enumFromInt(704),
+        .identity = @fromBackingInt(@intCast(704)),
         .limits = .{ .max_nodes = 8, .max_edges = 16 },
     });
     defer region.deinit();
@@ -2699,7 +2699,7 @@ test "symbolic tail calls dispatch primitives and retain opaque calls" {
     var region = try Expr.Region.init(
         std.testing.allocator,
         context,
-        .{ .identity = @enumFromInt(711) },
+        .{ .identity = @fromBackingInt(@intCast(711)) },
     );
     defer region.deinit();
     const variable_id = try region.freshVariable(context, "x", .real, .none);
@@ -2731,7 +2731,7 @@ test "symbolic tail calls dispatch primitives and retain opaque calls" {
     const sine_operation = sine_operation_node.kind.scalar.value;
     switch (sine_operation) {
         .signed => |tag| try std.testing.expectEqual(
-            @as(i64, @intCast(@intFromEnum(rules.ScalarOp.sin))),
+            @as(i64, @intCast(@backingInt(rules.ScalarOp.sin))),
             tag,
         ),
         else => return error.TestUnexpectedResult,
@@ -2767,7 +2767,7 @@ test "symbolic evaluator rejects deeply nested closure calls" {
     var region = try Expr.Region.init(
         std.testing.allocator,
         context,
-        .{ .identity = @enumFromInt(712) },
+        .{ .identity = @fromBackingInt(@intCast(712)) },
     );
     defer region.deinit();
     const variable_id = try region.freshVariable(context, "x", .real, .none);
@@ -2802,7 +2802,7 @@ test "compiler bounds deeply nested primitive source" {
     var region = try Expr.Region.init(
         std.testing.allocator,
         context,
-        .{ .identity = @enumFromInt(713) },
+        .{ .identity = @fromBackingInt(@intCast(713)) },
     );
     defer region.deinit();
     const primitive = context.registry.idForNative(
@@ -2835,7 +2835,7 @@ test "compiled pure expressions preserve numeric results" {
     var region = try Expr.Region.init(
         std.testing.allocator,
         context,
-        .{ .identity = @enumFromInt(705) },
+        .{ .identity = @fromBackingInt(@intCast(705)) },
     );
     defer region.deinit();
     const variable_id = try region.freshVariable(context, "x", .real, .none);
@@ -2868,7 +2868,7 @@ test "symbolic entry points reject expired handles" {
     var source_region = try Expr.Region.init(
         std.testing.allocator,
         context,
-        .{ .identity = @enumFromInt(706) },
+        .{ .identity = @fromBackingInt(@intCast(706)) },
     );
     const variable_id = try source_region.freshVariable(
         context,
@@ -2883,7 +2883,7 @@ test "symbolic entry points reject expired handles" {
     var output_region = try Expr.Region.init(
         std.testing.allocator,
         context,
-        .{ .identity = @enumFromInt(707) },
+        .{ .identity = @fromBackingInt(@intCast(707)) },
     );
     defer output_region.deinit();
     const callable = try makeIdentityClosure(runtime);
@@ -3037,7 +3037,7 @@ test "nested symbolic closures check guards and balance lifetime leases" {
     var region = try Expr.Region.init(
         std.testing.allocator,
         context,
-        .{ .identity = @enumFromInt(708) },
+        .{ .identity = @fromBackingInt(@intCast(708)) },
     );
     defer region.deinit();
     const variable_id = try region.freshVariable(context, "x", .real, .none);
@@ -3090,7 +3090,7 @@ test "symbolic closure composition uses the callee parent namespace" {
     var region = try Expr.Region.init(
         std.testing.allocator,
         context,
-        .{ .identity = @enumFromInt(709) },
+        .{ .identity = @fromBackingInt(@intCast(709)) },
     );
     defer region.deinit();
     const variable_id = try region.freshVariable(context, "x", .real, .none);
@@ -3118,7 +3118,7 @@ test "registered Point lifting preserves identity metadata and children" {
     var region = try Expr.Region.init(
         std.testing.allocator,
         context,
-        .{ .identity = @enumFromInt(710) },
+        .{ .identity = @fromBackingInt(@intCast(710)) },
     );
     defer region.deinit();
     const callable = try makeIdentityClosure(runtime);

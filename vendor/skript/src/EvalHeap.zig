@@ -541,7 +541,7 @@ const Copier = struct {
             return false;
         }
         if (value.typ == skript.builtins.type_type) {
-            return @intFromEnum(value.obj) > skript.builtins.type_last_idx;
+            return @backingInt(value.obj) > skript.builtins.type_last_idx;
         }
         return true;
     }
@@ -624,7 +624,7 @@ const Copier = struct {
         // Built-in type descriptors are immutable process-independent tags.
         // Custom descriptors can contain arbitrary callable metadata and have
         // no portable field schema, so they are deliberately rejected.
-        return if (@intFromEnum(value.obj) <= skript.builtins.type_last_idx)
+        return if (@backingInt(value.obj) <= skript.builtins.type_last_idx)
             value
         else
             error.Unsupported;
@@ -1481,7 +1481,7 @@ fn testTensorShape(store: *Store, dimensions: []const u32) !Store.TypedSlice(u32
 
 const TestValueRoots = struct {
     runtime: *Runtime,
-    roots: [8]Runtime.ValueRoot = [_]Runtime.ValueRoot{.{}} ** 8,
+    roots: [8]Runtime.ValueRoot = @splat(.{}),
     len: usize = 0,
 
     fn init(runtime: *Runtime) TestValueRoots {

@@ -29,15 +29,15 @@ pub const Value = extern struct {
         pub fn init(owner_id: u32, local_id: u32) ExprId {
             std.debug.assert(owner_id != 0);
             std.debug.assert(local_id != 0);
-            return @enumFromInt((@as(u64, owner_id) << 32) | @as(u64, local_id));
+            return @fromBackingInt(@intCast((@as(u64, owner_id) << 32) | @as(u64, local_id)));
         }
 
         pub fn owner(self: ExprId) u32 {
-            return @truncate(@intFromEnum(self) >> 32);
+            return @truncate(@backingInt(self) >> 32);
         }
 
         pub fn local(self: ExprId) u32 {
-            return @truncate(@intFromEnum(self));
+            return @truncate(@backingInt(self));
         }
 
         pub fn isValid(self: ExprId) bool {
@@ -86,7 +86,7 @@ pub const Value = extern struct {
     /// True when an error Value's payload is a rich ErrorObj Ref rather than
     /// the bare ErrorObject enum.
     pub fn errorPayloadIsRef(obj: Object) bool {
-        return @intFromEnum(obj) > error_payload_max;
+        return @backingInt(obj) > error_payload_max;
     }
 
     /// The Zig error code of an error Value (either payload form).
@@ -136,11 +136,11 @@ pub const Value = extern struct {
     }
 
     pub fn symbol(s: Sym) Value {
-        return .init(skript.builtins.type_symbol, @enumFromInt(@intFromPtr(s)));
+        return .init(skript.builtins.type_symbol, @fromBackingInt(@intCast(@intFromPtr(s))));
     }
 
     pub fn keyword(s: Sym) Value {
-        return .init(skript.builtins.type_keyword, @enumFromInt(@intFromPtr(s)));
+        return .init(skript.builtins.type_keyword, @fromBackingInt(@intCast(@intFromPtr(s))));
     }
 
     pub fn cons(obj: Object) Value {
@@ -188,8 +188,8 @@ pub const Value = extern struct {
     }
 
     pub const nil: Value = .{ .typ = skript.builtins.type_nil };
-    pub const @"true": Value = .{ .typ = skript.builtins.type_bool, .obj = @enumFromInt(1) };
-    pub const @"false": Value = .{ .typ = skript.builtins.type_bool, .obj = @enumFromInt(0) };
+    pub const @"true": Value = .{ .typ = skript.builtins.type_bool, .obj = @fromBackingInt(@intCast(1)) };
+    pub const @"false": Value = .{ .typ = skript.builtins.type_bool, .obj = @fromBackingInt(@intCast(0)) };
 
     pub fn @"bool"(val: bool) Value {
         return if (val) .true else .false;
@@ -323,7 +323,7 @@ pub const Value = extern struct {
 
     pub fn exprId(self: Value) Error!ExprId {
         if (!self.isExpr()) return error.TypeMismatch;
-        const id: ExprId = @enumFromInt(self.obj.toInt(u64));
+        const id: ExprId = @fromBackingInt(@intCast(self.obj.toInt(u64)));
         if (!id.isValid()) return error.TypeMismatch;
         return id;
     }
@@ -457,7 +457,7 @@ test "constructor round-trip: symbol" {
 }
 
 test "constructor round-trip: cons, closure, method, string, opaq, ffi, namespace" {
-    const obj: Object = @enumFromInt(@as(u64, 42));
+    const obj: Object = @fromBackingInt(@intCast(@as(u64, 42)));
     try std.testing.expect(std.meta.eql(Value.cons(obj).obj, obj));
     try std.testing.expectEqual(skript.builtins.type_cons, Value.cons(obj).typ);
     try std.testing.expect(std.meta.eql(Value.closure(obj).obj, obj));

@@ -557,7 +557,7 @@ test "output: the frame is compacted once, at beginFrame, then composing works a
     defer q.deinit();
     var sink: FakeSink = .{ .chunk = 1 };
 
-    const chunk = "y" ** 20;
+    const chunk = &@as([20]u8, @splat('y'));
     try stage(&q, chunk);
     try stage(&q, chunk);
     try stage(&q, chunk);
@@ -575,7 +575,7 @@ test "output: the frame is compacted once, at beginFrame, then composing works a
     try stage(&q, "next-frame");
     try testing.expectEqual(@as(usize, 62), q.pending());
     while (q.pending() > 0) _ = try q.drain(&sink);
-    try testing.expectEqualStrings("y" ** 60 ++ "next-frame", sink.deliveredBytes());
+    try testing.expectEqualStrings(@as([60]u8, @splat('y')) ++ "next-frame", sink.deliveredBytes());
 }
 
 test "output: peak pending and total written track the session" {
@@ -620,7 +620,7 @@ test "output: a slow reader defers frames and memory stays bounded" {
     var sink = try PipeSink.init();
     defer sink.deinit();
 
-    const frame = "x" ** 4096;
+    const frame = &@as([4096]u8, @splat('x'));
     var composed: usize = 0;
     var blocked = false;
     while (q.canCompose()) {
