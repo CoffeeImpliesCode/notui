@@ -133,5 +133,4 @@ Non-native execution requires the corresponding QEMU user-mode runner.
 
 ## License
 
-This repository does not include a root license file.
-Vendored components retain their included license files.
+MIT, see [LICENSE](LICENSE). Third-party components keep their own licenses: see THIRD_PARTY_NOTICES.md.

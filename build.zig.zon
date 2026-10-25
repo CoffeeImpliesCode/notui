@@ -21,5 +21,8 @@
         "README.md",
         "FAST_COVERAGE.md",
         "vendor",
+        "LICENSE",
+        "THIRD_PARTY_NOTICES.md",
+        "MANIFEST-notui-fonts.txt",
     },
 }

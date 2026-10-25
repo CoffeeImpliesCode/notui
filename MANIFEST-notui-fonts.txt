@@ -1,0 +1,11 @@
+Latin Modern font manifest for notui
+
+This manifest records the Latin Modern font data and glyph outline covered by the GUST Font License notice in THIRD_PARTY_NOTICES.md.
+
+Embedded font data:
+- Latin Modern Math (latinmodern-math.otf): vendor/ztex/src/fonts/lmmath.zig and vendor/ztex/src/fonts/lmmath/part0.zig through part4.zig.
+- Latin Modern Roman Regular and Italic: vendor/ztex/src/fonts/lmroman_regular.zig and vendor/ztex/src/fonts/lmroman_italic.zig.
+
+Naming exception: the embedded OTF font data retains its upstream font names. The repository stores the font data in the listed Zig source files rather than under the original OTF filenames. This records the exception to the GUST Font License clause 1 request to rename font names and files in derived works; that request is not legally required.
+
+The U+03BB outline extracted from Latin Modern Math is in src/lambda_fixture.zig. It is a glyph fixture, not a font file, and has no font name to rename.
